@@ -1085,6 +1085,30 @@
         opacity: 1;
         transform: translate(-50%, -50%) scale(1);
       }
+      #debug-overlay {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        margin: 0;
+        padding: 10px 14px;
+        background: rgba(10, 10, 14, 0.78);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        border: 1px solid var(--border-2);
+        border-radius: var(--r-2);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--text-0);
+        box-shadow: var(--shadow-1);
+        z-index: 39;
+        pointer-events: none;
+        white-space: pre;
+        max-width: 380px;
+      }
+      #debug-overlay.hidden {
+        display: none;
+      }
       #toast .accent {
         color: var(--accent);
         margin-right: 10px;
@@ -1278,6 +1302,7 @@
     <div id="toast"></div>
     <div id="film-title"></div>
     <div id="err"></div>
+    <pre id="debug-overlay" class="hidden"></pre>
 
     <script type="importmap">
       {
@@ -2170,6 +2195,106 @@
           setShuffle,
         };
       })();
+
+      // ===============================================================
+      // 6b2. AUDIO-REACTIVE ANALYSIS  (cheap FFT on music.audio)
+      // ===============================================================
+      // Exposes audioReact.energy (low-band RMS, 0..1) and audioReact.onset
+      // (one-frame pulse on a detected transient). Consumed by the cinematic
+      // director: energy scales bloom breathing amp; onset accelerates
+      // mood/accent cooldown countdowns so beats land near director fires.
+      const audioReact = (() => {
+        let ctx = null,
+          analyser = null,
+          sourceNode = null,
+          freqBuf = null,
+          prevFreqs = null;
+        let fluxMean = 0,
+          refractory = 0;
+        let energy = 0,
+          onset = false;
+
+        function ensure() {
+          if (ctx) {
+            if (ctx.state === "suspended") ctx.resume().catch(() => {});
+            return;
+          }
+          try {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return;
+            ctx = new AC();
+            sourceNode = ctx.createMediaElementSource(music.audio);
+            analyser = ctx.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = 0.3;
+            sourceNode.connect(analyser);
+            analyser.connect(ctx.destination);
+            freqBuf = new Uint8Array(analyser.frequencyBinCount);
+            prevFreqs = new Uint8Array(analyser.frequencyBinCount);
+          } catch (_) {
+            // createMediaElementSource can throw (e.g., tainted CORS, or
+            // already-connected on a hot reload). Fall back to silence —
+            // the director just gets energy=0 / onset=false forever.
+            ctx = null;
+            analyser = null;
+            sourceNode = null;
+          }
+        }
+
+        function tick(realDt) {
+          onset = false;
+          if (!analyser) {
+            energy = 0;
+            return;
+          }
+          analyser.getByteFrequencyData(freqBuf);
+
+          // Low-band RMS (bins 1..8 ≈ 86–688 Hz at 44.1 kHz).
+          let sumSq = 0;
+          const loEnd = Math.min(8, freqBuf.length);
+          for (let i = 1; i < loEnd; i++) {
+            const v = freqBuf[i] / 255;
+            sumSq += v * v;
+          }
+          energy = Math.sqrt(sumSq / Math.max(1, loEnd - 1));
+
+          // Spectral flux across the full band (sum of positive deltas).
+          let flux = 0;
+          for (let i = 0; i < freqBuf.length; i++) {
+            const d = freqBuf[i] - prevFreqs[i];
+            if (d > 0) flux += d;
+            prevFreqs[i] = freqBuf[i];
+          }
+          flux /= freqBuf.length; // normalize to 0..255-ish per bin
+
+          // Running mean — EMA with short memory.
+          fluxMean = fluxMean * 0.92 + flux * 0.08;
+
+          if (refractory > 0) refractory = Math.max(0, refractory - realDt);
+          // Peak if flux spikes above running mean and clears an absolute
+          // floor (silence has tiny but noisy flux we don't want to chase).
+          if (refractory === 0 && flux > fluxMean * 1.6 && flux > 2.0) {
+            onset = true;
+            refractory = 0.14; // ~140 ms — debounces double-trigger on a beat
+          }
+        }
+
+        return {
+          get energy() {
+            return energy;
+          },
+          get onset() {
+            return onset;
+          },
+          ensure,
+          tick,
+        };
+      })();
+
+      // Wire audio-react to actual playback. The `play` event only fires
+      // after a user gesture has satisfied the autoplay policy, so the
+      // AudioContext we create here is guaranteed to be allowed to run.
+      music.audio.addEventListener("play", () => audioReact.ensure());
 
       // ===============================================================
       // 6c. SFX PLAYER  (clone-and-play so rapid fires don't cut off)
@@ -6901,6 +7026,7 @@
               ["Esc", "Release follow"],
               ["O", "Toggle auto-orbit"],
               ["D", "Toggle drift"],
+              ["Shift+D", "Director debug overlay"],
             ],
           },
           {
@@ -8314,6 +8440,7 @@
         move: null, // { type, duration, elapsed, startPos, endPos, ... }
         moveCooldown: 0,
         moveHistory: [],
+        rejectedMoves: 0, // cumulative framing-check rejections (for §12 overlay)
 
         // Mood-shift scheduler (Module 3)
         mood: null, // { type, duration, elapsed, from?, to? }
@@ -8323,6 +8450,68 @@
         accent: null,
         accentCooldown: 10,
       };
+
+      // --- Director state persistence (crash recovery) ---
+      // Stamps a small snapshot to localStorage once per transition so a
+      // stream restart doesn't show the same palette it just ran for half
+      // an hour, and so breathing phases don't hard-reset.
+      const DIRECTOR_STORAGE_KEY = "universe-director-v1";
+      function saveDirectorState() {
+        try {
+          const payload = {
+            v: 1,
+            flavour: director.flavour,
+            pace: director.pace,
+            recentScenes: director.recentScenes,
+            recentPalettes: director.recentPalettes,
+            recentChannels: director.recentChannels,
+            recentCollisionScenarios: director.recentCollisionScenarios,
+            phases: director.phases,
+            breathT: director.breathT,
+          };
+          localStorage.setItem(DIRECTOR_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_) {
+          /* quota exceeded or storage disabled — non-fatal */
+        }
+      }
+      function loadDirectorState() {
+        try {
+          const raw = localStorage.getItem(DIRECTOR_STORAGE_KEY);
+          if (!raw) return;
+          const p = JSON.parse(raw);
+          if (!p || p.v !== 1) return;
+          if (typeof p.flavour === "string" && FLAVOURS[p.flavour])
+            director.flavour = p.flavour;
+          if (typeof p.pace === "string" && PACE_MULT[p.pace] != null)
+            director.pace = p.pace;
+          if (Array.isArray(p.recentScenes))
+            director.recentScenes = p.recentScenes.filter(
+              (s) => typeof s === "string",
+            );
+          if (Array.isArray(p.recentPalettes))
+            director.recentPalettes = p.recentPalettes.filter(
+              (s) => typeof s === "string",
+            );
+          if (Array.isArray(p.recentChannels))
+            director.recentChannels = p.recentChannels.filter(
+              (s) => typeof s === "string",
+            );
+          if (Array.isArray(p.recentCollisionScenarios))
+            director.recentCollisionScenarios =
+              p.recentCollisionScenarios.filter((s) => typeof s === "string");
+          if (p.phases && typeof p.phases === "object") {
+            for (const k of Object.keys(director.phases)) {
+              const v = p.phases[k];
+              if (typeof v === "number" && isFinite(v)) director.phases[k] = v;
+            }
+          }
+          if (typeof p.breathT === "number" && isFinite(p.breathT))
+            director.breathT = p.breathT;
+        } catch (_) {
+          /* malformed storage — keep defaults */
+        }
+      }
+      loadDirectorState();
 
       const PACE_ACCENT_MUL = { slow: 0.5, normal: 1.0, restless: 2.0 };
       const MOVE_TYPES = [
@@ -8484,10 +8673,14 @@
         };
         const pm = amp.periodMul || 1;
 
-        // Bloom: two sines at irrational ratio (55s + 39.7s), ±8% · flavour amp
+        // Bloom: two sines at irrational ratio (55s + 39.7s), ±8% · flavour amp.
+        // Low-band audio energy further scales the amp so bass swells read
+        // as breathing, not as a separate visual track.
+        const energyBoost = 1 + 0.7 * (audioReact.energy || 0);
         const bOsc =
           0.08 *
           (amp.bloom ?? 1) *
+          energyBoost *
           (Math.sin((TAU * t) / (55.0 * pm) + p.bloom1) * 0.65 +
             Math.sin((TAU * t) / (39.7 * pm) + p.bloom2) * 0.35);
         bloom.strength = b.bloom * (1 + bOsc);
@@ -8551,6 +8744,7 @@
         director.stateTimer = 0;
         director.transitionDeadline = (2 * opts.durationMs) / 1000;
         sfx.play("transition");
+        saveDirectorState();
       }
       function directorTick(realDt) {
         if (!director.enabled) return;
@@ -8636,6 +8830,60 @@
         }
       }
 
+      // --- §12 Debug overlay (Shift+D) ------------------------------------
+      let _debugOverlayVisible = false;
+      function toggleDebugOverlay() {
+        _debugOverlayVisible = !_debugOverlayVisible;
+        const el = $("#debug-overlay");
+        if (el) el.classList.toggle("hidden", !_debugOverlayVisible);
+        if (_debugOverlayVisible) updateDebugOverlay();
+      }
+      function _fmtSecs(s) {
+        if (!isFinite(s)) return "—";
+        if (s < 0) s = 0;
+        return s.toFixed(1) + "s";
+      }
+      function _fmtList(arr, n) {
+        if (!arr || arr.length === 0) return "—";
+        return arr.slice(0, n).join(" ← ");
+      }
+      function updateDebugOverlay() {
+        if (!_debugOverlayVisible) return;
+        const el = $("#debug-overlay");
+        if (!el) return;
+        const d = director;
+        const dwellLeft = Math.max(0, d.dwellDuration - d.stateTimer);
+        const txLeft =
+          d.state === "TRANSITION"
+            ? Math.max(0, d.transitionDeadline - d.stateTimer)
+            : null;
+        const mv = d.move;
+        const moveLine = mv
+          ? `${mv.type} ${(mv.elapsed || 0).toFixed(1)}/${(mv.duration || 0).toFixed(1)}s`
+          : `— (next in ${_fmtSecs(d.moveCooldown)})`;
+        const moodLine = d.mood
+          ? `${d.mood.type || "?"} active`
+          : `— (next in ${_fmtSecs(d.moodCooldown)})`;
+        const accentLine = d.accent
+          ? `${d.accent.type || "?"} active`
+          : `— (next in ${_fmtSecs(d.accentCooldown)})`;
+        el.textContent =
+          `flavour   ${d.flavour}${d.enabled ? "" : "  (off)"}\n` +
+          `pace      ${d.pace}\n` +
+          `state     ${d.state}  t=${_fmtSecs(d.stateTimer)}\n` +
+          `dwell     ${_fmtSecs(dwellLeft)} left / ${_fmtSecs(d.dwellDuration)}\n` +
+          (txLeft != null ? `tx-deadln ${_fmtSecs(txLeft)} left\n` : "") +
+          `scene     ${currentSceneKey}\n` +
+          `recent.sc ${_fmtList(d.recentScenes, 3)}\n` +
+          `recent.pl ${_fmtList(d.recentPalettes, 3)}\n` +
+          `recent.ch ${_fmtList(d.recentChannels, 3)}\n` +
+          `move      ${moveLine}\n` +
+          `mood      ${moodLine}\n` +
+          `accent    ${accentLine}\n` +
+          `rejected  ${d.rejectedMoves}\n` +
+          `audio     e=${audioReact.energy.toFixed(2)} ${audioReact.onset ? "● onset" : ""}`;
+      }
+
       let _toastTimer = null;
       function showToast(accent, body) {
         const t = $("#toast");
@@ -8649,6 +8897,7 @@
         const i = PACE_ORDER.indexOf(director.pace);
         director.pace = PACE_ORDER[(i + 1) % PACE_ORDER.length];
         showToast("Pace", director.pace);
+        saveDirectorState();
         if (activePanel === "camera") buildPanel("camera");
       }
       function setCinematicFlavour(name) {
@@ -8664,6 +8913,7 @@
         }
         showToast("Flavour", currentFlavour().label);
         reflectCinematicOnHud();
+        saveDirectorState();
         if (activePanel === "camera") buildPanel("camera");
       }
       function cycleCinematicFlavour() {
@@ -8679,7 +8929,91 @@
       }
 
       // ------- Module 1: camera move repertoire ------------------------
+
+      // Framing sanity: reject moves whose end pose doesn't actually contain
+      // the scene. Cheap — at most 24 body projections through one scratch
+      // camera per rejected candidate, zero allocations per call.
+      const _framingCam = new THREE.PerspectiveCamera();
+      const _framingVec = new THREE.Vector3();
+      function sampleKeyBodyIndices(limit = 24) {
+        const n = Math.min(state.count, 128);
+        if (n === 0) return [];
+        const pairs = [];
+        for (let i = 0; i < n; i++) {
+          const m = state.positions[i * 4 + 3];
+          if (m > 0) pairs.push([i, m]);
+        }
+        pairs.sort((a, b) => b[1] - a[1]);
+        const out = new Array(Math.min(limit, pairs.length));
+        for (let i = 0; i < out.length; i++) out[i] = pairs[i][0];
+        return out;
+      }
+      function framesMajorityOfBodies(endPos, endTgt, endFov) {
+        const idx = sampleKeyBodyIndices();
+        if (idx.length === 0) return true; // empty scene — nothing to frame
+        const tmp = _framingCam;
+        tmp.position.copy(endPos);
+        tmp.fov = endFov;
+        tmp.aspect = innerWidth / Math.max(1, innerHeight);
+        tmp.near = camera.near;
+        tmp.far = camera.far;
+        tmp.up.copy(camera.up);
+        tmp.lookAt(endTgt);
+        tmp.updateMatrixWorld(true);
+        tmp.updateProjectionMatrix();
+        const v = _framingVec;
+        let hit = 0;
+        for (let k = 0; k < idx.length; k++) {
+          const i = idx[k];
+          v.set(
+            state.positions[i * 4 + 0],
+            state.positions[i * 4 + 1],
+            state.positions[i * 4 + 2],
+          );
+          v.project(tmp);
+          // Accept if inside the central 60% rect and in front of the camera.
+          // After .project(), points behind the camera wrap to |z| > 1.
+          if (
+            Math.abs(v.x) < 0.6 &&
+            Math.abs(v.y) < 0.6 &&
+            v.z > -1 &&
+            v.z < 1
+          ) {
+            hit++;
+          }
+        }
+        return hit / idx.length >= 0.3;
+      }
+      function framingOkForMove(mv) {
+        switch (mv.type) {
+          case "pan":
+            return framesMajorityOfBodies(mv.endPos, mv.endTgt, camera.fov);
+          case "dolly":
+          case "tilt":
+            return framesMajorityOfBodies(
+              mv.endPos,
+              controls.target,
+              camera.fov,
+            );
+          default:
+            // orbit / counter always look at controls.target; fov / hold don't
+            // move — all safe by construction.
+            return true;
+        }
+      }
+
       function pickCameraMove() {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const mv = _pickCameraMoveOnce();
+          if (framingOkForMove(mv)) return mv;
+          director.rejectedMoves++;
+        }
+        // All three attempts failed — settle for a hold; never freezes the
+        // director, and the next dwell tick will try again.
+        return { type: "hold", duration: 3 + Math.random() * 5, elapsed: 0 };
+      }
+
+      function _pickCameraMoveOnce() {
         const flav = currentFlavour();
         const flavMoves = flav.moves || MOVE_TYPES;
         const bannedRecent = new Set(director.moveHistory.slice(-2));
@@ -8943,7 +9277,8 @@
       function tickMood(realDt) {
         if (!director.mood) {
           if (director.moodCooldown > 0) {
-            director.moodCooldown -= realDt;
+            // Onset accelerates the clock so the next mood lands near a beat.
+            director.moodCooldown -= realDt * (audioReact.onset ? 2.5 : 1);
             return;
           }
           director.mood = pickMood();
@@ -9062,7 +9397,8 @@
       function tickAccent(realDt) {
         if (!director.accent) {
           if (director.accentCooldown > 0) {
-            director.accentCooldown -= realDt;
+            // Onset accelerates the clock so accents land near a beat.
+            director.accentCooldown -= realDt * (audioReact.onset ? 2.5 : 1);
             return;
           }
           const flav = currentFlavour();
@@ -12054,8 +12390,12 @@
             break;
           case "d":
           case "D":
-            params.cameraDrift = !params.cameraDrift;
-            if (activePanel === "camera") buildPanel("camera");
+            if (shift) {
+              toggleDebugOverlay();
+            } else {
+              params.cameraDrift = !params.cameraDrift;
+              if (activePanel === "camera") buildPanel("camera");
+            }
             break;
           case "x":
           case "X":
@@ -12156,6 +12496,9 @@
         vigGrainPass.uniforms.uTime.value = now * 0.001;
         updateLensProjection();
 
+        // Pull FFT first so energy/onset are fresh for directorTick.
+        audioReact.tick(realDt);
+
         // Priority: movie > follow-cam > director + drift.
         if (movie.active) {
           movieTick(realDt);
@@ -12169,6 +12512,8 @@
         updateSolarSystem(realDt);
         controls.update();
         composer.render();
+
+        if (_debugOverlayVisible) updateDebugOverlay();
 
         // Periodic HUD + stats (throttled)
         statsAccum += realDt;
