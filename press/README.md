@@ -50,7 +50,7 @@ Examples:
 
 Everything in this folder is **CC BY 4.0**. Use it in articles, posts,
 videos, mood boards, presentations. Attribution: "Giverny Phos by
-@unrealape, givernyphos.app."
+@unrealape, six-windows-tym8.vercel.app/work/giverny-phos."
 
 ## Contact
 

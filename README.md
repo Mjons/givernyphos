@@ -6,7 +6,7 @@
 
 **Where celestial mechanics meet impressionist art.**
 
-[**Open the live page →**](https://givernyphos.app)
+[**Open the live page →**](https://six-windows-tym8.vercel.app/work/giverny-phos)
 
 </div>
 
@@ -33,8 +33,8 @@ own soundtrack. **One HTML file. No install. Works in your browser.**
 
 Two ways, both 10 seconds.
 
-**Hosted:** [givernyphos.app](https://givernyphos.app). Same `index.html`
-that lives in this repo, served from GitHub Pages.
+**Hosted:** [six-windows-tym8.vercel.app/work/giverny-phos](https://six-windows-tym8.vercel.app/work/giverny-phos).
+Same `index.html` that lives in this repo.
 
 **Local:**
 

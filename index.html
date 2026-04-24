@@ -1982,65 +1982,66 @@
       // 6b. MUSIC PLAYER  (SSI tracks, HTML5 Audio)
       // ===============================================================
       const TRACKS = [
+        { title: "Adjoining Room", file: "ssi_tracks/Adjoining Room.mp3" },
+        { title: "After the Bowl", file: "ssi_tracks/After the Bowl.mp3" },
+        { title: "Almost Hum", file: "ssi_tracks/Almost Hum.mp3" },
+        { title: "Before the Cloth", file: "ssi_tracks/Before the Cloth.mp3" },
+        {
+          title: "Between the Stars",
+          file: "ssi_tracks/Between the Stars.mp3",
+        },
         { title: "Bough Bend", file: "ssi_tracks/Bough-Bend.mp3" },
+        { title: "Cathedral, Small", file: "ssi_tracks/Cathedral, Small.mp3" },
+        { title: "Chapel Stone", file: "ssi_tracks/Chapel Stone.mp3" },
+        { title: "Day's Rim", file: "ssi_tracks/Day's Rim.mp3" },
+        { title: "Drift", file: "ssi_tracks/Drift.mp3" },
+        { title: "Eddy", file: "ssi_tracks/Eddy.mp3" },
+        { title: "Filament", file: "ssi_tracks/Filament.mp3" },
         { title: "First Kindling", file: "ssi_tracks/First Kindling.mp3" },
+        { title: "Gathered", file: "ssi_tracks/Gathered.mp3" },
+        { title: "Hairline", file: "ssi_tracks/Hairline.mp3" },
+        { title: "Held In", file: "ssi_tracks/Held In.mp3" },
+        { title: "Interior", file: "ssi_tracks/Interior.mp3" },
+        { title: "Inwards", file: "ssi_tracks/Inwards.mp3" },
         { title: "Lamplighter", file: "ssi_tracks/Lamplighter.mp3" },
+        { title: "Lid Closing", file: "ssi_tracks/Lid Closing.mp3" },
+        { title: "Lid Settling", file: "ssi_tracks/Lid Settling.mp3" },
+        { title: "Limb Yield", file: "ssi_tracks/Limb Yield.mp3" },
+        { title: "Long Exhale", file: "ssi_tracks/Long Exhale.mp3" },
         { title: "Long Shadow", file: "ssi_tracks/Long Shadow.mp3" },
+        { title: "Longer Shadow", file: "ssi_tracks/Longer Shadow.mp3" },
+        { title: "Muffled Tick", file: "ssi_tracks/Muffled Tick.mp3" },
+        { title: "One Line", file: "ssi_tracks/One Line.mp3" },
+        {
+          title: "Past the Threshold",
+          file: "ssi_tracks/Past the Threshold.mp3",
+        },
+        { title: "Quiet Drone", file: "ssi_tracks/Quiet Drone.mp3" },
+        { title: "Quiet Front", file: "ssi_tracks/Quiet Front.mp3" },
         { title: "Slow Weather", file: "ssi_tracks/Slow Weather.mp3" },
         { title: "Small Fault", file: "ssi_tracks/Small Fault.mp3" },
         { title: "The Edge of Day", file: "ssi_tracks/The Edge of Day.mp3" },
+        { title: "The Hold", file: "ssi_tracks/The Hold.mp3" },
+        { title: "The Lip", file: "ssi_tracks/The Lip.mp3" },
+        { title: "The Pair", file: "ssi_tracks/The Pair.mp3" },
+        { title: "The Rim", file: "ssi_tracks/The Rim.mp3" },
+        { title: "The Sisters", file: "ssi_tracks/The Sisters.mp3" },
         { title: "The Sustain", file: "ssi_tracks/The Sustain.mp3" },
+        { title: "Thread", file: "ssi_tracks/Thread.mp3" },
         { title: "Threshold Again", file: "ssi_tracks/Threshold Again.mp3" },
+        { title: "Tinder", file: "ssi_tracks/Tinder.mp3" },
+        { title: "Two Rooms", file: "ssi_tracks/Two Rooms.mp3" },
+        { title: "Wick", file: "ssi_tracks/Wick.mp3" },
+        { title: "Wrapped Tick", file: "ssi_tracks/Wrapped Tick.mp3" },
         {
           title: "Written Behind the Stars",
           file: "ssi_tracks/Written Behind the Stars.mp3",
-        },
-        {
-          title: "Bough Bend (Alternative)",
-          file: "ssi_tracks/Bough-Bend (Alternative).mp3",
-        },
-        {
-          title: "First Kindling (Alternative)",
-          file: "ssi_tracks/First Kindling (Alternative).mp3",
-        },
-        {
-          title: "Lamplighter (Alternative)",
-          file: "ssi_tracks/Lamplighter (Alternative).mp3",
-        },
-        {
-          title: "Long Shadow (Alternative)",
-          file: "ssi_tracks/Long Shadow (Alternative).mp3",
-        },
-        {
-          title: "Slow Weather (Alternative)",
-          file: "ssi_tracks/Slow Weather (Alternative).mp3",
-        },
-        {
-          title: "Small Fault (Alternative)",
-          file: "ssi_tracks/Small Fault (Alternative).mp3",
-        },
-        {
-          title: "The Edge of Day (Alternative)",
-          file: "ssi_tracks/The Edge of Day (Alternative).mp3",
-        },
-        {
-          title: "The Sustain (Alternative)",
-          file: "ssi_tracks/The Sustain (Alternative).mp3",
-        },
-        {
-          title: "Threshold Again (Alternative)",
-          file: "ssi_tracks/Threshold Again (Alternative).mp3",
-        },
-        {
-          title: "Written Behind the Stars (Alternative)",
-          file: "ssi_tracks/Written Behind the Stars (Alternative).mp3",
         },
       ];
 
       const music = (() => {
         const audio = new Audio();
         audio.preload = "metadata";
-        audio.crossOrigin = "anonymous";
         const state = {
           index: 0,
           shuffle: true,
@@ -2167,6 +2168,65 @@
           setVolume,
           seek,
           setShuffle,
+        };
+      })();
+
+      // ===============================================================
+      // 6c. SFX PLAYER  (clone-and-play so rapid fires don't cut off)
+      // ===============================================================
+      // Event mapping (see CINEMATIC_MODES.md §observability):
+      //   transition — cinematic scene transition starts
+      //   accent     — director fires a physics accent
+      //   lock       — follow-cam attaches to a body
+      //   click      — export PNG/JSON
+      const SFX_FILES = {
+        transition: "sfx/transition.mp3",
+        accent: "sfx/accent.mp3",
+        lock: "sfx/lock.mp3",
+        click: "sfx/click.mp3",
+      };
+      const sfx = (() => {
+        const templates = {};
+        for (const k of Object.keys(SFX_FILES)) {
+          const a = new Audio();
+          a.preload = "auto";
+          a.src = SFX_FILES[k];
+          templates[k] = a;
+        }
+        const savedVol = parseFloat(localStorage.getItem("universe-sfx-vol"));
+        const savedEn = localStorage.getItem("universe-sfx-en");
+        const state = {
+          volume: isFinite(savedVol) ? savedVol : 0.3,
+          enabled: savedEn === null ? true : savedEn === "1",
+        };
+        function play(name) {
+          if (!state.enabled) return;
+          if (document.hidden) return;
+          const tpl = templates[name];
+          if (!tpl) return;
+          const n = tpl.cloneNode();
+          n.volume = state.volume;
+          const p = n.play();
+          if (p && p.catch) p.catch(() => {});
+        }
+        function setVolume(v) {
+          state.volume = Math.max(0, Math.min(1, v));
+          localStorage.setItem("universe-sfx-vol", String(state.volume));
+        }
+        function setEnabled(e) {
+          state.enabled = !!e;
+          localStorage.setItem("universe-sfx-en", state.enabled ? "1" : "0");
+        }
+        return {
+          play,
+          setVolume,
+          setEnabled,
+          get volume() {
+            return state.volume;
+          },
+          get enabled() {
+            return state.enabled;
+          },
         };
       })();
 
@@ -5966,10 +6026,31 @@
           stateRow.appendChild(v);
           motionSec.appendChild(stateRow);
         }
+        // --- SFX controls ---
+        const sfxT = Toggle({
+          label: "Sound effects",
+          hint: "Play subtle SFX on scene transitions, director accents, body follow, and exports. Shift+X toggles.",
+          get: () => sfx.enabled,
+          set: (v) => sfx.setEnabled(v),
+        });
+        motionSec.appendChild(sfxT.el);
+        const sfxS = Slider({
+          label: "SFX volume",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          get: () => sfx.volume,
+          set: (v) => sfx.setVolume(v),
+          fmt: (v) => Math.round(v * 100) + "%",
+        });
+        motionSec.appendChild(sfxS.el);
+
         panelRefreshers.push(() => {
           orbT.refresh();
           drT.refresh();
           cineT.refresh();
+          sfxT.refresh();
+          sfxS.refresh();
         });
         motionSec.appendChild(
           ButtonRow([
@@ -6707,6 +6788,7 @@
           card.addEventListener("click", () => {
             closeSceneBrowser();
             applyScene(key);
+            sfx.play("transition");
           });
           grid.appendChild(card);
         }
@@ -6814,6 +6896,7 @@
               ["Ctrl+1 … 9", "Save current viewpoint"],
               ["click", "Follow body under cursor"],
               ["F", "Follow body near look-at"],
+              ["← / →", "Prev / next body (while following)"],
               ["Shift+F", "Release follow (or focus origin)"],
               ["Esc", "Release follow"],
               ["O", "Toggle auto-orbit"],
@@ -6832,8 +6915,11 @@
             ],
           },
           {
-            h: "Music",
-            rows: [["J", "Music panel"]],
+            h: "Sound",
+            rows: [
+              ["J", "Music panel"],
+              ["Shift+X", "Mute SFX"],
+            ],
           },
           {
             h: "Look",
@@ -7399,6 +7485,7 @@
         generateSolarSystem(pick.bodyIndex, kind);
         reflectHudFollow();
         showToast("Following", "#" + pick.bodyIndex);
+        sfx.play("lock");
       }
 
       function followCamRelease(reason) {
@@ -8203,6 +8290,7 @@
         state: "IDLE", // IDLE | DWELL | TRANSITION
         stateTimer: 0,
         dwellDuration: 60,
+        transitionDeadline: 0,
 
         // Anti-repeat rolling windows
         recentScenes: [],
@@ -8461,6 +8549,8 @@
         applyScene(next, opts);
         director.state = "TRANSITION";
         director.stateTimer = 0;
+        director.transitionDeadline = (2 * opts.durationMs) / 1000;
+        sfx.play("transition");
       }
       function directorTick(realDt) {
         if (!director.enabled) return;
@@ -8495,6 +8585,17 @@
           case "TRANSITION":
             if (!transitionRaf) {
               cineBeginDwell();
+            } else {
+              director.stateTimer += realDt;
+              if (director.stateTimer > director.transitionDeadline) {
+                console.warn(
+                  `[director] transition watchdog fired: ${director.stateTimer.toFixed(1)}s > ${director.transitionDeadline.toFixed(1)}s deadline; recovering to DWELL`,
+                );
+                cancelAnimationFrame(transitionRaf);
+                transitionRaf = null;
+                restoreBaseline();
+                cineBeginDwell();
+              }
             }
             break;
         }
@@ -8969,6 +9070,7 @@
           // Try probabilistic fire — flavour sets the base chance
           if (Math.random() < (flav.accentFireChance || 0.35) * paceMul) {
             director.accent = pickAccent();
+            if (director.accent) sfx.play("accent");
           }
           director.accentCooldown = rangeSample(flav.accentCooldown);
           return;
@@ -10295,6 +10397,7 @@
         a.href = url;
         a.download = `universe_${currentSceneKey}_${Date.now()}.png`;
         a.click();
+        sfx.play("click");
       }
 
       function exportJSON() {
@@ -10323,6 +10426,7 @@
         a.href = URL.createObjectURL(blob);
         a.download = `universe_${currentSceneKey}_${Date.now()}.json`;
         a.click();
+        sfx.play("click");
       }
       function importPrompt() {
         const inp = document.createElement("input");
@@ -11813,6 +11917,7 @@
           const idx = parseInt(key) - 1;
           if (idx < SCENE_HOTKEY_ORDER.length) {
             applyScene(SCENE_HOTKEY_ORDER[idx]);
+            sfx.play("transition");
             return;
           }
         }
@@ -11823,6 +11928,20 @@
             params.paused = !params.paused;
             updateHudFromScene();
             if (activePanel === "scenes") buildPanel("scenes");
+            break;
+          case "ArrowRight":
+          case "ArrowUp":
+            if (followCamActive()) {
+              e.preventDefault();
+              followCamStep(1);
+            }
+            break;
+          case "ArrowLeft":
+          case "ArrowDown":
+            if (followCamActive()) {
+              e.preventDefault();
+              followCamStep(-1);
+            }
             break;
           case ".":
             stepOnce = true;
@@ -11858,6 +11977,7 @@
           case "r":
           case "R":
             applyScene(currentSceneKey, { immediate: true });
+            sfx.play("transition");
             break;
           case "g":
           case "G":
@@ -11939,9 +12059,15 @@
             break;
           case "x":
           case "X":
-            params.showHalo = !params.showHalo;
-            pointMat.uniforms.uShowHalo.value = params.showHalo ? 1 : 0;
-            if (activePanel === "settings") buildPanel("settings");
+            if (shift) {
+              sfx.setEnabled(!sfx.enabled);
+              showToast("SFX", sfx.enabled ? "on" : "off");
+              if (activePanel === "camera") buildPanel("camera");
+            } else {
+              params.showHalo = !params.showHalo;
+              pointMat.uniforms.uShowHalo.value = params.showHalo ? 1 : 0;
+              if (activePanel === "settings") buildPanel("settings");
+            }
             break;
           case "p":
             if (shift) takeScreenshot(4);
