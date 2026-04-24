@@ -2163,8 +2163,17 @@
         audio.addEventListener("play", reflectRail);
         audio.addEventListener("pause", reflectRail);
 
-        // Pre-load current track so the progress bar has a duration on open
-        load(state.index, false);
+        // Try autoplay on boot. Browsers may block until the first user
+        // gesture — if so, unlock on the first pointerdown/keydown.
+        load(state.index, true);
+        const unlockAudio = () => {
+          if (audio.paused) {
+            const p = audio.play();
+            if (p && p.catch) p.catch(() => {});
+          }
+        };
+        window.addEventListener("pointerdown", unlockAudio, { once: true });
+        window.addEventListener("keydown", unlockAudio, { once: true });
 
         return {
           audio,
@@ -7027,6 +7036,7 @@
               ["O", "Toggle auto-orbit"],
               ["D", "Toggle drift"],
               ["Shift+D", "Director debug overlay"],
+              ["Ctrl+Shift+D", "Dump director telemetry to console"],
             ],
           },
           {
@@ -7252,6 +7262,11 @@
         // to a per-frame delta the eye can't resolve.
         const camDt = Math.min(dt, 0.05);
 
+        // User just grabbed control: release any director-owned follow
+        // immediately so the user's input isn't fighting the follow-cam.
+        if (!_prevUserActive && userActive && director.followOwned) {
+          cancelDirectorFollow("user input");
+        }
         // On the edge from user-active back to idle, any in-flight move is
         // stale: its startPos was captured 8+ seconds ago and the camera
         // has since moved under user control. Resuming would snap the
@@ -7260,13 +7275,22 @@
         if (_prevUserActive && !userActive && director.move) {
           director.move = null;
           director.moveCooldown = Math.max(director.moveCooldown, 1.2);
+          director.wakeT = 6.0; // §11 wake ramp — scale amplitudes up smoothly
         }
         _prevUserActive = userActive;
+        // Decay the wake window. tickCameraMove reads director.wakeT to
+        // scale the amplitude of position / rate / FOV writes.
+        if (director.wakeT > 0) {
+          director.wakeT = Math.max(0, director.wakeT - camDt);
+        }
 
         // Cinematic mode: camera move scheduler drives composition; drift is overlay.
         if (director.enabled && director.state === "DWELL" && !userActive) {
           tickCameraMove(camDt);
-          applyDrift(camDt);
+          // Follow-cam owns the camera during a follow move — its own
+          // smoothing is the "drift" for that move. Layering the director's
+          // drift on top would fight it.
+          if (!director.followOwned) applyDrift(camDt);
           return;
         }
 
@@ -8375,6 +8399,15 @@
             tags.calm ? 1.3 : tags.energetic ? 0.9 : 1.0,
           breathing: { bloom: 1, exp: 1, ca: 1, fov: 1, periodMul: 1 },
           transitionDurationMul: 1.0,
+          pulseCooldown: [60, 120],
+          pulseFireChance: 0.35,
+          pulseWeights: {
+            "trail-smear": 25,
+            "doppler-bloom": 15,
+            "time-dip": 15,
+            "lens-warp": 10,
+            "time-push": 5,
+          },
         },
         pulse: {
           label: "pulse",
@@ -8388,6 +8421,15 @@
           sceneFilter: (tags) => !!tags.energetic,
           breathing: { bloom: 1, exp: 1, ca: 0, fov: 0, periodMul: 0.75 },
           transitionDurationMul: 0.55,
+          pulseCooldown: [20, 45],
+          pulseFireChance: 0.7,
+          pulseWeights: {
+            "time-push": 30,
+            "doppler-bloom": 25,
+            "lens-warp": 20,
+            "trail-smear": 10,
+            "time-dip": 5,
+          },
         },
         "long-shadow": {
           label: "long shadow",
@@ -8401,6 +8443,14 @@
           sceneFilter: (tags) => !!tags.calm,
           breathing: { bloom: 0, exp: 0.6, ca: 0, fov: 0.6, periodMul: 1.6 },
           transitionDurationMul: 1.3,
+          pulseCooldown: [180, 360],
+          pulseFireChance: 0.2,
+          pulseWeights: {
+            "trail-smear": 35,
+            "time-dip": 30,
+            "doppler-bloom": 10,
+            "lens-warp": 5,
+          },
         },
         oracle: {
           label: "oracle",
@@ -8414,6 +8464,15 @@
           sceneFilter: (tags) => !!tags.event,
           breathing: { bloom: 1, exp: 1, ca: 1, fov: 1, periodMul: 1 },
           transitionDurationMul: 1.0,
+          pulseCooldown: [45, 90],
+          pulseFireChance: 0.6,
+          pulseWeights: {
+            "time-dip": 30,
+            "lens-warp": 25,
+            "trail-smear": 20,
+            "doppler-bloom": 15,
+            "time-push": 10,
+          },
         },
       };
       const FLAVOUR_ORDER = ["drift", "pulse", "long-shadow", "oracle"];
@@ -8445,13 +8504,22 @@
 
         // Breathing clock (preserved across transitions)
         breathT: 0,
-        phases: {
-          bloom1: Math.random() * 6.2831853,
-          bloom2: Math.random() * 6.2831853,
-          exp: Math.random() * 6.2831853,
-          ca: Math.random() * 6.2831853,
-          fov: Math.random() * 6.2831853,
-        },
+        // §10: derive all five phases from a single organism seed, spaced
+        // by 2π/5 so any two peaks are ≥72° apart. Stops the four sines
+        // from occasionally aligning into a single constructive peak that
+        // reads as a visual glitch rather than a breath. Still random per
+        // session (via the seed) but never coincident.
+        phases: (() => {
+          const seed = Math.random() * 6.2831853;
+          const step = 6.2831853 / 5;
+          return {
+            bloom1: seed,
+            bloom2: seed + step,
+            exp: seed + 2 * step,
+            ca: seed + 3 * step,
+            fov: seed + 4 * step,
+          };
+        })(),
         // Baselines captured at transition end — breathing modulates around these
         baseline: null,
 
@@ -8460,6 +8528,7 @@
         moveCooldown: 0,
         moveHistory: [],
         rejectedMoves: 0, // cumulative framing-check rejections (for §12 overlay)
+        followOwned: false, // true while a "follow" move is driving the follow-cam
 
         // Mood-shift scheduler (Module 3)
         mood: null, // { type, duration, elapsed, from?, to? }
@@ -8468,17 +8537,43 @@
         // Physics accent scheduler (Module 4)
         accent: null,
         accentCooldown: 10,
+
+        // Parameter-pulse scheduler (Module 5): time/trail/doppler/lens
+        // excursions layered on top of physics accents.
+        pulse: null,
+        pulseCooldown: 20,
+
+        // Scene-energy gate (§4): rolling window of kinetic-energy samples
+        // so we can detect when a scene has reached equilibrium and
+        // short-circuit a long dwell.
+        keSamples: [],
+        keSampleClock: 0,
+        quiesceEvents: 0,
+
+        // §11: wake curve after user release. wakeT starts at 6 seconds
+        // on the user-active → idle edge and decays to 0. Move amplitudes
+        // scale by smoothstep(1 - wakeT/6) so the director ramps up rather
+        // than pouncing the instant the idle timer flips.
+        wakeT: 0,
+
+        // §14: rehearsal mode — set by ?rehearse URL param for quick
+        // flavour auditioning. 10× dwell / transition speed so a full
+        // cycle runs in ~90 seconds instead of 10+ minutes.
+        rehearse: false,
       };
 
       // --- Director state persistence (crash recovery) ---
       // Stamps a small snapshot to localStorage once per transition so a
       // stream restart doesn't show the same palette it just ran for half
       // an hour, and so breathing phases don't hard-reset.
-      const DIRECTOR_STORAGE_KEY = "universe-director-v1";
+      // v2: phases are derived from a single staggered seed (§10). Old
+      // v1 snapshots had independent random phases and would reintroduce
+      // the coincident-peak glitch if restored — skip them on load.
+      const DIRECTOR_STORAGE_KEY = "universe-director-v2";
       function saveDirectorState() {
         try {
           const payload = {
-            v: 1,
+            v: 2,
             flavour: director.flavour,
             pace: director.pace,
             recentScenes: director.recentScenes,
@@ -8498,7 +8593,7 @@
           const raw = localStorage.getItem(DIRECTOR_STORAGE_KEY);
           if (!raw) return;
           const p = JSON.parse(raw);
-          if (!p || p.v !== 1) return;
+          if (!p || p.v !== 2) return;
           if (typeof p.flavour === "string" && FLAVOURS[p.flavour])
             director.flavour = p.flavour;
           if (typeof p.pace === "string" && PACE_MULT[p.pace] != null)
@@ -8532,6 +8627,59 @@
       }
       loadDirectorState();
 
+      // §14: rehearsal mode boot. ?rehearse → enable at current flavour.
+      // ?rehearse=oracle → force a specific flavour and enable. Handy
+      // when tuning flavour params: a full cycle runs in ~90 s.
+      (function bootRehearse() {
+        let qs;
+        try {
+          qs = new URLSearchParams(location.search);
+        } catch (_) {
+          return;
+        }
+        if (!qs.has("rehearse")) return;
+        director.rehearse = true;
+        const fk = qs.get("rehearse");
+        if (fk && FLAVOURS[fk]) director.flavour = fk;
+        // Auto-enable the director after the rest of the scene boots.
+        setTimeout(() => {
+          if (!director.enabled) toggleCinematic();
+        }, 500);
+      })();
+
+      // §13: ring-buffer telemetry. Dumpable on Ctrl+Shift+D. When a
+      // stream looks wrong at 3 AM this is the only artefact you have.
+      const DIRECTOR_LOG_SIZE = 200;
+      const DIRECTOR_LOG = new Array(DIRECTOR_LOG_SIZE);
+      let _logIdx = 0;
+      let _logCount = 0;
+      function dlog(kind, payload) {
+        DIRECTOR_LOG[_logIdx] = {
+          ts: +(performance.now() / 1000).toFixed(2),
+          kind,
+          ...payload,
+        };
+        _logIdx = (_logIdx + 1) % DIRECTOR_LOG_SIZE;
+        _logCount = Math.min(DIRECTOR_LOG_SIZE, _logCount + 1);
+      }
+      function dumpDirectorLog() {
+        // Rebuild in chronological order. _logIdx points at the NEXT
+        // write slot, so older entries precede it when the buffer is full.
+        const n = _logCount;
+        const start = _logCount === DIRECTOR_LOG_SIZE ? _logIdx : 0;
+        const out = [];
+        for (let i = 0; i < n; i++) {
+          out.push(DIRECTOR_LOG[(start + i) % DIRECTOR_LOG_SIZE]);
+        }
+        // eslint-disable-next-line no-console
+        console.groupCollapsed(`[director] telemetry — last ${n} events`);
+        // eslint-disable-next-line no-console
+        console.table(out);
+        // eslint-disable-next-line no-console
+        console.groupEnd();
+        return out;
+      }
+
       const PACE_ACCENT_MUL = { slow: 0.5, normal: 1.0, restless: 2.0 };
       const MOVE_TYPES = [
         "orbit",
@@ -8541,6 +8689,7 @@
         "tilt",
         "fov",
         "hold",
+        "follow",
       ];
       // Per-scene cinematic hints: { allowAccents, allowMoods, moveBias }
       // Defaults are permissive; scenes can opt out via SCENES[x].cinematic.
@@ -8556,21 +8705,34 @@
       function pickDwellSeconds() {
         // Flavour defines the base range; pace multiplies on top.
         // drift: 8–16 min · pulse: 45–90s · long shadow: 15–30 min · oracle: 6–10 min
-        return rangeSample(currentFlavour().dwellS) * paceFactor();
+        const d = rangeSample(currentFlavour().dwellS) * paceFactor();
+        return director.rehearse ? d * 0.1 : d;
       }
+      // §6: scale the anti-repeat window with the scene registry. The
+      // original `> 3` was sized for 8 scenes; with 16 it let palettes
+      // come back after only two scenes. Floor(N/3) keeps the "skip the
+      // last third" invariant, capped at 5 so tiny registries don't let
+      // the gate starve the picker.
+      const HISTORY_DEPTH = Math.min(
+        5,
+        Math.max(2, Math.floor(SCENE_ORDER.length / 3)),
+      );
       function recordHistory(key) {
         director.recentScenes.unshift(key);
-        if (director.recentScenes.length > 3) director.recentScenes.pop();
+        if (director.recentScenes.length > HISTORY_DEPTH)
+          director.recentScenes.pop();
         const sc = SCENES[key];
         if (sc) {
           director.recentPalettes.unshift(sc.palette);
-          if (director.recentPalettes.length > 3) director.recentPalettes.pop();
+          if (director.recentPalettes.length > HISTORY_DEPTH)
+            director.recentPalettes.pop();
           director.recentChannels.unshift(sc.channel);
-          if (director.recentChannels.length > 3) director.recentChannels.pop();
+          if (director.recentChannels.length > HISTORY_DEPTH)
+            director.recentChannels.pop();
         }
         if (key === "collision") {
           director.recentCollisionScenarios.unshift(collision.scenario);
-          if (director.recentCollisionScenarios.length > 3)
+          if (director.recentCollisionScenarios.length > HISTORY_DEPTH)
             director.recentCollisionScenarios.pop();
         }
       }
@@ -8620,28 +8782,52 @@
         if (ok.length === 0) ok = all.filter((n) => n !== collision.scenario);
         return ok[Math.floor(Math.random() * ok.length)];
       }
+      // §9: hand-crafted from→to overrides for the transitions that most
+      // benefit from bespoke grammar. Keys are `${fromKey}→${toKey}`. Falls
+      // through to flavour-weighted pick when no entry matches.
+      const SHOT_GRAMMAR = {
+        "collision→event-horizon": { flavour: "pushin", durationMul: 0.85 },
+        "birth→coma": { flavour: "pullback", durationMul: 1.35 },
+        "orrery→sagittarius": { flavour: "pullback", durationMul: 1.5 },
+        "sagittarius→event-horizon": { flavour: "pushin", durationMul: 1.0 },
+        "antennae→birth": { flavour: "dissolve", durationMul: 1.4 },
+        "horsehead→quiet-drift": { flavour: "pullback", durationMul: 1.2 },
+        "dust-storm→lattice": { flavour: "flare", durationMul: 0.7 },
+        "bullet-cluster→virgo-m87": { flavour: "pullback", durationMul: 1.4 },
+        "milky-way→coma": { flavour: "pullback", durationMul: 1.5 },
+        "event-horizon→stephans-quintet": {
+          flavour: "pushin",
+          durationMul: 1.0,
+        },
+      };
       function pickTransitionFlavour(fromKey, toKey) {
+        // Bespoke pair wins outright if the current flavour allows that
+        // style at all (respects e.g. long-shadow's "dissolve only" rule).
+        const bespoke = SHOT_GRAMMAR[`${fromKey}→${toKey}`];
         const flav = currentFlavour();
+        const bias = flav.transitionBias || {};
+        if (bespoke && bias[bespoke.flavour]) {
+          return { flavour: bespoke.flavour, durationMul: bespoke.durationMul };
+        }
         const intimate = new Set(["orrery", "event-horizon"]);
         const cosmic = new Set(["sagittarius", "quiet-drift", "dust-storm"]);
-        // Structural overrides first — they read as "right" regardless of flavour.
-        const bias = flav.transitionBias || {};
-        // Long-shadow explicitly says "dissolve only" — respect that.
+        // Structural overrides second — they read as "right" regardless
+        // of flavour (within what the flavour allows).
         const keys = Object.keys(bias);
-        if (keys.length === 1) return keys[0];
+        if (keys.length === 1) return { flavour: keys[0], durationMul: 1 };
         if (intimate.has(fromKey) && cosmic.has(toKey) && bias.pullback)
-          return "pullback";
+          return { flavour: "pullback", durationMul: 1 };
         if (cosmic.has(fromKey) && intimate.has(toKey) && bias.pushin)
-          return "pushin";
+          return { flavour: "pushin", durationMul: 1 };
         // Otherwise weighted pick from flavour grammar.
         let total = 0;
         for (const k of keys) total += bias[k];
         let r = Math.random() * total;
         for (const k of keys) {
           r -= bias[k];
-          if (r <= 0) return k;
+          if (r <= 0) return { flavour: k, durationMul: 1 };
         }
-        return "dissolve";
+        return { flavour: "dissolve", durationMul: 1 };
       }
 
       function captureBaseline() {
@@ -8736,21 +8922,38 @@
         director.moodCooldown = 0.45 * rangeSample(flav.moodCooldown);
         director.accent = null;
         director.accentCooldown = 0.55 * rangeSample(flav.accentCooldown);
+        // Fresh energy-gate window for the new scene.
+        director.keSamples = [];
+        director.keSampleClock = 0;
         captureBaseline();
       }
       function cineBeginTransition() {
+        // Any follow in flight ends with the scene — the body it was
+        // tracking may not exist in the next scene.
+        cancelDirectorFollow("scene transition");
+        // Snap any param-pulse back to baseline before the scene changes
+        // so the new scene inherits clean post-FX / speed values.
+        cancelPulse(true);
         const flav = currentFlavour();
         const next = pickNextScene(currentSceneKey);
         recordHistory(currentSceneKey);
-        const flavour = pickTransitionFlavour(currentSceneKey, next);
+        const { flavour, durationMul: pairMul } = pickTransitionFlavour(
+          currentSceneKey,
+          next,
+        );
         // If transitioning to collision, pick a different scenario
         const opts = { flavour };
-        // Flavour scales the transition duration (pulse = snappy, long-shadow = slow)
+        // Flavour scales the transition duration (pulse = snappy, long-shadow = slow).
+        // §9: bespoke from→to pairs can further stretch or squeeze duration.
         const baseDur =
           { dissolve: 3200, flare: 1600, pullback: 2400, pushin: 2400 }[
             flavour
           ] || 1600;
-        opts.durationMs = baseDur * (flav.transitionDurationMul || 1);
+        opts.durationMs =
+          baseDur *
+          (flav.transitionDurationMul || 1) *
+          (pairMul || 1) *
+          (director.rehearse ? 0.1 : 1);
         if (next === "collision") {
           const scen = pickCollisionScenario();
           applyCollisionScenarioRaw(scen);
@@ -8763,6 +8966,12 @@
         director.stateTimer = 0;
         director.transitionDeadline = (2 * opts.durationMs) / 1000;
         sfx.play("transition");
+        dlog("transition", {
+          from: currentSceneKey,
+          to: next,
+          flavour,
+          ms: Math.round(opts.durationMs),
+        });
         saveDirectorState();
       }
       function directorTick(realDt) {
@@ -8794,8 +9003,56 @@
             break;
           case "DWELL":
             director.stateTimer += dt;
-            tickMood(dt);
-            tickAccent(dt);
+            // §5: if the tab is hidden nobody is watching, so don't fire
+            // new moods/accents/pulses. We still tick stateTimer so the
+            // dwell completes on schedule — coming back to the tab just
+            // shouldn't surface a fresh mood cross-fade that already
+            // "happened" while hidden.
+            if (!document.hidden) {
+              tickMood(dt);
+              tickAccent(dt);
+              tickPulse(dt);
+            }
+            // §4: sample kinetic energy and short-circuit the dwell if
+            // the scene has flatlined. Once a second is plenty — stats.ke
+            // only refreshes on that cadence anyway.
+            director.keSampleClock += dt;
+            if (director.keSampleClock >= 1.0) {
+              director.keSampleClock = 0;
+              if (isFinite(stats.ke) && stats.ke > 0) {
+                director.keSamples.push(stats.ke);
+                if (director.keSamples.length > 20) director.keSamples.shift();
+              }
+            }
+            if (
+              director.keSamples.length >= 20 &&
+              director.stateTimer > 0.4 * director.dwellDuration
+            ) {
+              // Coefficient of variation is scale-free so the threshold
+              // means the same thing across scenes whose KE magnitudes
+              // can span orders of magnitude.
+              const s = director.keSamples;
+              let mean = 0;
+              for (const v of s) mean += v;
+              mean /= s.length;
+              let sq = 0;
+              for (const v of s) sq += (v - mean) * (v - mean);
+              const stddev = Math.sqrt(sq / s.length);
+              const cv = mean > 0 ? stddev / mean : 0;
+              const thresh = sceneCineCfg().minInterestVar ?? 0.02;
+              if (cv < thresh) {
+                console.info(
+                  `[director] scene-energy gate fired on ${currentSceneKey}: cv=${cv.toFixed(4)} < ${thresh}; cutting to transition`,
+                );
+                dlog("quiesce", {
+                  scene: currentSceneKey,
+                  cv: +cv.toFixed(4),
+                });
+                director.quiesceEvents++;
+                cineBeginTransition();
+                break;
+              }
+            }
             if (director.stateTimer >= director.dwellDuration) {
               cineBeginTransition();
             }
@@ -8809,6 +9066,10 @@
                 console.warn(
                   `[director] transition watchdog fired: ${director.stateTimer.toFixed(1)}s > ${director.transitionDeadline.toFixed(1)}s deadline; recovering to DWELL`,
                 );
+                dlog("watchdog", {
+                  stateTimer: +director.stateTimer.toFixed(1),
+                  deadline: +director.transitionDeadline.toFixed(1),
+                });
                 cancelAnimationFrame(transitionRaf);
                 transitionRaf = null;
                 restoreBaseline();
@@ -8819,6 +9080,10 @@
         }
       }
       function toggleCinematic() {
+        // Turning the director off while it's following? End that cleanly.
+        if (director.followOwned) cancelDirectorFollow("cinematic off");
+        // Same for an in-flight param pulse — snap back to baseline.
+        cancelPulse(true);
         director.enabled = !director.enabled;
         director.move = null;
         director.moveCooldown = 0;
@@ -8891,10 +9156,13 @@
         const accentLine = d.accent
           ? `${d.accent.type || "?"} active`
           : `— (next in ${_fmtSecs(d.accentCooldown)})`;
+        const pulseLine = d.pulse
+          ? `${d.pulse.name} ${(d.pulse.elapsed || 0).toFixed(1)}/${(d.pulse.duration || 0).toFixed(1)}s`
+          : `— (next in ${_fmtSecs(d.pulseCooldown)})`;
         el.textContent =
-          `flavour   ${d.flavour}${d.enabled ? "" : "  (off)"}\n` +
+          `flavour   ${d.flavour}${d.enabled ? "" : "  (off)"}${d.rehearse ? "  REHEARSAL 10×" : ""}\n` +
           `pace      ${d.pace}\n` +
-          `state     ${d.state}  t=${_fmtSecs(d.stateTimer)}\n` +
+          `state     ${d.state}  t=${_fmtSecs(d.stateTimer)}${d.wakeT > 0 ? `  wake=${_fmtSecs(d.wakeT)}` : ""}\n` +
           `dwell     ${_fmtSecs(dwellLeft)} left / ${_fmtSecs(d.dwellDuration)}\n` +
           (txLeft != null ? `tx-deadln ${_fmtSecs(txLeft)} left\n` : "") +
           `scene     ${currentSceneKey}\n` +
@@ -8904,7 +9172,8 @@
           `move      ${moveLine}\n` +
           `mood      ${moodLine}\n` +
           `accent    ${accentLine}\n` +
-          `rejected  ${d.rejectedMoves}\n` +
+          `pulse     ${pulseLine}\n` +
+          `rejected  ${d.rejectedMoves}  quiesce  ${d.quiesceEvents}\n` +
           `audio     e=${audioReact.energy.toFixed(2)} ${audioReact.onset ? "● onset" : ""}`;
       }
 
@@ -9020,10 +9289,47 @@
               camera.fov,
             );
           default:
-            // orbit / counter always look at controls.target; fov / hold don't
-            // move — all safe by construction.
+            // orbit / counter / follow always look at a body or at
+            // controls.target; fov / hold don't move. All safe by
+            // construction.
             return true;
         }
+      }
+
+      // Release any director-owned follow and clear the move. Safe to call
+      // unconditionally — no-op when no follow is in flight.
+      function cancelDirectorFollow(reason) {
+        if (!director.followOwned) return;
+        followCamRelease(reason || "director");
+        director.followOwned = false;
+        if (director.move && director.move.type === "follow") {
+          director.move = null;
+        }
+      }
+
+      // Picks a bright, well-placed body for the "follow" move. Prefers
+      // top-mass bodies that sit in the central shell of the current view
+      // (not too close — would whip the camera; not too far — would frame
+      // poorly). Returns -1 if nothing qualifies.
+      function pickFollowTarget() {
+        if (state.count === 0) return -1;
+        const cands = sampleKeyBodyIndices(32);
+        if (cands.length === 0) return -1;
+        const viewDist = camera.position.distanceTo(controls.target);
+        const minD2 = (viewDist * 0.15) ** 2;
+        const maxD2 = (viewDist * 2.5) ** 2;
+        const tx = controls.target.x,
+          ty = controls.target.y,
+          tz = controls.target.z;
+        for (const i of cands) {
+          const dx = state.positions[i * 4 + 0] - tx;
+          const dy = state.positions[i * 4 + 1] - ty;
+          const dz = state.positions[i * 4 + 2] - tz;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 >= minD2 && d2 <= maxD2) return i;
+        }
+        // No body in the sweet spot — fall back to the brightest.
+        return cands[0];
       }
 
       function pickCameraMove() {
@@ -9031,6 +9337,7 @@
           const mv = _pickCameraMoveOnce();
           if (framingOkForMove(mv)) return mv;
           director.rejectedMoves++;
+          dlog("move-rejected", { type: mv.type, attempt });
         }
         // All three attempts failed — settle for a hold; never freezes the
         // director, and the next dwell tick will try again.
@@ -9143,6 +9450,35 @@
               endFov: target,
             };
           }
+          case "follow": {
+            // Pick a bright body and chase it via the existing follow-cam.
+            // If no good target, fall back to hold rather than emitting a
+            // follow move that'll immediately bail. Also: don't attach
+            // during the first half of a wake ramp — the shader pulse /
+            // lock SFX would read as a jarring pounce right after release.
+            if (director.wakeT > 3) {
+              return {
+                type: "hold",
+                duration: 3 + Math.random() * 5,
+                elapsed: 0,
+              };
+            }
+            const bodyIdx = pickFollowTarget();
+            if (bodyIdx < 0) {
+              return {
+                type: "hold",
+                duration: 3 + Math.random() * 5,
+                elapsed: 0,
+              };
+            }
+            return {
+              type: "follow",
+              duration: 14 + Math.random() * 10, // 14–24 s
+              elapsed: 0,
+              bodyIdx,
+              attached: false,
+            };
+          }
           case "hold":
           default:
             return {
@@ -9163,14 +9499,54 @@
           return;
         }
         const mv = director.move;
+
+        // "follow" is a handoff to the existing follow-cam. We don't
+        // write the camera here — updateFollowCam does that every frame.
+        // Just manage the attach/release lifecycle and the elapsed timer.
+        if (mv.type === "follow") {
+          if (!mv.attached) {
+            if (!followCamAttachByIndex(mv.bodyIdx)) {
+              // Body went away between pick and attach. Cancel without
+              // recording history so we try a different move next tick.
+              director.move = null;
+              director.moveCooldown = 1.0;
+              director.rejectedMoves++;
+              return;
+            }
+            mv.attached = true;
+            director.followOwned = true;
+          }
+          mv.elapsed += realDt;
+          if (mv.elapsed >= mv.duration) {
+            followCamRelease("director");
+            director.followOwned = false;
+            director.moveHistory.push("follow");
+            if (director.moveHistory.length > 4) director.moveHistory.shift();
+            director.move = null;
+            director.moveCooldown = rangeSample(currentFlavour().moveCooldown);
+          }
+          return;
+        }
+
         mv.elapsed += realDt;
         const t = clamp(mv.elapsed / mv.duration, 0, 1);
         const e = easeInOutQuint(t);
 
+        // §11: wake ramp. wakeT starts at 6 on user release and decays
+        // linearly; smoothstep on the remaining fraction gives a soft
+        // S-curve from 0 (just released) to 1 (fully awake). Applied
+        // multiplicatively to each move's effective amplitude.
+        let wakeScale = 1;
+        if (director.wakeT > 0) {
+          const x = 1 - director.wakeT / 6;
+          wakeScale = x * x * (3 - 2 * x);
+        }
+        const eW = e * wakeScale;
+
         switch (mv.type) {
           case "orbit":
           case "counter": {
-            const rate = mv.rate;
+            const rate = mv.rate * wakeScale;
             const rel = camera.position.clone().sub(controls.target);
             const cosA = Math.cos(rate * realDt);
             const sinA = Math.sin(rate * realDt);
@@ -9182,21 +9558,21 @@
             break;
           }
           case "pan":
-            controls.target.lerpVectors(mv.startTgt, mv.endTgt, e);
-            camera.position.lerpVectors(mv.startPos, mv.endPos, e);
+            controls.target.lerpVectors(mv.startTgt, mv.endTgt, eW);
+            camera.position.lerpVectors(mv.startPos, mv.endPos, eW);
             break;
           case "dolly":
-            camera.position.lerpVectors(mv.startPos, mv.endPos, e);
+            camera.position.lerpVectors(mv.startPos, mv.endPos, eW);
             camera.lookAt(controls.target);
             break;
           case "tilt":
-            camera.position.lerpVectors(mv.startPos, mv.endPos, e);
+            camera.position.lerpVectors(mv.startPos, mv.endPos, eW);
             camera.lookAt(controls.target);
             break;
           case "fov":
             // Modulate baseline so breathing rides the moving FOV
             if (director.baseline) {
-              director.baseline.fov = lerp(mv.startFov, mv.endFov, e);
+              director.baseline.fov = lerp(mv.startFov, mv.endFov, eW);
             }
             break;
           case "hold":
@@ -9306,7 +9682,9 @@
             return;
           }
           director.mood = pickMood();
-          if (!director.mood) {
+          if (director.mood) {
+            dlog("mood", { type: director.mood.type });
+          } else {
             director.moodCooldown = rangeSample(currentFlavour().moodCooldown);
           }
           return;
@@ -9430,7 +9808,10 @@
           // Try probabilistic fire — flavour sets the base chance
           if (Math.random() < (flav.accentFireChance || 0.35) * paceMul) {
             director.accent = pickAccent();
-            if (director.accent) sfx.play("accent");
+            if (director.accent) {
+              sfx.play("accent");
+              dlog("accent", { type: director.accent.type });
+            }
           }
           director.accentCooldown = rangeSample(flav.accentCooldown);
           return;
@@ -9467,6 +9848,135 @@
         if (t >= 1) {
           director.accent = null;
           // Cooldown already set when we kicked off the next attempt
+        }
+      }
+
+      // ------- Module 5: parameter pulses -----------------------------
+      // Triangle-enveloped excursions on visual / time parameters. Each
+      // pulse captures a baseline at start, ramps toward a target, holds,
+      // ramps back, and snaps to the exact baseline at t=1 so there's no
+      // drift from repeated fires. Pulses compose with accents (physics)
+      // and with breathing (bloom/exp/CA/FOV); conflicts are avoided by
+      // picking params breathing doesn't touch.
+      const PULSE_DEFS = {
+        "time-dip": {
+          duration: 9,
+          targetMul: 0.45,
+          minAbs: 0.15,
+          get: () => params.speed,
+          set: (v) => {
+            params.speed = v;
+          },
+        },
+        "time-push": {
+          duration: 6,
+          targetMul: 1.7,
+          maxAbs: 2.0,
+          get: () => params.speed,
+          set: (v) => {
+            params.speed = v;
+          },
+        },
+        "trail-smear": {
+          duration: 12,
+          targetAbs: 0.92,
+          get: () => trailsPass.uniforms.damp.value,
+          set: (v) => {
+            trailsPass.uniforms.damp.value = v;
+            trailsPass.enabled = v > 0.001;
+          },
+        },
+        "doppler-bloom": {
+          duration: 8,
+          targetAbs: 0.65,
+          get: () => pointMat.uniforms.uDoppler.value,
+          set: (v) => {
+            pointMat.uniforms.uDoppler.value = v;
+          },
+        },
+        "lens-warp": {
+          duration: 7,
+          targetAbs: 0.55,
+          get: () => lensPass.uniforms.uStrength.value,
+          set: (v) => {
+            lensPass.uniforms.uStrength.value = v;
+            lensPass.enabled = v > 0.001;
+          },
+        },
+      };
+      function startPulse(name) {
+        const def = PULSE_DEFS[name];
+        if (!def) return null;
+        return {
+          name,
+          duration: def.duration,
+          elapsed: 0,
+          base: def.get(),
+        };
+      }
+      function pickPulse() {
+        // Pulses follow the same per-scene gate as moods (so quiet scenes
+        // stay quiet).
+        if (sceneCineCfg().allowMoods === false) return null;
+        const flav = currentFlavour();
+        const weights = flav.pulseWeights;
+        if (!weights) return null;
+        const entries = Object.entries(weights);
+        let total = 0;
+        for (const [, w] of entries) total += w;
+        if (total <= 0) return null;
+        let r = Math.random() * total;
+        for (const [k, w] of entries) {
+          r -= w;
+          if (r <= 0) return startPulse(k);
+        }
+        return null;
+      }
+      function cancelPulse(snapToBase) {
+        if (!director.pulse) return;
+        if (snapToBase) {
+          const def = PULSE_DEFS[director.pulse.name];
+          if (def) def.set(director.pulse.base);
+        }
+        director.pulse = null;
+      }
+      function tickPulse(realDt) {
+        if (!director.pulse) {
+          if (director.pulseCooldown > 0) {
+            // Onset-bias the clock like moods/accents so pulses land near beats.
+            director.pulseCooldown -= realDt * (audioReact.onset ? 2.5 : 1);
+            return;
+          }
+          const flav = currentFlavour();
+          if (Math.random() < (flav.pulseFireChance || 0.3)) {
+            director.pulse = pickPulse();
+            if (director.pulse) dlog("pulse", { name: director.pulse.name });
+          }
+          director.pulseCooldown = rangeSample(flav.pulseCooldown || [60, 120]);
+          return;
+        }
+        const p = director.pulse;
+        p.elapsed += realDt;
+        const t = clamp(p.elapsed / p.duration, 0, 1);
+        // Triangle envelope: ramp in 30%, hold 40%, ramp out 30%.
+        const env = t < 0.3 ? t / 0.3 : t < 0.7 ? 1.0 : 1 - (t - 0.7) / 0.3;
+        const shaped = Math.max(0, env);
+        const def = PULSE_DEFS[p.name];
+        if (def) {
+          let value;
+          if (def.targetAbs != null) {
+            value = p.base + (def.targetAbs - p.base) * shaped;
+          } else {
+            value = p.base * (1 + (def.targetMul - 1) * shaped);
+          }
+          if (def.minAbs != null) value = Math.max(value, def.minAbs);
+          if (def.maxAbs != null) value = Math.min(value, def.maxAbs);
+          def.set(value);
+        }
+        if (t >= 1) {
+          // Snap exactly to baseline so no residual drift survives.
+          if (def) def.set(p.base);
+          director.pulse = null;
         }
       }
 
@@ -12683,7 +13193,10 @@
             break;
           case "d":
           case "D":
-            if (shift) {
+            if (ctrl && shift) {
+              dumpDirectorLog();
+              showToast("Director", "telemetry dumped");
+            } else if (shift) {
               toggleDebugOverlay();
             } else {
               params.cameraDrift = !params.cameraDrift;
@@ -12797,6 +13310,13 @@
           movieTick(realDt);
         } else if (followCamActive()) {
           updateFollowCam(realDt);
+          // Director-owned follow: keep the director ticking so it can
+          // release the follow when its move duration ends. Skips
+          // applyDrift via the followOwned guard in updateCameraMotion.
+          if (director.followOwned) {
+            directorTick(realDt);
+            updateCameraMotion(realDt);
+          }
         } else {
           directorTick(realDt);
           updateCameraMotion(realDt);
@@ -12847,6 +13367,8 @@
         }
         if (!booted) applyScene("quiet-drift", { immediate: true });
         updateHudFromScene();
+        // Cinematic mode on by default — the app is meant to be watched.
+        if (!director.enabled) toggleCinematic();
         loop();
       })();
     </script>
