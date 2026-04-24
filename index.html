@@ -7238,16 +7238,35 @@
       const orbitState = {
         angle: 0,
       };
+      let _prevUserActive = false;
 
       function updateCameraMotion(dt) {
         if (transitionRaf) return; // don't interfere with scene transition
         const idle = (performance.now() - lastUserInputTime) / 1000;
         const userActive = idle < 8;
 
+        // Clamp dt so a backgrounded tab or a stuttery frame never fast-
+        // forwards a move's trajectory by a noticeable amount. 50 ms is
+        // already three 60-fps frames — anything longer is a hiccup, not
+        // signal. This makes every director-driven position write resolve
+        // to a per-frame delta the eye can't resolve.
+        const camDt = Math.min(dt, 0.05);
+
+        // On the edge from user-active back to idle, any in-flight move is
+        // stale: its startPos was captured 8+ seconds ago and the camera
+        // has since moved under user control. Resuming would snap the
+        // camera back onto the old trajectory. Drop the move and hold for
+        // a beat so the next pick starts from the current pose.
+        if (_prevUserActive && !userActive && director.move) {
+          director.move = null;
+          director.moveCooldown = Math.max(director.moveCooldown, 1.2);
+        }
+        _prevUserActive = userActive;
+
         // Cinematic mode: camera move scheduler drives composition; drift is overlay.
         if (director.enabled && director.state === "DWELL" && !userActive) {
-          tickCameraMove(dt);
-          applyDrift(dt);
+          tickCameraMove(camDt);
+          applyDrift(camDt);
           return;
         }
 
@@ -8748,9 +8767,14 @@
       }
       function directorTick(realDt) {
         if (!director.enabled) return;
+        // Clamp dt for all director-internal time bookkeeping. Breathing
+        // phase, mood/accent cooldowns, and transition-watchdog clocks
+        // should never leap forward when a frame drops or the tab
+        // refocuses — every spike would otherwise land as visible judder.
+        const dt = Math.min(realDt, 0.05);
         const idle = (performance.now() - lastUserInputTime) / 1000;
         const userActive = idle < 8;
-        applyBreathing(realDt);
+        applyBreathing(dt);
 
         // If the scene changed underneath us (user scrolled through the
         // browser, hit a number key, etc.), restart the dwell cycle.
@@ -8769,9 +8793,9 @@
             cineBeginDwell();
             break;
           case "DWELL":
-            director.stateTimer += realDt;
-            tickMood(realDt);
-            tickAccent(realDt);
+            director.stateTimer += dt;
+            tickMood(dt);
+            tickAccent(dt);
             if (director.stateTimer >= director.dwellDuration) {
               cineBeginTransition();
             }
@@ -8780,7 +8804,7 @@
             if (!transitionRaf) {
               cineBeginDwell();
             } else {
-              director.stateTimer += realDt;
+              director.stateTimer += dt;
               if (director.stateTimer > director.transitionDeadline) {
                 console.warn(
                   `[director] transition watchdog fired: ${director.stateTimer.toFixed(1)}s > ${director.transitionDeadline.toFixed(1)}s deadline; recovering to DWELL`,
