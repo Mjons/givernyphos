@@ -8393,7 +8393,18 @@
           moodCooldown: [45, 90],
           accentCooldown: [60, 120],
           accentFireChance: 0.35,
-          moves: ["orbit", "counter", "pan", "dolly", "tilt", "fov", "hold"],
+          moves: [
+            "orbit",
+            "counter",
+            "pan",
+            "dolly",
+            "tilt",
+            "fov",
+            "hold",
+            "grand-arc",
+            "spiral-in",
+            "arc-pull",
+          ],
           transitionBias: { dissolve: 5, pullback: 3, pushin: 3, flare: 1 },
           sceneWeights: (tags) =>
             tags.calm ? 1.3 : tags.energetic ? 0.9 : 1.0,
@@ -8405,6 +8416,8 @@
             "trail-smear": 25,
             "doppler-bloom": 15,
             "time-dip": 15,
+            "bloom-widen": 12,
+            "grain-up": 10,
             "lens-warp": 10,
             "time-push": 5,
           },
@@ -8416,7 +8429,7 @@
           moodCooldown: [30, 60],
           accentCooldown: [25, 60],
           accentFireChance: 0.55,
-          moves: ["dolly", "pan", "tilt", "fov", "orbit", "counter"], // no hold
+          moves: ["dolly", "pan", "tilt", "fov", "orbit", "counter", "follow"], // no hold; no long sweeps (pulse wants snap)
           transitionBias: { flare: 5, pushin: 3, dissolve: 2, pullback: 1 },
           sceneFilter: (tags) => !!tags.energetic,
           breathing: { bloom: 1, exp: 1, ca: 0, fov: 0, periodMul: 0.75 },
@@ -8427,7 +8440,10 @@
             "time-push": 30,
             "doppler-bloom": 25,
             "lens-warp": 20,
+            "bloom-widen": 15,
+            "grain-up": 10,
             "trail-smear": 10,
+            "reverse-beat": 5,
             "time-dip": 5,
           },
         },
@@ -8438,7 +8454,7 @@
           moodCooldown: [150, 280],
           accentCooldown: [200, 360],
           accentFireChance: 0.15,
-          moves: ["orbit", "hold", "fov", "tilt"],
+          moves: ["orbit", "hold", "fov", "tilt", "grand-arc", "spiral-in"],
           transitionBias: { dissolve: 8, pullback: 2 },
           sceneFilter: (tags) => !!tags.calm,
           breathing: { bloom: 0, exp: 0.6, ca: 0, fov: 0.6, periodMul: 1.6 },
@@ -8448,6 +8464,8 @@
           pulseWeights: {
             "trail-smear": 35,
             "time-dip": 30,
+            "bloom-widen": 15,
+            "grain-up": 10,
             "doppler-bloom": 10,
             "lens-warp": 5,
           },
@@ -8459,7 +8477,17 @@
           moodCooldown: [60, 120],
           accentCooldown: [20, 45],
           accentFireChance: 0.7,
-          moves: ["orbit", "counter", "hold", "pan", "tilt", "fov"],
+          moves: [
+            "orbit",
+            "counter",
+            "hold",
+            "pan",
+            "tilt",
+            "fov",
+            "follow",
+            "grand-arc",
+            "arc-pull",
+          ],
           transitionBias: { pushin: 4, flare: 3, dissolve: 2 },
           sceneFilter: (tags) => !!tags.event,
           breathing: { bloom: 1, exp: 1, ca: 1, fov: 1, periodMul: 1 },
@@ -8471,6 +8499,9 @@
             "lens-warp": 25,
             "trail-smear": 20,
             "doppler-bloom": 15,
+            "bloom-widen": 15,
+            "reverse-beat": 12,
+            "grain-up": 10,
             "time-push": 10,
           },
         },
@@ -8690,6 +8721,9 @@
         "fov",
         "hold",
         "follow",
+        "grand-arc",
+        "spiral-in",
+        "arc-pull",
       ];
       // Per-scene cinematic hints: { allowAccents, allowMoods, moveBias }
       // Defaults are permissive; scenes can opt out via SCENES[x].cinematic.
@@ -9277,6 +9311,7 @@
         }
         return hit / idx.length >= 0.3;
       }
+      const _sphericalEndPos = new THREE.Vector3();
       function framingOkForMove(mv) {
         switch (mv.type) {
           case "pan":
@@ -9288,6 +9323,23 @@
               controls.target,
               camera.fov,
             );
+          case "grand-arc":
+          case "spiral-in":
+          case "arc-pull": {
+            // Reconstruct the end pose from the move's spherical terminus
+            // so the framing check knows where the camera will end up.
+            const sinT = Math.sin(mv.endTheta);
+            _sphericalEndPos.set(
+              controls.target.x + mv.endR * sinT * Math.cos(mv.endPhi),
+              controls.target.y + mv.endR * Math.cos(mv.endTheta),
+              controls.target.z + mv.endR * sinT * Math.sin(mv.endPhi),
+            );
+            return framesMajorityOfBodies(
+              _sphericalEndPos,
+              controls.target,
+              camera.fov,
+            );
+          }
           default:
             // orbit / counter / follow always look at a body or at
             // controls.target; fov / hold don't move. All safe by
@@ -9479,6 +9531,75 @@
               attached: false,
             };
           }
+          // Sweeping spherical shots — all three track controls.target
+          // and differ in what they sweep: grand-arc changes angles at
+          // fixed radius; spiral-in sweeps angle while pulling in;
+          // arc-pull sweeps angle while pulling out, with elevation.
+          case "grand-arc": {
+            const rel = startPos.clone().sub(startTgt);
+            const r = rel.length();
+            const theta = Math.acos(clamp(rel.y / r, -1, 1));
+            const phi = Math.atan2(rel.z, rel.x);
+            const sweepDir = Math.random() < 0.5 ? -1 : 1;
+            const phiSweep = Math.PI * (0.5 + Math.random() * 0.5) * sweepDir; // 90°–180°
+            const dTheta = (Math.random() - 0.5) * 0.4; // ±~11° elevation
+            const endTheta = clamp(theta + dTheta, 0.22, Math.PI - 0.22);
+            return {
+              type,
+              duration: 25 + Math.random() * 20, // 25–45 s
+              elapsed: 0,
+              startTheta: theta,
+              endTheta,
+              startPhi: phi,
+              endPhi: phi + phiSweep,
+              startR: r,
+              endR: r,
+            };
+          }
+          case "spiral-in": {
+            const rel = startPos.clone().sub(startTgt);
+            const r0 = rel.length();
+            const theta = Math.acos(clamp(rel.y / r0, -1, 1));
+            const phi = Math.atan2(rel.z, rel.x);
+            const sweepDir = Math.random() < 0.5 ? -1 : 1;
+            const phiSweep = Math.PI * (1.0 + Math.random() * 0.8) * sweepDir; // 180°–324°
+            const radiusMul = 0.45 + Math.random() * 0.2; // 0.45..0.65
+            const r1 = Math.max(40, r0 * radiusMul);
+            return {
+              type,
+              duration: 20 + Math.random() * 15, // 20–35 s
+              elapsed: 0,
+              startTheta: theta,
+              endTheta: theta,
+              startPhi: phi,
+              endPhi: phi + phiSweep,
+              startR: r0,
+              endR: r1,
+            };
+          }
+          case "arc-pull": {
+            const rel = startPos.clone().sub(startTgt);
+            const r0 = rel.length();
+            const theta = Math.acos(clamp(rel.y / r0, -1, 1));
+            const phi = Math.atan2(rel.z, rel.x);
+            const sweepDir = Math.random() < 0.5 ? -1 : 1;
+            const phiSweep = Math.PI * (0.4 + Math.random() * 0.3) * sweepDir; // 72°–126°
+            const pullMul = 1.5 + Math.random() * 0.6; // 1.5..2.1
+            const r1 = r0 * pullMul;
+            const dTheta = (Math.random() - 0.5) * 0.3;
+            const endTheta = clamp(theta + dTheta, 0.22, Math.PI - 0.22);
+            return {
+              type,
+              duration: 25 + Math.random() * 15, // 25–40 s
+              elapsed: 0,
+              startTheta: theta,
+              endTheta,
+              startPhi: phi,
+              endPhi: phi + phiSweep,
+              startR: r0,
+              endR: r1,
+            };
+          }
           case "hold":
           default:
             return {
@@ -9575,6 +9696,24 @@
               director.baseline.fov = lerp(mv.startFov, mv.endFov, eW);
             }
             break;
+          // Spherical sweep moves — all three share this tick. Lerps
+          // theta / phi / radius independently then reconstructs camera
+          // position on a sphere centered on controls.target.
+          case "grand-arc":
+          case "spiral-in":
+          case "arc-pull": {
+            const theta = lerp(mv.startTheta, mv.endTheta, eW);
+            const phi = lerp(mv.startPhi, mv.endPhi, eW);
+            const r = lerp(mv.startR, mv.endR, eW);
+            const sinT = Math.sin(theta);
+            camera.position.set(
+              controls.target.x + r * sinT * Math.cos(phi),
+              controls.target.y + r * Math.cos(theta),
+              controls.target.z + r * sinT * Math.sin(phi),
+            );
+            camera.lookAt(controls.target);
+            break;
+          }
           case "hold":
             break;
         }
@@ -9903,16 +10042,49 @@
             lensPass.enabled = v > 0.001;
           },
         },
+        "bloom-widen": {
+          duration: 9,
+          targetAbs: 1.2,
+          get: () => bloom.radius,
+          set: (v) => {
+            bloom.radius = v;
+          },
+        },
+        "grain-up": {
+          duration: 8,
+          targetMul: 2.2,
+          maxAbs: 0.12,
+          get: () => vigGrainPass.uniforms.uGrain.value,
+          set: (v) => {
+            vigGrainPass.uniforms.uGrain.value = v;
+          },
+        },
+        // reverse-beat is a toggle — flip time direction at pulse start,
+        // flip back at t=1. No interpolation; 4 s is dramatic but short
+        // enough that the simulation doesn't drift far from its forward
+        // trajectory.
+        "reverse-beat": {
+          duration: 4,
+          toggle: true,
+          get: () => params.reverse,
+          set: (v) => {
+            params.reverse = v;
+          },
+        },
       };
       function startPulse(name) {
         const def = PULSE_DEFS[name];
         if (!def) return null;
-        return {
+        const pulse = {
           name,
           duration: def.duration,
           elapsed: 0,
           base: def.get(),
         };
+        // Toggle pulses flip immediately. tickPulse's t>=1 branch restores
+        // to base via def.set(p.base), so nothing else is needed.
+        if (def.toggle) def.set(!pulse.base);
+        return pulse;
       }
       function pickPulse() {
         // Pulses follow the same per-scene gate as moods (so quiet scenes
@@ -9962,7 +10134,7 @@
         const env = t < 0.3 ? t / 0.3 : t < 0.7 ? 1.0 : 1 - (t - 0.7) / 0.3;
         const shaped = Math.max(0, env);
         const def = PULSE_DEFS[p.name];
-        if (def) {
+        if (def && !def.toggle) {
           let value;
           if (def.targetAbs != null) {
             value = p.base + (def.targetAbs - p.base) * shaped;
@@ -9973,6 +10145,8 @@
           if (def.maxAbs != null) value = Math.min(value, def.maxAbs);
           def.set(value);
         }
+        // Toggles don't use `shaped` — they were flipped at start and
+        // will be restored by the t>=1 branch below.
         if (t >= 1) {
           // Snap exactly to baseline so no residual drift survives.
           if (def) def.set(p.base);
