@@ -10173,6 +10173,10 @@
         lastSelected: null,
         // Stash of state to restore on stop
         baseline: null,
+        // Subject lock: track-streamer events with `subject: "lock"` will
+        // reuse this index, so a film can stay on one body across many
+        // shots. Set by `lockSubject: true` on the first track-streamer.
+        lockedSubject: -1,
       };
 
       function fmtMmSs(sec) {
@@ -10786,6 +10790,695 @@
             { at: 720, kind: "end" },
           ],
         },
+        web: {
+          name: "Web",
+          subtitle: "the architecture of mass",
+          duration: 880,
+          events: [
+            // ─── Movement I · One Galaxy (0 – 195) ───────────────────
+            {
+              at: 0,
+              kind: "music",
+              action: "play",
+              trackTitle: "Long Shadow",
+              volume: 0.5,
+              fadeIn: 6,
+            },
+            {
+              at: 0,
+              kind: "title",
+              main: "WEB",
+              sub: "the architecture of mass",
+              holdSec: 12,
+            },
+            { at: 0, kind: "scene", key: "sombrero" },
+            {
+              at: 0,
+              kind: "shot",
+              program: "drift-wide",
+              duration: 65,
+              look: { palette: "ember", channel: "mass", trail: 0.5 },
+              camera: { fov: 50, orbitDeg: 18 },
+            },
+            {
+              at: 65,
+              kind: "shot",
+              program: "orbit-ascend",
+              duration: 65,
+              look: {
+                palette: "ember",
+                channel: "mass",
+                trail: 0.55,
+                doppler: 0.25,
+              },
+              camera: { orbitRad: 1.2 },
+            },
+            {
+              at: 130,
+              kind: "travel",
+              style: "cross-dissolve",
+              duration: 5,
+              next: "milky-way",
+            },
+            {
+              at: 135,
+              kind: "shot",
+              program: "slow-reveal",
+              duration: 60,
+              look: {
+                palette: "aurora",
+                channel: "speed",
+                trail: 0.6,
+                doppler: 0.3,
+              },
+              camera: {
+                startRadius: 200,
+                endRadius: 600,
+                startFov: 36,
+                endFov: 56,
+              },
+            },
+
+            // ─── I → II handoff ──────────────────────────────────────
+            { at: 195, kind: "music", action: "fade", duration: 8 },
+            {
+              at: 200,
+              kind: "travel",
+              style: "cross-dissolve",
+              duration: 5,
+              next: "antennae",
+            },
+
+            // ─── Movement II · Neighbours (205 – 420) ────────────────
+            {
+              at: 205,
+              kind: "music",
+              action: "play",
+              trackTitle: "Cathedral, Small",
+              volume: 0.5,
+              fadeIn: 5,
+            },
+            {
+              at: 205,
+              kind: "title",
+              main: "II",
+              sub: "neighbours",
+              holdSec: 8,
+            },
+            {
+              at: 205,
+              kind: "shot",
+              program: "push-in",
+              duration: 65,
+              look: { palette: "ember", channel: "mass", trail: 0.65 },
+              camera: {
+                startRadius: 350,
+                endRadius: 150,
+                startFov: 50,
+                endFov: 36,
+              },
+            },
+            {
+              at: 270,
+              kind: "travel",
+              style: "warp",
+              duration: 6,
+              next: "stephans-quintet",
+            },
+            {
+              at: 276,
+              kind: "shot",
+              program: "slow-reveal",
+              duration: 70,
+              look: { palette: "ice", channel: "mass", trail: 0.5 },
+              camera: {
+                startRadius: 250,
+                endRadius: 700,
+                startFov: 38,
+                endFov: 58,
+              },
+            },
+            {
+              at: 346,
+              kind: "shot",
+              program: "orbit-ascend",
+              duration: 60,
+              look: {
+                palette: "aurora",
+                channel: "speed",
+                trail: 0.55,
+                doppler: 0.3,
+              },
+              camera: { orbitRad: 1.0 },
+            },
+            { at: 406, kind: "shot", program: "hold-still", duration: 14 },
+
+            // ─── II → III handoff ───────────────────────────────────
+            { at: 412, kind: "music", action: "fade", duration: 8 },
+            {
+              at: 420,
+              kind: "travel",
+              style: "warp",
+              duration: 6,
+              next: "virgo-m87",
+            },
+
+            // ─── Movement III · Cluster (426 – 660) ─────────────────
+            {
+              at: 426,
+              kind: "music",
+              action: "play",
+              trackTitle: "Threshold Again",
+              volume: 0.54,
+              fadeIn: 5,
+            },
+            {
+              at: 426,
+              kind: "title",
+              main: "III",
+              sub: "cluster",
+              holdSec: 8,
+            },
+            {
+              at: 426,
+              kind: "shot",
+              program: "orbit-ascend",
+              duration: 74,
+              look: {
+                palette: "bone",
+                channel: "speed",
+                trail: 0.85,
+                doppler: 0.45,
+              },
+              camera: { orbitRad: 1.4 },
+            },
+            {
+              at: 500,
+              kind: "shot",
+              program: "push-in",
+              duration: 60,
+              look: {
+                palette: "bone",
+                channel: "speed",
+                trail: 0.9,
+                doppler: 0.55,
+                lens: 0.6,
+              },
+              camera: {
+                startRadius: 400,
+                endRadius: 130,
+                startFov: 48,
+                endFov: 30,
+              },
+            },
+            {
+              at: 560,
+              kind: "travel",
+              style: "dolly-through",
+              duration: 8,
+              next: "bullet-cluster",
+              camera: { distance: 1500 },
+            },
+            {
+              at: 568,
+              kind: "shot",
+              program: "god-ray",
+              duration: 55,
+              look: { palette: "ember", channel: "mass", trail: 0.6 },
+            },
+            {
+              at: 623,
+              kind: "shot",
+              program: "vertigo",
+              duration: 14,
+              camera: { dollyFactor: 0.45 },
+            },
+            { at: 637, kind: "shot", program: "hold-still", duration: 23 },
+
+            // ─── III → IV handoff (long farewell) ───────────────────
+            { at: 650, kind: "music", action: "fade", duration: 10 },
+            {
+              at: 660,
+              kind: "travel",
+              style: "cross-dissolve",
+              duration: 6,
+              next: "coma",
+            },
+
+            // ─── Movement IV · The Web (666 – 880) ──────────────────
+            {
+              at: 666,
+              kind: "music",
+              action: "play",
+              trackTitle: "The Sustain",
+              volume: 0.46,
+              fadeIn: 8,
+            },
+            {
+              at: 666,
+              kind: "title",
+              main: "IV",
+              sub: "the web",
+              holdSec: 10,
+            },
+            {
+              at: 666,
+              kind: "shot",
+              program: "slow-reveal",
+              duration: 95,
+              look: { palette: "ice", channel: "age", trail: 0.55 },
+              camera: {
+                startRadius: 280,
+                endRadius: 760,
+                startFov: 40,
+                endFov: 60,
+              },
+            },
+            {
+              at: 761,
+              kind: "travel",
+              style: "dolly-through",
+              duration: 10,
+              next: "lattice",
+              camera: { distance: 2000 },
+            },
+            {
+              at: 771,
+              kind: "shot",
+              program: "drift-wide",
+              duration: 84,
+              look: { palette: "aurora", channel: "speed", trail: 0.5 },
+              camera: { fov: 56, orbitDeg: 16 },
+            },
+            { at: 855, kind: "shot", program: "ascend-out", duration: 22 },
+            { at: 855, kind: "music", action: "fade", duration: 22 },
+            {
+              at: 877,
+              kind: "travel",
+              style: "fade-to-black",
+              duration: 3,
+            },
+            { at: 880, kind: "end" },
+          ],
+        },
+        pilgrim: {
+          name: "Pilgrim",
+          subtitle: "one star's journey",
+          duration: 900,
+          events: [
+            // ─── Movement I · Setting Out (0 – 225) ─────────────────
+            {
+              at: 0,
+              kind: "music",
+              action: "play",
+              trackTitle: "Drift",
+              volume: 0.5,
+              fadeIn: 6,
+            },
+            {
+              at: 0,
+              kind: "title",
+              main: "PILGRIM",
+              sub: "one star's journey",
+              holdSec: 12,
+            },
+            { at: 0, kind: "scene", key: "sagittarius" },
+            // First shot picks the body and locks it for the whole film.
+            // Default 3/4 chase from above-and-behind.
+            {
+              at: 0,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 60,
+              look: {
+                palette: "ice",
+                channel: "speed",
+                trail: 0.78,
+                doppler: 0.35,
+              },
+              camera: {
+                subject: "fastest",
+                lockSubject: true,
+                offset: 60,
+                fov: 38,
+              },
+            },
+            // Tight telephoto — the body fills more of the frame.
+            {
+              at: 60,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 60,
+              look: {
+                palette: "ice",
+                channel: "speed",
+                trail: 0.82,
+                doppler: 0.4,
+              },
+              camera: {
+                subject: "lock",
+                offset: 35,
+                fov: 28,
+                rightMul: 0.6,
+                upMul: 0.2,
+                velMul: -0.6,
+              },
+            },
+            // SIDE-ON wide — the body sweeps left-to-right across frame.
+            {
+              at: 120,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 60,
+              look: {
+                palette: "aurora",
+                channel: "speed",
+                trail: 0.75,
+                doppler: 0.3,
+              },
+              camera: {
+                subject: "lock",
+                offset: 90,
+                fov: 55,
+                rightMul: 1.2,
+                upMul: 0.0,
+                velMul: -0.1,
+              },
+            },
+            // Upper-rear — looking down on the trail it leaves.
+            {
+              at: 180,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 45,
+              look: {
+                palette: "aurora",
+                channel: "speed",
+                trail: 0.7,
+                doppler: 0.45,
+              },
+              camera: {
+                subject: "lock",
+                offset: 50,
+                fov: 45,
+                rightMul: 0.5,
+                upMul: 0.8,
+                velMul: -0.4,
+              },
+            },
+
+            // ─── I → II handoff ─────────────────────────────────────
+            { at: 217, kind: "music", action: "fade", duration: 8 },
+
+            // ─── Movement II · The Stream (225 – 450) ───────────────
+            {
+              at: 225,
+              kind: "music",
+              action: "play",
+              trackTitle: "Filament",
+              volume: 0.48,
+              fadeIn: 5,
+            },
+            {
+              at: 225,
+              kind: "title",
+              main: "II",
+              sub: "the stream",
+              holdSec: 6,
+            },
+            // PURE SIDE — flat lateral chase, body sliding through frame.
+            {
+              at: 225,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 70,
+              look: { palette: "ember", channel: "mass", trail: 0.85 },
+              camera: {
+                subject: "lock",
+                offset: 45,
+                fov: 30,
+                rightMul: 1.0,
+                upMul: 0.1,
+                velMul: 0.0,
+              },
+            },
+            // TOP-DOWN-BACK — bird's eye over the rear quarter.
+            {
+              at: 295,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 70,
+              look: {
+                palette: "ember",
+                channel: "speed",
+                trail: 0.85,
+                doppler: 0.4,
+              },
+              camera: {
+                subject: "lock",
+                offset: 55,
+                fov: 45,
+                rightMul: 0.3,
+                upMul: 1.0,
+                velMul: -0.4,
+              },
+            },
+            // Tight 3/4 — close on the body, telephoto.
+            {
+              at: 365,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 65,
+              look: {
+                palette: "bone",
+                channel: "speed",
+                trail: 0.88,
+                doppler: 0.5,
+              },
+              camera: {
+                subject: "lock",
+                offset: 30,
+                fov: 28,
+                rightMul: 0.6,
+                upMul: 0.2,
+                velMul: -0.7,
+              },
+            },
+            // Drama beat — wide & high, brief.
+            {
+              at: 430,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 20,
+              look: {
+                palette: "bone",
+                channel: "speed",
+                trail: 0.9,
+                doppler: 0.6,
+              },
+              camera: {
+                subject: "lock",
+                offset: 80,
+                fov: 60,
+                rightMul: 0.4,
+                upMul: 0.6,
+                velMul: -0.5,
+              },
+            },
+
+            // ─── II → III handoff ───────────────────────────────────
+            { at: 442, kind: "music", action: "fade", duration: 8 },
+
+            // ─── Movement III · The Long Arc (450 – 700) ────────────
+            {
+              at: 450,
+              kind: "music",
+              action: "play",
+              trackTitle: "Long Exhale",
+              volume: 0.52,
+              fadeIn: 6,
+            },
+            {
+              at: 450,
+              kind: "title",
+              main: "III",
+              sub: "the long arc",
+              holdSec: 8,
+            },
+            // Epic wide — context is paramount; trail sweeps through structure.
+            {
+              at: 450,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 80,
+              look: {
+                palette: "ember",
+                channel: "mass",
+                trail: 0.88,
+                doppler: 0.45,
+              },
+              camera: {
+                subject: "lock",
+                offset: 100,
+                fov: 50,
+                rightMul: 0.7,
+                upMul: 0.5,
+                velMul: -0.4,
+              },
+            },
+            // Closer with lens warp — pulls focus into the body.
+            {
+              at: 530,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 75,
+              look: {
+                palette: "ember",
+                channel: "speed",
+                trail: 0.9,
+                doppler: 0.6,
+                lens: 0.4,
+              },
+              camera: {
+                subject: "lock",
+                offset: 50,
+                fov: 35,
+                rightMul: 0.5,
+                upMul: 0.3,
+                velMul: -0.6,
+              },
+            },
+            // FRONT-ON — body comes AT the camera. Most dramatic angle.
+            {
+              at: 605,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 60,
+              look: {
+                palette: "bone",
+                channel: "speed",
+                trail: 0.92,
+                doppler: 0.55,
+              },
+              camera: {
+                subject: "lock",
+                offset: 28,
+                fov: 22,
+                rightMul: 0.0,
+                upMul: 0.0,
+                velMul: 1.0,
+              },
+            },
+            // Climactic standard 3/4 — return to "hero" framing.
+            {
+              at: 665,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 35,
+              look: {
+                palette: "bone",
+                channel: "speed",
+                trail: 0.94,
+                doppler: 0.65,
+              },
+              camera: {
+                subject: "lock",
+                offset: 60,
+                fov: 42,
+                rightMul: 0.8,
+                upMul: 0.4,
+                velMul: -0.3,
+              },
+            },
+
+            // ─── III → IV handoff (long farewell) ───────────────────
+            { at: 690, kind: "music", action: "fade", duration: 10 },
+
+            // ─── Movement IV · Arrival (700 – 900) ──────────────────
+            {
+              at: 700,
+              kind: "music",
+              action: "play",
+              trackTitle: "The Edge of Day",
+              volume: 0.46,
+              fadeIn: 8,
+            },
+            {
+              at: 700,
+              kind: "title",
+              main: "IV",
+              sub: "arrival",
+              holdSec: 10,
+            },
+            // Calmer — channel: age so the body's history shows in colour.
+            {
+              at: 700,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 80,
+              look: {
+                palette: "aurora",
+                channel: "age",
+                trail: 0.6,
+                doppler: 0.3,
+              },
+              camera: {
+                subject: "lock",
+                offset: 70,
+                fov: 55,
+                rightMul: 0.6,
+                upMul: 0.5,
+                velMul: -0.4,
+              },
+            },
+            // Top-down receding — pulling back; body shrinks below.
+            {
+              at: 780,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 60,
+              look: {
+                palette: "aurora",
+                channel: "mass",
+                trail: 0.5,
+                doppler: 0.2,
+              },
+              camera: {
+                subject: "lock",
+                offset: 110,
+                fov: 65,
+                rightMul: 0.4,
+                upMul: 1.5,
+                velMul: -0.2,
+              },
+            },
+            // Very wide — the body becomes a moving point in the field.
+            {
+              at: 840,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 40,
+              look: { palette: "ice", channel: "mass", trail: 0.4 },
+              camera: {
+                subject: "lock",
+                offset: 200,
+                fov: 75,
+                rightMul: 0.5,
+                upMul: 0.8,
+                velMul: 0.0,
+              },
+            },
+            { at: 880, kind: "shot", program: "ascend-out", duration: 17 },
+            { at: 880, kind: "music", action: "fade", duration: 17 },
+            {
+              at: 897,
+              kind: "travel",
+              style: "fade-to-black",
+              duration: 3,
+            },
+            { at: 900, kind: "end" },
+          ],
+        },
       };
 
       // -------- Start / stop --------
@@ -10806,6 +11499,7 @@
         applyMovieSpeedToMusic();
         movie.shot = null;
         movie.travel = null;
+        movie.lockedSubject = -1;
         // Snapshot enough state to restore on stop
         movie.baseline = {
           exposure: renderer.toneMappingExposure,
@@ -11027,11 +11721,27 @@
           subjectIdx: -1,
           subjectLostCounter: 0,
         };
-        // Subject finder for programs that need one
+        // Subject finder for programs that need one. Supports three modes:
+        //   subject: "fastest" / "brightest" / etc. → findSubject lookup
+        //   subject: <number>                       → fixed body index
+        //   subject: "lock"                         → reuse movie.lockedSubject
+        // `lockSubject: true` on a finder pick stores the result for later
+        // "lock" references — the way a film locks onto one body for a
+        // multi-shot journey.
         if (ev.program === "track-streamer") {
-          const which = (ev.camera && ev.camera.subject) || "fastest";
-          const subjectOpts = { minSpeed: 3 };
-          p.subjectIdx = findSubject(which, subjectOpts);
+          const cam = ev.camera || {};
+          const which = cam.subject ?? "fastest";
+          if (which === "lock" && movie.lockedSubject >= 0) {
+            p.subjectIdx = movie.lockedSubject;
+          } else if (typeof which === "number") {
+            p.subjectIdx = which | 0;
+            movie.lockedSubject = p.subjectIdx;
+          } else {
+            p.subjectIdx = findSubject(which, { minSpeed: 3 });
+            if (cam.lockSubject && p.subjectIdx >= 0) {
+              movie.lockedSubject = p.subjectIdx;
+            }
+          }
         }
         movie.shot = p;
       }
@@ -11220,11 +11930,17 @@
               .crossVectors(right, velDir)
               .normalize();
             const offDist = p.camera.offset ?? p.startRadius * 0.18;
+            // Chase-angle multipliers — let films pick the camera's
+            // composition relative to the body's velocity. Defaults
+            // produce the original "trailing 3/4 from above" rig.
+            const rightMul = p.camera.rightMul ?? 0.8;
+            const upMul = p.camera.upMul ?? 0.4;
+            const velMul = p.camera.velMul ?? -0.3;
             const camPos = s.pos
               .clone()
-              .addScaledVector(right, offDist * 0.8)
-              .addScaledVector(up, offDist * 0.4)
-              .addScaledVector(velDir, -offDist * 0.3); // trail slightly
+              .addScaledVector(right, offDist * rightMul)
+              .addScaledVector(up, offDist * upMul)
+              .addScaledVector(velDir, offDist * velMul);
             camera.position.copy(camPos);
             camera.lookAt(s.pos);
             camera.fov = p.startFov;
