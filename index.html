@@ -11725,19 +11725,31 @@
         //   subject: "fastest" / "brightest" / etc. → findSubject lookup
         //   subject: <number>                       → fixed body index
         //   subject: "lock"                         → reuse movie.lockedSubject
+        //                                             (or pick fresh if empty)
         // `lockSubject: true` on a finder pick stores the result for later
         // "lock" references — the way a film locks onto one body for a
         // multi-shot journey.
         if (ev.program === "track-streamer") {
           const cam = ev.camera || {};
           const which = cam.subject ?? "fastest";
-          if (which === "lock" && movie.lockedSubject >= 0) {
-            p.subjectIdx = movie.lockedSubject;
+          // minSpeed default 0.5 (matches findSubject's own default) — at
+          // scene-init t=0 most bodies are below 3, which used to make the
+          // first track-streamer fail and stick to a held pose.
+          const minSpeed = cam.minSpeed ?? 0.5;
+          if (which === "lock") {
+            if (movie.lockedSubject >= 0) {
+              p.subjectIdx = movie.lockedSubject;
+            } else {
+              // Lock requested but nothing locked yet — pick a fresh one
+              // and remember it so subsequent "lock" shots stay aligned.
+              p.subjectIdx = findSubject("fastest", { minSpeed });
+              if (p.subjectIdx >= 0) movie.lockedSubject = p.subjectIdx;
+            }
           } else if (typeof which === "number") {
             p.subjectIdx = which | 0;
             movie.lockedSubject = p.subjectIdx;
           } else {
-            p.subjectIdx = findSubject(which, { minSpeed: 3 });
+            p.subjectIdx = findSubject(which, { minSpeed });
             if (cam.lockSubject && p.subjectIdx >= 0) {
               movie.lockedSubject = p.subjectIdx;
             }
@@ -11910,8 +11922,11 @@
               // Body vanished or stopped — hold
               p.subjectLostCounter++;
               if (p.subjectLostCounter > 12) {
-                // Try to re-acquire once
-                p.subjectIdx = findSubject("fastest", { minSpeed: 3 });
+                // Try to re-acquire once. If we land on a new body,
+                // update the lock so later "lock" shots follow that one
+                // rather than trying to chase the dead original.
+                p.subjectIdx = findSubject("fastest", { minSpeed: 0.5 });
+                if (p.subjectIdx >= 0) movie.lockedSubject = p.subjectIdx;
                 p.subjectLostCounter = 0;
               }
               camera.position.copy(p.startPos);
