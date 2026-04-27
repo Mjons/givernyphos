@@ -105,6 +105,51 @@ amortize across threads, so each fragment does its own redundant reads.
 
 This is _the_ reason 4090 sees 20 fps at 130k. Compute is plenty.
 
+### 1.7 The compute math (calibrated)
+
+Tiling solves the bandwidth problem (§2.1). Once we're past that, the
+new ceiling is FLOPs. Counting the inner loop in
+[index.html:1610-1622](index.html#L1610-L1622):
+
+| Op                           | FLOPs   |
+| ---------------------------- | ------- |
+| `kindB` extract + clamp      | ~3      |
+| `d = posB.xyz - pA`          | 3       |
+| `dot(d, d) + eps2`           | 6       |
+| `r2 * r2 * r2`               | 2       |
+| `inverseSqrt`                | ~5      |
+| `G * posB.w * K`             | 2       |
+| `d * invR3 * (G·m·K)` (vec3) | 6       |
+| `acc += ...`                 | 3       |
+| **Total per interaction**    | **~30** |
+
+(`K` matrix lookup is a workgroup-shared read, not counted as FLOPs;
+`posB.w <= 0` cull is a branch, not counted.)
+
+Per-frame compute at N bodies: `N² × 30 FLOPs`. The 4090 peak FP32 is
+**82.6 TFLOPS** boost, but tiled N-body kernels on Ada extract roughly
+70% of peak — Nyland's reference hits 85% on H100; we have more
+branches and a per-interaction matrix lookup, so derate to ~70% →
+**sustained ~60 TFLOPS = 6 × 10¹³ FLOPs/s**.
+
+```
+N²_max(fps) = 6e13 / (30 × fps) = 2e12 / fps  interactions/frame
+```
+
+| Target fps | Max N (= √interactions) |
+| ---------- | ----------------------- |
+| 60         | ~183k                   |
+| 30         | ~258k                   |
+| 15         | ~365k                   |
+| 12         | ~408k                   |
+| 6          | ~577k                   |
+
+**This is what gates each tier post-WebGPU**, not bandwidth. The §2.1
+speedup table is an estimate — the abyssal row in particular is
+optimistic; actual landing point is closer to 7-8 fps at 518k, right
+on the compute boundary. We test on real hardware before deciding
+whether to soften (§7).
+
 ---
 
 ## 2. Target architecture
@@ -574,7 +619,11 @@ We call phase 1 done when **all** of these are true:
 1. On a 4090 (the user's machine):
    - `titanic` (130k) sustains ≥ 55 fps.
    - `colossal` (262k) sustains ≥ 28 fps.
-   - `abyssal` (518k) sustains ≥ 12 fps.
+   - `abyssal` (518k) sustains ≥ 12 fps. **Compute-boundary tier**
+     per §1.7 — math says we land closer to 7-8 fps. If real
+     hardware confirms, the right call is either to drop this
+     criterion to ≥ 6 fps or accept abyssal as "marginal, not
+     promised." **Don't soften pre-emptively** — test then decide.
 2. On a Firefox stable user (no WebGPU): the app still runs, capped
    at lush, no broken UI.
 3. Switching density during a running cinematic does not drop frames.

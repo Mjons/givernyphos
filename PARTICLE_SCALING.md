@@ -191,6 +191,20 @@ Phase 1 alone gets the user-visible win: the abyssal tier becomes the
 "works on serious hardware" tier instead of the "slideshow" tier, and
 titanic + colossal become daily-usable on a 4090.
 
+**1M-class is Phase 3 territory, full stop.** Tiled O(N²) at our
+shader's complexity needs `1M² × 30 FLOPs × 60 fps ≈ 1.8 PFLOPS` —
+**~22× the 4090's peak**, ~30× our sustained estimate. No amount of
+WebGPU/tiling magic gets there at O(N²); it's a complexity wall, not
+an implementation gap. If we ever want to hit a million bodies, the
+only path is Barnes-Hut.
+
+### Explicit non-goals
+
+- **CPU fallback.** A 7-kind interaction matrix in single-threaded JS
+  at even 5k bodies is brutal (~250M JS-side ops/frame, no SIMD).
+  Users without WebGPU keep the WebGL2 GPGPU path; users without WebGL2
+  at all are unsupported. We don't aspire to a JS-only fallback.
+
 ## Open questions to discuss
 
 1. **Renderer split (option A.a vs A.b)?** The lower-risk WebGLRenderer
