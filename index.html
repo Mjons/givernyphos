@@ -1847,6 +1847,139 @@
       if (typeof window !== "undefined") {
         window.__wgpuVerify = wgpuReadbackVerify;
       }
+
+      // ----- step 4a: writeWgpuParams + dispatch sanity test -------
+      // Pack current sim uniforms into the WebGPU params storage
+      // buffer. Layout matches the WGSL SimParams struct.
+      const _wgpuParamsScratch = new ArrayBuffer(256);
+      const _wgpuParamsF32 = new Float32Array(_wgpuParamsScratch);
+      const _wgpuParamsU32 = new Uint32Array(_wgpuParamsScratch);
+      function writeWgpuParams(overrides) {
+        if (!wgpuSim.available || !wgpuSim.buffers) return false;
+        if (!velVar || !velVar.material || !posVar || !posVar.material) {
+          return false;
+        }
+        const o = overrides || {};
+        const u = velVar.material.uniforms;
+        const pu = posVar.material.uniforms;
+        _wgpuParamsF32[0] = o.dt ?? pu.uDt.value;
+        _wgpuParamsF32[1] = o.G ?? u.uG.value;
+        _wgpuParamsF32[2] = o.eps2 ?? u.uEps2.value;
+        _wgpuParamsF32[3] = o.sign ?? u.uSign.value;
+        _wgpuParamsF32[4] = o.frame ?? u.uFrame.value;
+        _wgpuParamsF32[5] = o.flock ?? u.uFlock.value;
+        _wgpuParamsF32[6] = o.radiation ?? u.uRadiation.value;
+        _wgpuParamsF32[7] = o.maxAge ?? u.uMaxAge.value;
+        _wgpuParamsU32[8] = MAX_BODIES | 0;
+        _wgpuParamsU32[9] = NUM_KINDS | 0;
+        _wgpuParamsU32[10] = 0;
+        _wgpuParamsU32[11] = 0;
+        const K = u.uK.value;
+        for (let i = 0; i < NUM_KINDS * NUM_KINDS; i++) {
+          _wgpuParamsF32[12 + i] = K[i];
+        }
+        wgpuSim.device.queue.writeBuffer(
+          wgpuSim.buffers.params,
+          0,
+          _wgpuParamsScratch,
+          0,
+          256,
+        );
+        return true;
+      }
+
+      // Minimal end-to-end dispatch: snapshot live state into the
+      // posA / velA buffers, run velStep once, copy velB → staging,
+      // log the first alive body's new velocity. No comparison vs
+      // WebGL2 yet (step 4c). Devtools-only.
+      async function wgpuTestVelStep() {
+        if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
+          console.warn("[wgpu] dispatch test: not ready");
+          return null;
+        }
+        if (!writeWgpuParams()) {
+          console.warn("[wgpu] dispatch test: writeWgpuParams failed");
+          return null;
+        }
+        const device = wgpuSim.device;
+        const N = MAX_BODIES;
+        const bytes = N * 16;
+        const posSnap = new Float32Array(N * 4);
+        const velSnap = new Float32Array(N * 4);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(posVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          posSnap,
+        );
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(velVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          velSnap,
+        );
+        device.queue.writeBuffer(
+          wgpuSim.buffers.posA,
+          0,
+          posSnap.buffer,
+          posSnap.byteOffset,
+          bytes,
+        );
+        device.queue.writeBuffer(
+          wgpuSim.buffers.velA,
+          0,
+          velSnap.buffer,
+          velSnap.byteOffset,
+          bytes,
+        );
+        const bindGroup = device.createBindGroup({
+          layout: wgpuSim.bindLayout,
+          entries: [
+            { binding: 0, resource: { buffer: wgpuSim.buffers.posA } },
+            { binding: 1, resource: { buffer: wgpuSim.buffers.velA } },
+            { binding: 2, resource: { buffer: wgpuSim.buffers.velB } },
+            { binding: 3, resource: { buffer: wgpuSim.buffers.params } },
+          ],
+        });
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(wgpuSim.pipelines.vel);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(N / 256));
+        pass.end();
+        enc.copyBufferToBuffer(
+          wgpuSim.buffers.velB,
+          0,
+          wgpuSim.buffers.staging[0],
+          0,
+          bytes,
+        );
+        device.queue.submit([enc.finish()]);
+        await wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ);
+        const out = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        ).slice();
+        wgpuSim.buffers.staging[0].unmap();
+        for (let i = 0; i < N; i++) {
+          if (posSnap[i * 4 + 3] > 0) {
+            const v = [out[i * 4], out[i * 4 + 1], out[i * 4 + 2]];
+            console.info(
+              `[wgpu] dispatch test OK: body ${i} velNew=${v.map((x) => x.toExponential(2))}`,
+            );
+            return { N, body: i, v };
+          }
+        }
+        console.warn("[wgpu] dispatch test: no alive bodies in input");
+        return null;
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuTestVelStep = wgpuTestVelStep;
+      }
+
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
