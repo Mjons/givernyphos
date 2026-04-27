@@ -1547,6 +1547,271 @@
       // on window so devtools can poke at it (e.g. wgpuSim.posTex.image.data).
       if (typeof window !== "undefined") window.__wgpuSim = wgpuSim;
 
+      // ===============================================================
+      // 1c. HAND TRACKING — phase 1 (HAND_TRACKING_PLAN.md)
+      // ===============================================================
+      // Opt-in via ?hands=1. Boots a hidden webcam + MediaPipe
+      // HandLandmarker, smooths wrist position + pinch with one-euro
+      // filters, console-logs ~once per second. Phase 1 does NOT feed
+      // the simulation — that's phase 2. Failures (no camera, denied,
+      // model load fail) are silent: handTracker.disabled flips on and
+      // the rest of the app is unaffected.
+      const MEDIAPIPE_VERSION = "0.10.21";
+      const handTracker = {
+        enabled: false,
+        ready: false,
+        disabled: false,
+        reason: "off",
+        video: null,
+        landmarker: null,
+        cursorEl: null,
+        lastVideoTime: -1,
+        // Smoothed image-space (mirrored, ±0.5; phase 1)
+        worldX: 0,
+        worldY: 0,
+        pinch: 0,
+        presence: 0,
+        // World-space projection (phase 2; filled by updateHandWorld)
+        worldPos: new THREE.Vector3(),
+        worldVel: new THREE.Vector3(),
+        worldPosInited: false,
+        strength: 0, // 0..1, presence-gated brush amplitude
+        radius: 40, // world-space Gaussian sigma; tuned per scale of scenes
+        // Diagnostics
+        frames: 0,
+        hits: 0,
+      };
+      try {
+        const _hUrl = new URL(location.href);
+        const _hVal = (_hUrl.searchParams.get("hands") || "")
+          .toLowerCase()
+          .trim();
+        handTracker.enabled =
+          _hVal === "1" || _hVal === "true" || _hVal === "on";
+      } catch (_) {}
+      if (typeof window !== "undefined") window.__handTracker = handTracker;
+
+      function makeOneEuro(mincutoff = 1.0, beta = 0.01, dcutoff = 1.0) {
+        let xPrev = null,
+          dxPrev = 0,
+          tPrev = null;
+        const alpha = (cutoff, dt) => {
+          const r = 2 * Math.PI * cutoff * dt;
+          return r / (r + 1);
+        };
+        return (x, t) => {
+          if (tPrev === null) {
+            tPrev = t;
+            xPrev = x;
+            return x;
+          }
+          const dt = Math.max(1e-3, (t - tPrev) / 1000);
+          const dx = (x - xPrev) / dt;
+          const aD = alpha(dcutoff, dt);
+          const dxHat = aD * dx + (1 - aD) * dxPrev;
+          const cutoff = mincutoff + beta * Math.abs(dxHat);
+          const a = alpha(cutoff, dt);
+          const xHat = a * x + (1 - a) * xPrev;
+          tPrev = t;
+          xPrev = xHat;
+          dxPrev = dxHat;
+          return xHat;
+        };
+      }
+      const _oeHandX = makeOneEuro(1.0, 0.01);
+      const _oeHandY = makeOneEuro(1.0, 0.01);
+      const _oePinch = makeOneEuro(1.5, 0.02);
+
+      async function initHandTracker() {
+        if (!handTracker.enabled || handTracker.disabled) return;
+        try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("getUserMedia unavailable");
+          }
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: "user" },
+            audio: false,
+          });
+          const video = document.createElement("video");
+          video.style.cssText =
+            "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+          video.playsInline = true;
+          video.muted = true;
+          video.autoplay = true;
+          video.srcObject = stream;
+          document.body.appendChild(video);
+          await new Promise((res, rej) => {
+            video.addEventListener("loadeddata", res, { once: true });
+            video.addEventListener("error", rej, { once: true });
+          });
+          await video.play();
+          handTracker.video = video;
+
+          const cursor = document.createElement("div");
+          cursor.id = "hand-cursor";
+          cursor.style.cssText =
+            "position:fixed;left:0;top:0;width:64px;height:64px;border-radius:50%;" +
+            "transform:translate(-50%,-50%);" +
+            "background:radial-gradient(circle, rgba(180,220,255,0.55) 0%, rgba(180,220,255,0.18) 38%, rgba(180,220,255,0) 70%);" +
+            "pointer-events:none;opacity:0;will-change:transform,opacity;" +
+            "mix-blend-mode:screen;z-index:9999;";
+          document.body.appendChild(cursor);
+          handTracker.cursorEl = cursor;
+
+          const vision = await import(
+            `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.mjs`
+          );
+          const fileset = await vision.FilesetResolver.forVisionTasks(
+            `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`,
+          );
+          const landmarker = await vision.HandLandmarker.createFromOptions(
+            fileset,
+            {
+              baseOptions: {
+                modelAssetPath:
+                  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                delegate: "GPU",
+              },
+              runningMode: "VIDEO",
+              numHands: 1,
+              minHandDetectionConfidence: 0.5,
+              minHandPresenceConfidence: 0.5,
+              minTrackingConfidence: 0.5,
+            },
+          );
+          handTracker.landmarker = landmarker;
+          handTracker.ready = true;
+          handTracker.reason = "ready";
+          console.log("[hands] tracker ready");
+        } catch (e) {
+          handTracker.disabled = true;
+          handTracker.reason =
+            "init failed: " + (e && e.message ? e.message : e);
+          console.warn("[hands] init failed; continuing without:", e);
+        }
+      }
+
+      function _renderHandCursor() {
+        const c = handTracker.cursorEl;
+        if (!c) return;
+        const cx = (handTracker.worldX + 0.5) * window.innerWidth;
+        const cy = (0.5 - handTracker.worldY) * window.innerHeight;
+        const scale = 0.7 + 0.6 * handTracker.pinch;
+        c.style.transform = `translate(${cx.toFixed(1)}px, ${cy.toFixed(1)}px) translate(-50%, -50%) scale(${scale.toFixed(3)})`;
+        c.style.opacity = handTracker.presence.toFixed(3);
+      }
+
+      function handTrackerTick(now) {
+        if (!handTracker.ready || handTracker.disabled) return;
+        const v = handTracker.video;
+        if (!v || v.readyState < 2) return;
+        if (v.currentTime === handTracker.lastVideoTime) {
+          _renderHandCursor();
+          return;
+        }
+        handTracker.lastVideoTime = v.currentTime;
+        handTracker.frames++;
+
+        let result;
+        try {
+          result = handTracker.landmarker.detectForVideo(v, now);
+        } catch (_) {
+          return;
+        }
+        const lm = result && result.landmarks && result.landmarks[0];
+        if (!lm) {
+          handTracker.presence = Math.max(0, handTracker.presence - 0.04);
+          _renderHandCursor();
+          return;
+        }
+        handTracker.hits++;
+
+        const wrist = lm[0];
+        const nx = 1 - wrist.x - 0.5;
+        const ny = -(wrist.y - 0.5);
+
+        const tt = lm[4],
+          it = lm[8],
+          mcp = lm[9];
+        const dxp = tt.x - it.x,
+          dyp = tt.y - it.y,
+          dzp = tt.z - it.z;
+        const pinchRaw = Math.sqrt(dxp * dxp + dyp * dyp + dzp * dzp);
+        const sx = wrist.x - mcp.x,
+          sy = wrist.y - mcp.y,
+          sz = wrist.z - mcp.z;
+        const handSize = Math.max(0.05, Math.sqrt(sx * sx + sy * sy + sz * sz));
+        const pinchNorm = pinchRaw / handSize;
+        const pinchClosed = Math.max(0, Math.min(1, 1 - pinchNorm / 1.2));
+
+        handTracker.worldX = _oeHandX(nx, now);
+        handTracker.worldY = _oeHandY(ny, now);
+        handTracker.pinch = _oePinch(pinchClosed, now);
+        handTracker.presence = Math.min(1, handTracker.presence + 0.06);
+
+        _renderHandCursor();
+
+        if (handTracker.hits % 30 === 0) {
+          console.log(
+            `[hands] x=${handTracker.worldX.toFixed(3)} ` +
+              `y=${handTracker.worldY.toFixed(3)} ` +
+              `pinch=${handTracker.pinch.toFixed(3)} ` +
+              `presence=${handTracker.presence.toFixed(2)}`,
+          );
+        }
+      }
+
+      // Project image-space hand position into world space at the focal
+      // plane through the origin (perpendicular to the camera). Derive
+      // a world-space velocity by differencing across frames.
+      // Per-frame gain applied here so the shader term is just w * vel.
+      const HAND_GAIN = 0.0035;
+      const _hRaycaster = new THREE.Raycaster();
+      const _hNdc = new THREE.Vector2();
+      const _hPlane = new THREE.Plane();
+      const _hPlaneNormal = new THREE.Vector3();
+      const _hPlanePoint = new THREE.Vector3();
+      const _hWorldNext = new THREE.Vector3();
+      const _hVelTmp = new THREE.Vector3();
+      function updateHandWorld(camera, dt) {
+        if (!handTracker.ready || handTracker.disabled) {
+          handTracker.strength = 0;
+          handTracker.worldVel.set(0, 0, 0);
+          return;
+        }
+        const presence = handTracker.presence;
+        if (presence < 0.001) {
+          handTracker.strength = 0;
+          handTracker.worldVel.set(0, 0, 0);
+          handTracker.worldPosInited = false;
+          return;
+        }
+        _hNdc.set(handTracker.worldX * 2, handTracker.worldY * 2);
+        _hRaycaster.setFromCamera(_hNdc, camera);
+        camera.getWorldDirection(_hPlaneNormal);
+        _hPlanePoint.set(0, 0, 0);
+        _hPlane.setFromNormalAndCoplanarPoint(
+          _hPlaneNormal.negate(),
+          _hPlanePoint,
+        );
+        const hit = _hRaycaster.ray.intersectPlane(_hPlane, _hWorldNext);
+        if (!hit) {
+          handTracker.strength = 0;
+          return;
+        }
+        if (handTracker.worldPosInited) {
+          _hVelTmp
+            .subVectors(_hWorldNext, handTracker.worldPos)
+            .divideScalar(Math.max(dt, 1e-3));
+          handTracker.worldVel.lerp(_hVelTmp, 0.5);
+        } else {
+          handTracker.worldVel.set(0, 0, 0);
+          handTracker.worldPosInited = true;
+        }
+        handTracker.worldPos.copy(_hWorldNext);
+        handTracker.strength = presence * HAND_GAIN;
+      }
+
       // ----- step 2: WGSL shaders ----------------------------------
       // SimParams lives in a storage buffer (not uniform) so the K[49]
       // matrix doesn't force per-element padding; storage stride for
@@ -1569,6 +1834,14 @@
           comY: f32,
           comZ: f32,
           _pad1: f32,
+          handX: f32,
+          handY: f32,
+          handZ: f32,
+          handStrength: f32,
+          handVx: f32,
+          handVy: f32,
+          handVz: f32,
+          handRadius: f32,
           K: array<f32, 49>,
         };
       `;
@@ -1706,6 +1979,17 @@
             acc = acc + cross(vec3<f32>(0.0, p.spin, 0.0), r);
           }
 
+          // Hand brush — push particles in the direction of cursor
+          // motion with a Gaussian falloff around the cursor position.
+          // handStrength includes the JS-side gain; zero = no work.
+          if (alive && p.handStrength > 0.0) {
+            let toHand = pA - vec3<f32>(p.handX, p.handY, p.handZ);
+            let r2h    = dot(toHand, toHand);
+            let sigma2 = max(p.handRadius * p.handRadius, 1e-3);
+            let w      = exp(-r2h / sigma2);
+            acc = acc + p.handStrength * w * vec3<f32>(p.handVx, p.handVy, p.handVz);
+          }
+
           let newVel = velA.xyz + acc * p.dt * p.sign;
           let dAge   = p.dt * abs(p.sign) / p.maxAge;
           let newAge = clamp(ageNorm + dAge, 0.0, 0.9999);
@@ -1807,7 +2091,7 @@
             if (sb) sb.destroy();
         }
         const bodyBytes = N * 16; // vec4<f32>
-        const PARAMS_BYTES = 320; // SimParams (260B) + headroom for alignment
+        const PARAMS_BYTES = 320; // SimParams (292B w/ hand uniforms) + headroom
         const make = () =>
           device.createBuffer({
             size: bodyBytes,
@@ -2014,9 +2298,19 @@
         _wgpuParamsF32[13] = o.comY ?? com.y;
         _wgpuParamsF32[14] = o.comZ ?? com.z;
         _wgpuParamsF32[15] = 0;
+        const hp = u.uHandPos ? u.uHandPos.value : null;
+        const hv = u.uHandVel ? u.uHandVel.value : null;
+        _wgpuParamsF32[16] = hp ? hp.x : 0;
+        _wgpuParamsF32[17] = hp ? hp.y : 0;
+        _wgpuParamsF32[18] = hp ? hp.z : 0;
+        _wgpuParamsF32[19] = u.uHandStrength ? u.uHandStrength.value : 0;
+        _wgpuParamsF32[20] = hv ? hv.x : 0;
+        _wgpuParamsF32[21] = hv ? hv.y : 0;
+        _wgpuParamsF32[22] = hv ? hv.z : 0;
+        _wgpuParamsF32[23] = u.uHandRadius ? u.uHandRadius.value : 1;
         const K = u.uK.value;
         for (let i = 0; i < NUM_KINDS * NUM_KINDS; i++) {
-          _wgpuParamsF32[16 + i] = K[i];
+          _wgpuParamsF32[24 + i] = K[i];
         }
         wgpuSim.device.queue.writeBuffer(
           wgpuSim.buffers.params,
@@ -2720,6 +3014,58 @@
         );
       }
 
+      // ----- step 7c: sync readers consume the CPU mirror ---------
+      // When WebGPU is the live source, readRenderTargetPixels reads
+      // a stale GPGPU texture (gpu.compute() hasn't run since
+      // activation). The pos/vel data we want is in the DataTextures'
+      // image.data — already mirrored from WebGPU buffers each frame
+      // by wgpuFrameStep. These helpers route reads through whichever
+      // source is live; six call sites use them.
+      function readPosTexels(x, y, w, h, buf) {
+        if (
+          wgpuSim.active &&
+          wgpuSim.posTex &&
+          wgpuSim.posTex.image &&
+          wgpuSim.posTex.image.data
+        ) {
+          const data = wgpuSim.posTex.image.data;
+          if (x === 0 && y === 0 && w === TEX_SIZE && h === TEX_SIZE) {
+            buf.set(data);
+            return;
+          }
+          let bi = 0;
+          for (let row = 0; row < h; row++) {
+            const start = ((y + row) * TEX_SIZE + x) * 4;
+            for (let col = 0; col < w * 4; col++) buf[bi++] = data[start + col];
+          }
+          return;
+        }
+        const rt = gpu.getCurrentRenderTarget(posVar);
+        renderer.readRenderTargetPixels(rt, x, y, w, h, buf);
+      }
+      function readVelTexels(x, y, w, h, buf) {
+        if (
+          wgpuSim.active &&
+          wgpuSim.velTex &&
+          wgpuSim.velTex.image &&
+          wgpuSim.velTex.image.data
+        ) {
+          const data = wgpuSim.velTex.image.data;
+          if (x === 0 && y === 0 && w === TEX_SIZE && h === TEX_SIZE) {
+            buf.set(data);
+            return;
+          }
+          let bi = 0;
+          for (let row = 0; row < h; row++) {
+            const start = ((y + row) * TEX_SIZE + x) * 4;
+            for (let col = 0; col < w * 4; col++) buf[bi++] = data[start + col];
+          }
+          return;
+        }
+        const rt = gpu.getCurrentRenderTarget(velVar);
+        renderer.readRenderTargetPixels(rt, x, y, w, h, buf);
+      }
+
       // ----- step 7b: live activation -----------------------------
       // Per-frame routine when wgpuSim.active is true. Runs
       // params.substeps wgpuSteps and queues an async readback into
@@ -3116,6 +3462,10 @@
         uniform float uMaxAge;
         uniform float uSpin;
         uniform vec3  uCom;
+        uniform vec3  uHandPos;
+        uniform vec3  uHandVel;
+        uniform float uHandStrength;
+        uniform float uHandRadius;
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
@@ -3209,6 +3559,16 @@
             acc += cross(vec3(0.0, uSpin, 0.0), r);
           }
 
+          // Hand brush — Gaussian-weighted push in the direction of
+          // cursor motion. uHandStrength includes the JS-side gain.
+          if (uHandStrength > 0.0) {
+            vec3 toHand = p - uHandPos;
+            float r2h = dot(toHand, toHand);
+            float sigma2 = max(uHandRadius * uHandRadius, 1e-3);
+            float w = exp(-r2h / sigma2);
+            acc += uHandStrength * w * uHandVel;
+          }
+
           vec3 newVel = v + acc * uDt * uSign;
 
           // Age: increment normalised age (saturated to < 1 so floor(kind) is preserved)
@@ -3261,6 +3621,18 @@
         velVar.material.uniforms.uSpin = { value: preserve?.uSpin ?? 0.0 };
         velVar.material.uniforms.uCom = {
           value: preserve?.uCom ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uHandPos = {
+          value: preserve?.uHandPos ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uHandVel = {
+          value: preserve?.uHandVel ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uHandStrength = {
+          value: preserve?.uHandStrength ?? 0.0,
+        };
+        velVar.material.uniforms.uHandRadius = {
+          value: preserve?.uHandRadius ?? 40.0,
         };
       }
 
@@ -3793,12 +4165,18 @@
 
         // Try autoplay on boot. Browsers may block until the first user
         // gesture — if so, unlock on the first pointerdown/keydown.
+        // Defer one tick so the gesture's own click handler (e.g. the
+        // music play button calling playPause) runs first; otherwise we
+        // play() pre-click and the click handler immediately pauses it,
+        // making the play button look broken.
         load(state.index, true);
         const unlockAudio = () => {
-          if (audio.paused) {
-            const p = audio.play();
-            if (p && p.catch) p.catch(() => {});
-          }
+          setTimeout(() => {
+            if (audio.paused) {
+              const p = audio.play();
+              if (p && p.catch) p.catch(() => {});
+            }
+          }, 50);
         };
         window.addEventListener("pointerdown", unlockAudio, { once: true });
         window.addEventListener("keydown", unlockAudio, { once: true });
@@ -9501,8 +9879,7 @@
           followCam._pickBufSize = need;
         }
         const buf = followCam._pickBuf;
-        const rt = gpu.getCurrentRenderTarget(posVar);
-        renderer.readRenderTargetPixels(rt, 0, 0, TEX_SIZE, TEX_SIZE, buf);
+        readPosTexels(0, 0, TEX_SIZE, TEX_SIZE, buf);
 
         const mat = new THREE.Matrix4().multiplyMatrices(
           camera.projectionMatrix,
@@ -9565,18 +9942,14 @@
 
       function followCamReadBody() {
         if (!followCam.texel) return null;
-        const pRT = gpu.getCurrentRenderTarget(posVar);
-        const vRT = gpu.getCurrentRenderTarget(velVar);
-        renderer.readRenderTargetPixels(
-          pRT,
+        readPosTexels(
           followCam.texel.x,
           followCam.texel.y,
           1,
           1,
           followCam._pbuf,
         );
-        renderer.readRenderTargetPixels(
-          vRT,
+        readVelTexels(
           followCam.texel.x,
           followCam.texel.y,
           1,
@@ -9693,8 +10066,7 @@
         const tx = idx % TEX_SIZE;
         const ty = Math.floor(idx / TEX_SIZE);
         const buf = new Float32Array(4);
-        const rt = gpu.getCurrentRenderTarget(posVar);
-        renderer.readRenderTargetPixels(rt, tx, ty, 1, 1, buf);
+        readPosTexels(tx, ty, 1, 1, buf);
         if (!(buf[3] > 0)) {
           showToast("Follow", "#" + idx + " is empty");
           return false;
@@ -13561,23 +13933,27 @@
       // -------- Music event helper --------
       let _musicFadeTimer = null;
       function handleFilmMusicEvent(ev) {
+        // Film volume changes are transient — write audio.volume directly
+        // rather than going through music.setVolume(), which persists to
+        // localStorage. A film that fades to 0 must not leave the user's
+        // saved preference at 0 (silent on next session).
         if (ev.action === "play") {
           const idx = trackIdxByTitle(ev.trackTitle);
           if (idx < 0) return;
           music.load(idx, true);
           const target = ev.volume ?? 0.5;
           if (ev.fadeIn && ev.fadeIn > 0) {
-            music.setVolume(0);
+            music.audio.volume = 0;
             rampMusicVolume(target, ev.fadeIn);
           } else {
-            music.setVolume(target);
+            music.audio.volume = clamp(target, 0, 1);
           }
         } else if (ev.action === "fade") {
           rampMusicVolume(0, ev.duration || 4);
         } else if (ev.action === "pause") {
           if (music.playing) music.playPause();
         } else if (ev.action === "set") {
-          music.setVolume(ev.volume ?? music.volume);
+          music.audio.volume = clamp(ev.volume ?? music.volume, 0, 1);
         }
       }
       function rampMusicVolume(target, seconds) {
@@ -13611,22 +13987,8 @@
         if (kind === "named" && Number.isInteger(opts.idx)) return opts.idx;
         const posBuf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
         const velBuf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
-        renderer.readRenderTargetPixels(
-          gpu.getCurrentRenderTarget(posVar),
-          0,
-          0,
-          TEX_SIZE,
-          TEX_SIZE,
-          posBuf,
-        );
-        renderer.readRenderTargetPixels(
-          gpu.getCurrentRenderTarget(velVar),
-          0,
-          0,
-          TEX_SIZE,
-          TEX_SIZE,
-          velBuf,
-        );
+        readPosTexels(0, 0, TEX_SIZE, TEX_SIZE, posBuf);
+        readVelTexels(0, 0, TEX_SIZE, TEX_SIZE, velBuf);
         let bestIdx = -1;
         let bestScore = -Infinity;
         const minSpeed = opts.minSpeed ?? 0.5;
@@ -13680,22 +14042,8 @@
       function readBodyState(idx) {
         const xi = idx % TEX_SIZE;
         const yi = Math.floor(idx / TEX_SIZE);
-        renderer.readRenderTargetPixels(
-          gpu.getCurrentRenderTarget(posVar),
-          xi,
-          yi,
-          1,
-          1,
-          _sfBufPos,
-        );
-        renderer.readRenderTargetPixels(
-          gpu.getCurrentRenderTarget(velVar),
-          xi,
-          yi,
-          1,
-          1,
-          _sfBufVel,
-        );
+        readPosTexels(xi, yi, 1, 1, _sfBufPos);
+        readVelTexels(xi, yi, 1, 1, _sfBufVel);
         return {
           pos: new THREE.Vector3(_sfBufPos[0], _sfBufPos[1], _sfBufPos[2]),
           vel: new THREE.Vector3(_sfBufVel[0], _sfBufVel[1], _sfBufVel[2]),
@@ -15788,26 +16136,10 @@
       const stats = { ke: 0, temperature: 0, clumpiness: 0, sampled: 0 };
       let statsAccum = 0;
       function computeStats() {
-        const rtPos = gpu.getCurrentRenderTarget(posVar);
-        const rtVel = gpu.getCurrentRenderTarget(velVar);
         const posBuf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
         const velBuf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
-        renderer.readRenderTargetPixels(
-          rtPos,
-          0,
-          0,
-          TEX_SIZE,
-          TEX_SIZE,
-          posBuf,
-        );
-        renderer.readRenderTargetPixels(
-          rtVel,
-          0,
-          0,
-          TEX_SIZE,
-          TEX_SIZE,
-          velBuf,
-        );
+        readPosTexels(0, 0, TEX_SIZE, TEX_SIZE, posBuf);
+        readVelTexels(0, 0, TEX_SIZE, TEX_SIZE, velBuf);
         let ke = 0,
           spSum = 0,
           sp2Sum = 0,
@@ -16215,6 +16547,15 @@
         const realDt = (now - lastTime) / 1000;
         lastTime = now;
 
+        handTrackerTick(now);
+        updateHandWorld(camera, realDt);
+        if (velVar && velVar.material && velVar.material.uniforms.uHandPos) {
+          velVar.material.uniforms.uHandPos.value.copy(handTracker.worldPos);
+          velVar.material.uniforms.uHandVel.value.copy(handTracker.worldVel);
+          velVar.material.uniforms.uHandStrength.value = handTracker.strength;
+          velVar.material.uniforms.uHandRadius.value = handTracker.radius;
+        }
+
         framesAccum++;
         fpsAccum += realDt;
         if (fpsAccum >= 0.5) {
@@ -16330,6 +16671,8 @@
         updateHudFromScene();
         // Cinematic mode on by default — the app is meant to be watched.
         if (!director.enabled) toggleCinematic();
+        // Fire-and-forget; gated on ?hands=1, silent on failure.
+        initHandTracker();
         loop();
       })();
     </script>
