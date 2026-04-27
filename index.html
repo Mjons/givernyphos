@@ -1537,6 +1537,11 @@
         // Step 6 ping-pong: 0 means posA/velA hold current state and we
         // write into posB/velB; 1 swaps them. Flipped after each wgpuStep.
         which: 0,
+        // Phase 7b: live-activation flag. When true, the render loop runs
+        // wgpuStep + async readback instead of WebGL2 gpu.compute(), and
+        // pointMat reads from posTex / velTex DataTextures.
+        active: false,
+        readbackBusy: false,
       };
       // Module scope is sealed by <script type="module">; expose wgpuSim
       // on window so devtools can poke at it (e.g. wgpuSim.posTex.image.data).
@@ -1797,7 +1802,9 @@
             const b = wgpuSim.buffers[k];
             if (b) b.destroy();
           }
-          for (const sb of wgpuSim.buffers.staging) if (sb) sb.destroy();
+          for (const sb of wgpuSim.buffers.staging || []) if (sb) sb.destroy();
+          for (const sb of wgpuSim.buffers.frameStaging || [])
+            if (sb) sb.destroy();
         }
         const bodyBytes = N * 16; // vec4<f32>
         const PARAMS_BYTES = 320; // SimParams (260B) + headroom for alignment
@@ -1828,9 +1835,22 @@
               usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
             }),
           ],
+          // Dedicated readback pair for the per-frame loop in wgpuFrameStep.
+          // Kept separate from staging[0..1] (used by ad-hoc devtools verifies
+          // and pushToRender) so the two paths can't fight over a buffer.
+          frameStaging: [
+            device.createBuffer({
+              size: bodyBytes,
+              usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            }),
+            device.createBuffer({
+              size: bodyBytes,
+              usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            }),
+          ],
         };
         wgpuSim.capacity = N;
-        const totalMB = ((4 * bodyBytes + 2 * bodyBytes) / 1048576).toFixed(1);
+        const totalMB = ((4 * bodyBytes + 4 * bodyBytes) / 1048576).toFixed(1);
         console.info(`[wgpu] buffers allocated for N=${N} (~${totalMB} MB)`);
 
         // Phase 7a: persistent CPU-mirror DataTextures the renderer can
@@ -1887,6 +1907,12 @@
           state.velocities.byteOffset,
           N * 16,
         );
+        // Live state now lives on side A — reset the ping-pong cursor so
+        // the next wgpuStep reads from posA/velA. Without this, if the
+        // ping-pong was on B (e.g., after a verify or several wgpuSteps),
+        // the next step would read stale data from B and write the
+        // freshly-uploaded data away.
+        wgpuSim.which = 0;
       }
 
       // Round-trip check: copy posA/velA into the two staging buffers,
@@ -2692,6 +2718,199 @@
           "pushToRender",
           wgpuPushToRender,
         );
+      }
+
+      // ----- step 7b: live activation -----------------------------
+      // Per-frame routine when wgpuSim.active is true. Runs
+      // params.substeps wgpuSteps and queues an async readback into
+      // staging → DataTextures. If the previous frame's readback is
+      // still in flight we skip this frame's submit (the renderer
+      // shows one-frame-stale data; never blocks the render loop).
+      function wgpuFrameStep() {
+        if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
+          return;
+        }
+        const subs = Math.max(1, params.substeps | 0);
+        for (let s = 0; s < subs; s++) wgpuStep();
+        if (wgpuSim.readbackBusy) return;
+        wgpuSim.readbackBusy = true;
+        const device = wgpuSim.device;
+        const N = wgpuSim.capacity;
+        const bytes = N * 16;
+        const which = wgpuSim.which | 0;
+        const posBuf =
+          which === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const velBuf =
+          which === 0 ? wgpuSim.buffers.velA : wgpuSim.buffers.velB;
+        const fs = wgpuSim.buffers.frameStaging;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(posBuf, 0, fs[0], 0, bytes);
+        enc.copyBufferToBuffer(velBuf, 0, fs[1], 0, bytes);
+        device.queue.submit([enc.finish()]);
+        Promise.all([
+          fs[0].mapAsync(GPUMapMode.READ),
+          fs[1].mapAsync(GPUMapMode.READ),
+        ])
+          .then(() => {
+            const posSrc = new Float32Array(fs[0].getMappedRange());
+            const velSrc = new Float32Array(fs[1].getMappedRange());
+            wgpuSim.posTex.image.data.set(posSrc);
+            wgpuSim.velTex.image.data.set(velSrc);
+            fs[0].unmap();
+            fs[1].unmap();
+            wgpuSim.posTex.needsUpdate = true;
+            wgpuSim.velTex.needsUpdate = true;
+            wgpuSim.readbackBusy = false;
+          })
+          .catch((e) => {
+            console.warn("[wgpu] frame readback failed:", e);
+            // Defensive: try to unmap in case one mapAsync succeeded
+            // and the other rejected, leaving its partner stuck mapped.
+            try {
+              fs[0].unmap();
+            } catch (_) {}
+            try {
+              fs[1].unmap();
+            } catch (_) {}
+            wgpuSim.readbackBusy = false;
+          });
+      }
+
+      // Snapshot live WebGL state into WebGPU posA/velA (which=0), do
+      // one synchronous readback so the DataTextures hold valid pixels
+      // before the first render frame, swap pointMat uniforms over.
+      async function wgpuActivate() {
+        if (wgpuSim.active) {
+          console.info("[wgpu] activate: already active");
+          return true;
+        }
+        if (!wgpuSim.available || !wgpuSim.buffers || !wgpuSim.posTex) {
+          console.warn("[wgpu] activate: not ready");
+          return false;
+        }
+        const N = MAX_BODIES;
+        const bytes = N * 16;
+        // Pull current WebGL state, push into A side, reset which to 0.
+        const posSnap = new Float32Array(N * 4);
+        const velSnap = new Float32Array(N * 4);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(posVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          posSnap,
+        );
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(velVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          velSnap,
+        );
+        const device = wgpuSim.device;
+        device.queue.writeBuffer(
+          wgpuSim.buffers.posA,
+          0,
+          posSnap.buffer,
+          posSnap.byteOffset,
+          bytes,
+        );
+        device.queue.writeBuffer(
+          wgpuSim.buffers.velA,
+          0,
+          velSnap.buffer,
+          velSnap.byteOffset,
+          bytes,
+        );
+        wgpuSim.which = 0;
+        // Populate DataTextures so the very first WebGPU-mode render
+        // frame has real data in them, not zeros.
+        await wgpuPushToRender();
+        pointMat.uniforms.uPos.value = wgpuSim.posTex;
+        pointMat.uniforms.uVel.value = wgpuSim.velTex;
+        wgpuSim.active = true;
+        showToast("WebGPU", "active");
+        console.info("[wgpu] activated");
+        return true;
+      }
+
+      // Drain in-flight readback, blit current WebGPU state back into
+      // WebGL render targets, restore pointMat uniforms.
+      async function wgpuDeactivate() {
+        if (!wgpuSim.active) {
+          console.info("[wgpu] deactivate: not active");
+          return true;
+        }
+        // Wait for any in-flight readback so the staging buffers are
+        // safe to reuse for the snapshot.
+        let waited = 0;
+        while (wgpuSim.readbackBusy && waited < 200) {
+          await new Promise((r) => setTimeout(r, 5));
+          waited += 5;
+        }
+        const device = wgpuSim.device;
+        const N = MAX_BODIES;
+        const bytes = N * 16;
+        const which = wgpuSim.which | 0;
+        const posBuf =
+          which === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const velBuf =
+          which === 0 ? wgpuSim.buffers.velA : wgpuSim.buffers.velB;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(posBuf, 0, wgpuSim.buffers.staging[0], 0, bytes);
+        enc.copyBufferToBuffer(velBuf, 0, wgpuSim.buffers.staging[1], 0, bytes);
+        device.queue.submit([enc.finish()]);
+        await Promise.all([
+          wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ),
+          wgpuSim.buffers.staging[1].mapAsync(GPUMapMode.READ),
+        ]);
+        const posOut = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        ).slice();
+        const velOut = new Float32Array(
+          wgpuSim.buffers.staging[1].getMappedRange(),
+        ).slice();
+        wgpuSim.buffers.staging[0].unmap();
+        wgpuSim.buffers.staging[1].unmap();
+        // Blit into the current WebGL render targets so the live sim
+        // continues from the same point.
+        const posTex = new THREE.DataTexture(
+          posOut,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        posTex.needsUpdate = true;
+        const velTex = new THREE.DataTexture(
+          velOut,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        velTex.needsUpdate = true;
+        blit(posTex, gpu.getCurrentRenderTarget(posVar));
+        blit(velTex, gpu.getCurrentRenderTarget(velVar));
+        posTex.dispose();
+        velTex.dispose();
+        wgpuSim.active = false;
+        // Render-loop ordering re-binds these in the right place; this
+        // immediate update keeps the very first post-deactivate frame
+        // pointing at the WebGL textures, no flash of stale DataTexture.
+        pointMat.uniforms.uPos.value =
+          gpu.getCurrentRenderTarget(posVar).texture;
+        pointMat.uniforms.uVel.value =
+          gpu.getCurrentRenderTarget(velVar).texture;
+        showToast("WebGPU", "inactive");
+        console.info("[wgpu] deactivated");
+        return true;
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuActivate = _wgpuGuard("activate", wgpuActivate);
+        window.__wgpuDeactivate = _wgpuGuard("deactivate", wgpuDeactivate);
       }
 
       (async function probeWebGPU() {
@@ -6266,11 +6485,12 @@
       function uploadStateToGPU() {
         // Mirror the upload to the WebGPU side-A buffers if available.
         // First call also fires a readback verify so a layout/size
-        // mismatch surfaces immediately rather than at compute time.
+        // mismatch surfaces immediately rather than at compute time —
+        // but only when WebGPU is NOT live, since the verify shares the
+        // staging buffers with wgpuFrameStep's per-frame readback.
         wgpuUploadState();
-        if (wgpuSim.available && !_wgpuVerifiedOnce) {
+        if (wgpuSim.available && !_wgpuVerifiedOnce && !wgpuSim.active) {
           _wgpuVerifiedOnce = true;
-          // Fire and forget — the verify is logged async.
           wgpuReadbackVerify();
         }
         const posRT = gpu.getCurrentRenderTarget(posVar);
@@ -16016,17 +16236,26 @@
           velVar.material.uniforms.uSign.value = sign;
           velVar.material.uniforms.uFrame.value =
             (velVar.material.uniforms.uFrame.value + 1.0) % 65536.0;
-          for (let s = 0; s < params.substeps; s++) gpu.compute();
+          if (wgpuSim.active) {
+            wgpuFrameStep();
+          } else {
+            for (let s = 0; s < params.substeps; s++) gpu.compute();
+          }
           simTime += effDt * sign * params.substeps;
           stepReverse = false;
           stepOnce = false;
           maybeUpdateBarycenter();
         }
 
-        pointMat.uniforms.uPos.value =
-          gpu.getCurrentRenderTarget(posVar).texture;
-        pointMat.uniforms.uVel.value =
-          gpu.getCurrentRenderTarget(velVar).texture;
+        if (wgpuSim.active) {
+          pointMat.uniforms.uPos.value = wgpuSim.posTex;
+          pointMat.uniforms.uVel.value = wgpuSim.velTex;
+        } else {
+          pointMat.uniforms.uPos.value =
+            gpu.getCurrentRenderTarget(posVar).texture;
+          pointMat.uniforms.uVel.value =
+            gpu.getCurrentRenderTarget(velVar).texture;
+        }
         pointMat.uniforms.uTime.value = simTime;
         if (starfieldMat) starfieldMat.uniforms.uTime.value = simTime;
         vigGrainPass.uniforms.uTime.value = now * 0.001;
