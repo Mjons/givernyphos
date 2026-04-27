@@ -1534,6 +1534,9 @@
         pipelines: null, // { vel, pos }
         buffers: null, // { posA, posB, velA, velB, params, staging: [a, b] }
         capacity: 0, // body count the buffers are sized for
+        // Step 6 ping-pong: 0 means posA/velA hold current state and we
+        // write into posB/velB; 1 swaps them. Flipped after each wgpuStep.
+        which: 0,
       };
 
       // ----- step 2: WGSL shaders ----------------------------------
@@ -2262,6 +2265,154 @@
       }
       if (typeof window !== "undefined") {
         window.__wgpuStepVerify = wgpuStepVerify;
+      }
+
+      // ----- step 6: position step + ping-pong --------------------
+      // wgpuStep() runs one full velocity + position substep on the
+      // current ping-pong side, writing into the other side, then
+      // flips wgpuSim.which. Both shaders read from the SAME input
+      // buffers (current side) — matches GPGPU's parallel-pass
+      // semantics: position integrates against the OLD velocity, not
+      // the just-computed new one.
+      function wgpuStep() {
+        if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
+          return false;
+        }
+        if (!writeWgpuParams()) return false;
+        const device = wgpuSim.device;
+        const N = MAX_BODIES;
+        const buf = wgpuSim.buffers;
+        const which = wgpuSim.which | 0;
+        const posIn = which === 0 ? buf.posA : buf.posB;
+        const posOut = which === 0 ? buf.posB : buf.posA;
+        const velIn = which === 0 ? buf.velA : buf.velB;
+        const velOut = which === 0 ? buf.velB : buf.velA;
+        const velBindGroup = device.createBindGroup({
+          layout: wgpuSim.bindLayout,
+          entries: [
+            { binding: 0, resource: { buffer: posIn } },
+            { binding: 1, resource: { buffer: velIn } },
+            { binding: 2, resource: { buffer: velOut } },
+            { binding: 3, resource: { buffer: buf.params } },
+          ],
+        });
+        // Position step reads OLD vel (velIn), not the just-written new
+        // velocity — GPGPU runs both passes against the same input
+        // textures, and so do we.
+        const posBindGroup = device.createBindGroup({
+          layout: wgpuSim.bindLayout,
+          entries: [
+            { binding: 0, resource: { buffer: posIn } },
+            { binding: 1, resource: { buffer: velIn } },
+            { binding: 2, resource: { buffer: posOut } },
+            { binding: 3, resource: { buffer: buf.params } },
+          ],
+        });
+        const enc = device.createCommandEncoder();
+        const groups = Math.ceil(N / 256);
+        const vp = enc.beginComputePass();
+        vp.setPipeline(wgpuSim.pipelines.vel);
+        vp.setBindGroup(0, velBindGroup);
+        vp.dispatchWorkgroups(groups);
+        vp.end();
+        const pp = enc.beginComputePass();
+        pp.setPipeline(wgpuSim.pipelines.pos);
+        pp.setBindGroup(0, posBindGroup);
+        pp.dispatchWorkgroups(groups);
+        pp.end();
+        device.queue.submit([enc.finish()]);
+        wgpuSim.which = 1 - which;
+        return true;
+      }
+
+      // Sanity test — snapshot live WebGL state, upload to current side,
+      // run one wgpuStep, read back the new positions, log the first
+      // alive body. No comparison vs WebGL2 yet (next sub-step).
+      async function wgpuTestFullStep() {
+        if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
+          console.warn("[wgpu] full-step test: not ready");
+          return null;
+        }
+        const device = wgpuSim.device;
+        const N = MAX_BODIES;
+        const bytes = N * 16;
+        const posSnap = new Float32Array(N * 4);
+        const velSnap = new Float32Array(N * 4);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(posVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          posSnap,
+        );
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(velVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          velSnap,
+        );
+        const which = wgpuSim.which | 0;
+        const posIn = which === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const velIn = which === 0 ? wgpuSim.buffers.velA : wgpuSim.buffers.velB;
+        device.queue.writeBuffer(
+          posIn,
+          0,
+          posSnap.buffer,
+          posSnap.byteOffset,
+          bytes,
+        );
+        device.queue.writeBuffer(
+          velIn,
+          0,
+          velSnap.buffer,
+          velSnap.byteOffset,
+          bytes,
+        );
+        if (!wgpuStep()) {
+          console.warn("[wgpu] full-step test: step failed");
+          return null;
+        }
+        // After wgpuStep, `which` flipped; read the new "current side".
+        const newWhich = wgpuSim.which | 0;
+        const posCurrent =
+          newWhich === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(
+          posCurrent,
+          0,
+          wgpuSim.buffers.staging[0],
+          0,
+          bytes,
+        );
+        device.queue.submit([enc.finish()]);
+        await wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ);
+        const out = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        ).slice();
+        wgpuSim.buffers.staging[0].unmap();
+        for (let i = 0; i < N; i++) {
+          if (posSnap[i * 4 + 3] > 0) {
+            const before = [
+              posSnap[i * 4],
+              posSnap[i * 4 + 1],
+              posSnap[i * 4 + 2],
+            ];
+            const after = [out[i * 4], out[i * 4 + 1], out[i * 4 + 2]];
+            const delta = after.map((v, k) => v - before[k]);
+            console.info(
+              `[wgpu] full-step OK: body ${i} posBefore=${before.map((v) => v.toExponential(2))} posAfter=${after.map((v) => v.toExponential(2))} delta=${delta.map((v) => v.toExponential(2))}`,
+            );
+            return { N, body: i, before, after, delta };
+          }
+        }
+        console.warn("[wgpu] full-step test: no alive bodies");
+        return null;
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuTestFullStep = wgpuTestFullStep;
       }
 
       (async function probeWebGPU() {
@@ -7975,7 +8126,7 @@
               expo: renderer.toneMappingExposure,
             };
             setCaptureSize(size, size);
-            renderForCapture();
+            composer.render();
             const gl = renderer.getContext();
             const buf = new Uint8Array(size * size * 4);
             gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, buf);
@@ -13697,13 +13848,11 @@
         if (lensPass?.uniforms?.uAspect)
           lensPass.uniforms.uAspect.value = W / H;
       }
-      // Render to the composer twice when the AfterimagePass is enabled —
-      // composer.setSize() reallocates its feedback target, so the first
-      // post-resize frame has no trail-blur history. Two renders give us a
-      // one-frame seed and the soft trail halo appears in the save.
-      function renderForCapture() {
-        composer.render();
-        if (trailsPass?.enabled) composer.render();
+      function trailsActive() {
+        return (
+          !!trailsPass?.enabled &&
+          (trailsPass?.uniforms?.damp?.value ?? 0) > 0.001
+        );
       }
       function takeScreenshot(scale) {
         const viewW = renderer.getSize(new THREE.Vector2()).x;
@@ -13716,10 +13865,32 @@
         const W = Math.floor(w * ratio);
         const H = Math.floor(h * ratio);
 
-        setCaptureSize(W, H);
-        renderForCapture();
-        const url = renderer.domElement.toDataURL("image/png");
-        setCaptureSize(viewW, viewH);
+        // The AfterimagePass (global "Trails" slider) holds a feedback
+        // texture built up across many real-time frames. composer.setSize()
+        // reallocates it, and we can't reconstruct the history at the new
+        // size — the bodies aren't moving during a screenshot. So when
+        // trails are active we render at native size and 2D-upscale,
+        // trading super-sampling for keeping the streaks intact.
+        let url;
+        if (W === viewW && H === viewH) {
+          composer.render();
+          url = renderer.domElement.toDataURL("image/png");
+        } else if (trailsActive()) {
+          composer.render();
+          const c = document.createElement("canvas");
+          c.width = W;
+          c.height = H;
+          const ctx = c.getContext("2d");
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          ctx.drawImage(renderer.domElement, 0, 0, W, H);
+          url = c.toDataURL("image/png");
+        } else {
+          setCaptureSize(W, H);
+          composer.render();
+          url = renderer.domElement.toDataURL("image/png");
+          setCaptureSize(viewW, viewH);
+        }
 
         const a = document.createElement("a");
         a.href = url;
