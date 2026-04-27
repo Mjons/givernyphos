@@ -2607,7 +2607,12 @@
           loadedOnce: false,
         };
         const savedVol = parseFloat(localStorage.getItem("universe-music-vol"));
-        audio.volume = isFinite(savedVol) ? savedVol : 0.55;
+        // Recover from the stuck-at-zero bug: a saved volume of exactly 0
+        // is almost always the residue of a film fade-out that ended a
+        // previous session. Treat it as "no preference" and fall back to
+        // the default. Real silence preferences register as ~0.0001+ from
+        // the slider's clamp.
+        audio.volume = isFinite(savedVol) && savedVol > 0 ? savedVol : 0.55;
         const savedIdx = parseInt(localStorage.getItem("universe-music-idx"));
         if (isFinite(savedIdx) && savedIdx >= 0 && savedIdx < TRACKS.length) {
           state.index = savedIdx;
@@ -2758,6 +2763,21 @@
         function ensure() {
           if (ctx) {
             if (ctx.state === "suspended") ctx.resume().catch(() => {});
+            return;
+          }
+          // Skip Web Audio routing on file:// — Chrome treats every
+          // file:// URL as a unique origin, so each track in
+          // ssi_tracks/ is "cross-origin" with the document. Per spec,
+          // createMediaElementSource on a cross-origin source silences
+          // the AudioContext's destination — the node connects, no
+          // exception, but nothing plays. Direct HTMLAudioElement
+          // playback still works, so we just lose audio-reactive
+          // features (energy stays 0, onset never fires) until the
+          // page is served from a real origin.
+          if (
+            typeof location !== "undefined" &&
+            location.protocol === "file:"
+          ) {
             return;
           }
           try {
@@ -12402,12 +12422,18 @@
       }
       function rampMusicVolume(target, seconds) {
         clearInterval(_musicFadeTimer);
-        const start = music.volume;
+        const audio = music.audio;
+        const start = audio.volume;
         const t0 = performance.now();
         _musicFadeTimer = setInterval(() => {
           const t = (performance.now() - t0) / 1000 / Math.max(seconds, 0.001);
           const e = clamp(t, 0, 1);
-          music.setVolume(start + (target - start) * e);
+          // Write audio.volume directly so the cinematic fade doesn't
+          // persist intermediate / zero volumes to localStorage. Previous
+          // bug: a film ending in a fade-to-0 saved 0 as the user's
+          // permanent music volume — every later session was silent
+          // until the slider was touched.
+          audio.volume = clamp(start + (target - start) * e, 0, 1);
           if (e >= 1) clearInterval(_musicFadeTimer);
         }, 40);
       }
