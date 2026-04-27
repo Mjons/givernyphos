@@ -1749,6 +1749,104 @@
         const totalMB = ((4 * bodyBytes + 2 * bodyBytes) / 1048576).toFixed(1);
         console.info(`[wgpu] buffers allocated for N=${N} (~${totalMB} MB)`);
       }
+
+      // ----- step 3: upload + readback round-trip ------------------
+      // Writes the CPU-side scene state (`state.positions` /
+      // `state.velocities`) into the WebGPU side-A buffers. The
+      // WebGL2 path does the same upload via DataTexture+blit; the two
+      // mirror each other until the WebGPU compute path takes over.
+      function wgpuUploadState() {
+        if (!wgpuSim.available || !wgpuSim.buffers) return;
+        if (wgpuSim.capacity < MAX_BODIES) {
+          // Density tier grew underneath us — re-allocate. Step 8 will
+          // wire this into rebuildPipeline; for now it's defensive.
+          wgpuAllocateBuffers(MAX_BODIES);
+        }
+        const device = wgpuSim.device;
+        const N = MAX_BODIES;
+        device.queue.writeBuffer(
+          wgpuSim.buffers.posA,
+          0,
+          state.positions.buffer,
+          state.positions.byteOffset,
+          N * 16,
+        );
+        device.queue.writeBuffer(
+          wgpuSim.buffers.velA,
+          0,
+          state.velocities.buffer,
+          state.velocities.byteOffset,
+          N * 16,
+        );
+      }
+
+      // Round-trip check: copy posA/velA into the two staging buffers,
+      // mapAsync, compare to `state.positions`/`state.velocities`. Any
+      // diff > 1e-6 indicates a layout / size / endianness mismatch we
+      // need to find before wiring step-4 compute. Logs results.
+      async function wgpuReadbackVerify() {
+        if (!wgpuSim.available || !wgpuSim.buffers) return null;
+        const device = wgpuSim.device;
+        const N = wgpuSim.capacity;
+        const bytes = N * 16;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(
+          wgpuSim.buffers.posA,
+          0,
+          wgpuSim.buffers.staging[0],
+          0,
+          bytes,
+        );
+        enc.copyBufferToBuffer(
+          wgpuSim.buffers.velA,
+          0,
+          wgpuSim.buffers.staging[1],
+          0,
+          bytes,
+        );
+        device.queue.submit([enc.finish()]);
+        await Promise.all([
+          wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ),
+          wgpuSim.buffers.staging[1].mapAsync(GPUMapMode.READ),
+        ]);
+        const posOut = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        ).slice();
+        const velOut = new Float32Array(
+          wgpuSim.buffers.staging[1].getMappedRange(),
+        ).slice();
+        wgpuSim.buffers.staging[0].unmap();
+        wgpuSim.buffers.staging[1].unmap();
+        let posMaxDiff = 0;
+        let velMaxDiff = 0;
+        let mismatch = 0;
+        const len = N * 4;
+        for (let i = 0; i < len; i++) {
+          const dPos = Math.abs(posOut[i] - state.positions[i]);
+          const dVel = Math.abs(velOut[i] - state.velocities[i]);
+          if (dPos > posMaxDiff) posMaxDiff = dPos;
+          if (dVel > velMaxDiff) velMaxDiff = dVel;
+          if (dPos > 1e-6 || dVel > 1e-6) mismatch++;
+        }
+        const result = {
+          N,
+          posMaxDiff,
+          velMaxDiff,
+          mismatch,
+          pass: posMaxDiff < 1e-6 && velMaxDiff < 1e-6,
+        };
+        const tag = result.pass ? "OK" : "MISMATCH";
+        console.info(
+          `[wgpu] readback verify (${tag}): N=${N} posMaxDiff=${posMaxDiff.toExponential(2)} velMaxDiff=${velMaxDiff.toExponential(2)} mismatched=${mismatch}`,
+        );
+        return result;
+      }
+
+      // Devtools-friendly entry point — call from console anytime to
+      // re-run the round-trip against current GPU state.
+      if (typeof window !== "undefined") {
+        window.__wgpuVerify = wgpuReadbackVerify;
+      }
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
@@ -5272,7 +5370,17 @@
         renderer.setRenderTarget(prev);
       }
 
+      let _wgpuVerifiedOnce = false;
       function uploadStateToGPU() {
+        // Mirror the upload to the WebGPU side-A buffers if available.
+        // First call also fires a readback verify so a layout/size
+        // mismatch surfaces immediately rather than at compute time.
+        wgpuUploadState();
+        if (wgpuSim.available && !_wgpuVerifiedOnce) {
+          _wgpuVerifiedOnce = true;
+          // Fire and forget — the verify is logged async.
+          wgpuReadbackVerify();
+        }
         const posRT = gpu.getCurrentRenderTarget(posVar);
         const velRT = gpu.getCurrentRenderTarget(velVar);
         const posTex = new THREE.DataTexture(
