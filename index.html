@@ -1109,6 +1109,109 @@
       #debug-overlay.hidden {
         display: none;
       }
+      /* Density-tier confirm modal — only fires for experimental tiers. */
+      #density-modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 60;
+      }
+      #density-modal.hidden {
+        display: none;
+      }
+      .density-modal-card {
+        background: rgba(14, 14, 18, 0.92);
+        border: 1px solid var(--border-2);
+        border-radius: var(--r-2);
+        padding: 24px 28px;
+        max-width: 420px;
+        box-shadow: var(--shadow-1);
+        color: var(--text-0);
+      }
+      .density-modal-title {
+        font-size: 11px;
+        letter-spacing: 0.3em;
+        text-transform: uppercase;
+        color: var(--text-2);
+        margin-bottom: 14px;
+      }
+      .density-modal-body {
+        font-size: 13px;
+        line-height: 1.55;
+        margin-bottom: 18px;
+      }
+      .density-modal-body b {
+        color: var(--accent);
+      }
+      .density-modal-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+      .density-modal-btn {
+        background: transparent;
+        border: 1px solid var(--border-2);
+        color: var(--text-0);
+        padding: 8px 14px;
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        cursor: pointer;
+        border-radius: var(--r-1);
+      }
+      .density-modal-btn.primary {
+        background: var(--accent);
+        color: #0a0a0e;
+        border-color: var(--accent);
+      }
+      .density-modal-btn:hover {
+        opacity: 0.85;
+      }
+      /* Auto-revert banner — bottom-center, fires when watchdog trips. */
+      #density-revert-banner {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(28, 14, 14, 0.92);
+        border: 1px solid #c44;
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-radius: var(--r-2);
+        padding: 12px 18px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--text-0);
+        box-shadow: var(--shadow-1);
+        z-index: 50;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        max-width: 480px;
+      }
+      #density-revert-banner.hidden {
+        display: none;
+      }
+      #density-revert-msg b {
+        color: #ffb;
+      }
+      #density-stay-btn {
+        background: transparent;
+        border: 1px solid var(--border-2);
+        color: var(--text-0);
+        padding: 6px 12px;
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        cursor: pointer;
+        border-radius: var(--r-1);
+        white-space: nowrap;
+      }
       #toast .accent {
         color: var(--accent);
         margin-right: 10px;
@@ -1303,6 +1406,24 @@
     <div id="film-title"></div>
     <div id="err"></div>
     <pre id="debug-overlay" class="hidden"></pre>
+    <div id="density-modal" class="overlay hidden">
+      <div class="density-modal-card">
+        <div class="density-modal-title">Experimental density</div>
+        <div class="density-modal-body" id="density-modal-body"></div>
+        <div class="density-modal-actions">
+          <button id="density-modal-cancel" class="density-modal-btn">
+            Cancel
+          </button>
+          <button id="density-modal-confirm" class="density-modal-btn primary">
+            Try it
+          </button>
+        </div>
+      </div>
+    </div>
+    <div id="density-revert-banner" class="hidden">
+      <span id="density-revert-msg"></span>
+      <button id="density-stay-btn">Stay anyway</button>
+    </div>
 
     <script type="importmap">
       {
@@ -1334,8 +1455,34 @@
         standard: { texSize: 128, label: "standard", shortCount: "16k" },
         dense: { texSize: 181, label: "dense", shortCount: "33k" },
         lush: { texSize: 256, label: "lush", shortCount: "65k" },
+        titanic: {
+          texSize: 360,
+          label: "titanic",
+          shortCount: "130k",
+          experimental: true,
+        },
+        colossal: {
+          texSize: 512,
+          label: "colossal",
+          shortCount: "262k",
+          experimental: true,
+        },
+        abyssal: {
+          texSize: 720,
+          label: "abyssal",
+          shortCount: "518k",
+          experimental: true,
+        },
       };
-      const DENSITY_ORDER = ["lite", "standard", "dense", "lush"];
+      const DENSITY_ORDER = [
+        "lite",
+        "standard",
+        "dense",
+        "lush",
+        "titanic",
+        "colossal",
+        "abyssal",
+      ];
       function loadInitialDensity() {
         // URL param takes top priority — lets an embed / share link
         // land a visitor at a specific density without them touching UI.
@@ -6850,9 +6997,13 @@
           "font-size: 10px; color: var(--text-2); letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 6px;";
         densLabel.textContent = "Level";
         dens.appendChild(densLabel);
+        const hwMax = renderer.capabilities.maxTextureSize || 2048;
+        // Standard tiers — always available below the hardware cap.
         const densRow = el("div", "pill-row");
         for (const key of DENSITY_ORDER) {
           const lvl = DENSITY_LEVELS[key];
+          if (lvl.experimental) continue;
+          if (lvl.texSize > hwMax) continue;
           const pill = el(
             "button",
             "pill" + (currentDensityKey === key ? " active" : ""),
@@ -6868,6 +7019,39 @@
         densHint.textContent =
           "Higher density = more bodies but heavier GPU cost. Lush is recording-only.";
         dens.appendChild(densHint);
+
+        // Experimental tiers — gated by a confirm modal + auto-revert
+        // watchdog. Only listed here if the GPU can address the texture.
+        const expTiers = DENSITY_ORDER.filter(
+          (k) =>
+            DENSITY_LEVELS[k].experimental &&
+            DENSITY_LEVELS[k].texSize <= hwMax,
+        );
+        if (expTiers.length > 0) {
+          const expLabel = el("div");
+          expLabel.style.cssText =
+            "font-size: 10px; color: #d97a4a; letter-spacing: 0.18em; text-transform: uppercase; margin: 14px 0 6px;";
+          expLabel.textContent = "⚠ Experimental";
+          dens.appendChild(expLabel);
+          const expRow = el("div", "pill-row");
+          for (const key of expTiers) {
+            const lvl = DENSITY_LEVELS[key];
+            const pill = el(
+              "button",
+              "pill" + (currentDensityKey === key ? " active" : ""),
+            );
+            pill.innerHTML = `${lvl.label}<br><span style="opacity:0.6;font-size:9px">${lvl.shortCount}</span>`;
+            pill.addEventListener("click", () => setDensity(key));
+            expRow.appendChild(pill);
+          }
+          dens.appendChild(expRow);
+          const expHint = el("div");
+          expHint.style.cssText =
+            "font-size: 10px; color: var(--text-2); margin-top: 8px; line-height: 1.4;";
+          expHint.textContent =
+            "Heavy GPU load. Auto-reverts one step down if FPS drops below 30.";
+          dens.appendChild(expHint);
+        }
         panelEl.appendChild(dens);
       }
 
@@ -7413,22 +7597,270 @@
         rebuildingPipeline = false;
       }
 
-      function setDensity(key) {
+      // Per-tier performance clamps. Experimental tiers run with the most
+      // expensive post-FX passes hard-capped (or disabled outright on
+      // abyssal) so the gravity step has more GPU headroom. Applied each
+      // frame so scene transitions / pulses / moods can't sneak past.
+      const DENSITY_PERF_PRESETS = {
+        titanic: { bloomCap: 0.6, trailCap: 0.7, lensCap: 0.5 },
+        colossal: {
+          bloomCap: 0.3,
+          trailCap: 0.4,
+          lensCap: 0.2,
+          caCap: 0.012,
+        },
+        abyssal: {
+          bloomCap: 0.0,
+          trailCap: 0.0,
+          lensCap: 0.0,
+          caCap: 0.005,
+          grainCap: 0.02,
+        },
+      };
+      function applyDensityPerfFrameClamp() {
+        const lvl = DENSITY_LEVELS[currentDensityKey];
+        if (!lvl || !lvl.experimental) return;
+        const p = DENSITY_PERF_PRESETS[currentDensityKey];
+        if (!p) return;
+        if (p.bloomCap != null) {
+          if (p.bloomCap < 0.001) {
+            bloom.enabled = false;
+          } else {
+            bloom.enabled = true;
+            if (bloom.strength > p.bloomCap) bloom.strength = p.bloomCap;
+          }
+        }
+        if (p.trailCap != null) {
+          if (p.trailCap < 0.001) {
+            trailsPass.enabled = false;
+          } else {
+            trailsPass.enabled = true;
+            if (trailsPass.uniforms.damp.value > p.trailCap) {
+              trailsPass.uniforms.damp.value = p.trailCap;
+            }
+          }
+        }
+        if (p.lensCap != null) {
+          if (p.lensCap < 0.001) {
+            lensPass.enabled = false;
+          } else {
+            lensPass.enabled = true;
+            if (lensPass.uniforms.uStrength.value > p.lensCap) {
+              lensPass.uniforms.uStrength.value = p.lensCap;
+            }
+          }
+        }
+        if (p.caCap != null && caPass.uniforms.uAmount.value > p.caCap) {
+          caPass.uniforms.uAmount.value = p.caCap;
+        }
+        if (
+          p.grainCap != null &&
+          vigGrainPass.uniforms.uGrain.value > p.grainCap
+        ) {
+          vigGrainPass.uniforms.uGrain.value = p.grainCap;
+        }
+      }
+      // Re-enable post-FX passes that were hard-disabled by an experimental
+      // tier, so dropping back to standard/lush doesn't strand them off.
+      function restoreDensityPerfPasses() {
+        bloom.enabled = true;
+        trailsPass.enabled = trailsPass.uniforms.damp.value > 0.001;
+        lensPass.enabled = lensPass.uniforms.uStrength.value > 0.001;
+      }
+
+      // Density-tier watchdog — fires only on experimental tiers. Keeps a
+      // 5-second rolling FPS window after a 2-second warmup, and steps the
+      // tier down by one if the mean drops below 30 fps. User can override
+      // with "Stay anyway" — that tier is then suppressed for this session.
+      const densityWatchdog = {
+        active: false,
+        prevKey: null,
+        startedAt: 0,
+        warmupMs: 2000,
+        windowMs: 5000,
+        threshold: 30,
+        frameSamples: [], // { t, dt }
+        reverting: false,
+        revertCountdownMs: 10000,
+        revertStartedAt: 0,
+        revertTimer: null,
+        staySession: {}, // { tierKey: true }
+      };
+      function startDensityWatchdog(prevKey) {
+        const lvl = DENSITY_LEVELS[currentDensityKey];
+        if (!lvl || !lvl.experimental) return;
+        if (densityWatchdog.staySession[currentDensityKey]) return;
+        densityWatchdog.active = true;
+        densityWatchdog.prevKey = prevKey;
+        densityWatchdog.startedAt = performance.now();
+        densityWatchdog.frameSamples.length = 0;
+        densityWatchdog.reverting = false;
+      }
+      function stopDensityWatchdog() {
+        densityWatchdog.active = false;
+        densityWatchdog.frameSamples.length = 0;
+        if (densityWatchdog.revertTimer) {
+          clearInterval(densityWatchdog.revertTimer);
+          densityWatchdog.revertTimer = null;
+        }
+        densityWatchdog.reverting = false;
+        const banner = $("#density-revert-banner");
+        if (banner) banner.classList.add("hidden");
+      }
+      function tickDensityWatchdog(realDt) {
+        if (!densityWatchdog.active || densityWatchdog.reverting) return;
+        // Don't sample while hidden or mid-transition — both lie about FPS.
+        if (document.hidden) return;
+        if (transitionRaf) return;
+        const now = performance.now();
+        if (now - densityWatchdog.startedAt < densityWatchdog.warmupMs) return;
+        const samples = densityWatchdog.frameSamples;
+        samples.push({ t: now, dt: realDt });
+        while (
+          samples.length > 0 &&
+          now - samples[0].t > densityWatchdog.windowMs
+        ) {
+          samples.shift();
+        }
+        // Need a full window before we judge.
+        if (samples.length < 30) return;
+        if (now - samples[0].t < densityWatchdog.windowMs * 0.9) return;
+        let totalDt = 0;
+        for (const s of samples) totalDt += s.dt;
+        const meanFps = samples.length / Math.max(totalDt, 1e-6);
+        if (meanFps < densityWatchdog.threshold) {
+          triggerDensityRevert(meanFps);
+        }
+      }
+      function triggerDensityRevert(observedFps) {
+        densityWatchdog.reverting = true;
+        densityWatchdog.revertStartedAt = performance.now();
+        const idx = DENSITY_ORDER.indexOf(currentDensityKey);
+        const stepDownKey = idx > 0 ? DENSITY_ORDER[idx - 1] : null;
+        const stepDownLbl = stepDownKey
+          ? DENSITY_LEVELS[stepDownKey].label
+          : "lower";
+        const banner = $("#density-revert-banner");
+        const msg = $("#density-revert-msg");
+        if (msg) {
+          msg.innerHTML = `FPS dropped to <b>${Math.round(observedFps)}</b>. Stepping down to <b>${stepDownLbl}</b> in <b id="density-revert-count">10</b>s`;
+        }
+        if (banner) banner.classList.remove("hidden");
+        densityWatchdog.revertTimer = setInterval(() => {
+          const elapsed = performance.now() - densityWatchdog.revertStartedAt;
+          const remaining = densityWatchdog.revertCountdownMs - elapsed;
+          if (remaining <= 0) {
+            confirmDensityRevert();
+            return;
+          }
+          const cnt = $("#density-revert-count");
+          if (cnt) cnt.textContent = Math.ceil(remaining / 1000);
+        }, 200);
+      }
+      function confirmDensityRevert() {
+        const idx = DENSITY_ORDER.indexOf(currentDensityKey);
+        const stepDownKey = idx > 0 ? DENSITY_ORDER[idx - 1] : null;
+        stopDensityWatchdog();
+        if (stepDownKey) setDensity(stepDownKey, { skipConfirm: true });
+      }
+      function staySetDensity() {
+        densityWatchdog.staySession[currentDensityKey] = true;
+        stopDensityWatchdog();
+      }
+
+      // Modal — only fires for experimental tiers, and only once per
+      // session per tier (the user can suppress via Stay anyway).
+      let _densityModalPending = null;
+      function showDensityConfirmModal(key) {
+        const lvl = DENSITY_LEVELS[key];
+        const modal = $("#density-modal");
+        const body = $("#density-modal-body");
+        if (!modal || !body) {
+          // No modal in DOM (defensive) — just proceed.
+          setDensity(key, { skipConfirm: true });
+          return;
+        }
+        body.innerHTML = `Switch to <b>${lvl.label}</b> (~${lvl.shortCount} bodies)? Heavy GPU load — gravity work scales O(N²). If FPS drops below 30, the tier auto-reverts one step down after a 10-second countdown.`;
+        modal.classList.remove("hidden");
+        _densityModalPending = key;
+      }
+      function hideDensityConfirmModal() {
+        const modal = $("#density-modal");
+        if (modal) modal.classList.add("hidden");
+        _densityModalPending = null;
+      }
+      // Wire modal buttons once.
+      (function wireDensityModal() {
+        const confirmBtn = $("#density-modal-confirm");
+        const cancelBtn = $("#density-modal-cancel");
+        const stayBtn = $("#density-stay-btn");
+        if (confirmBtn) {
+          confirmBtn.addEventListener("click", () => {
+            const key = _densityModalPending;
+            hideDensityConfirmModal();
+            if (key) setDensity(key, { skipConfirm: true });
+          });
+        }
+        if (cancelBtn) {
+          cancelBtn.addEventListener("click", hideDensityConfirmModal);
+        }
+        if (stayBtn) {
+          stayBtn.addEventListener("click", staySetDensity);
+        }
+      })();
+
+      function setDensity(key, opts) {
         if (!DENSITY_LEVELS[key]) return;
         if (key === currentDensityKey) return;
         const lvl = DENSITY_LEVELS[key];
+        const skipConfirm = opts && opts.skipConfirm;
+        // Experimental tiers go through a confirm-and-watchdog flow unless
+        // the watchdog itself is doing the revert.
+        if (
+          lvl.experimental &&
+          !skipConfirm &&
+          !densityWatchdog.staySession[key]
+        ) {
+          showDensityConfirmModal(key);
+          return;
+        }
+        const prevKey = currentDensityKey;
+        const wasExperimental =
+          DENSITY_LEVELS[prevKey] && DENSITY_LEVELS[prevKey].experimental;
         currentDensityKey = key;
         try {
           localStorage.setItem("universeSim.density", key);
         } catch (_) {}
         rebuildPipeline(lvl.texSize);
+        // Leaving an experimental tier: re-enable any post-FX passes the
+        // perf clamp had hard-disabled so non-experimental scenes look right.
+        if (wasExperimental && !lvl.experimental) restoreDensityPerfPasses();
+        // Entering an experimental tier: tell the user what just got dialed
+        // back so the visual change isn't a mystery.
+        const preset = DENSITY_PERF_PRESETS[key];
+        const off = preset
+          ? Object.entries(preset)
+              .filter(([, v]) => v != null && v < 0.001)
+              .map(([k]) => k.replace(/Cap$/, ""))
+          : [];
         showToast("Density", lvl.label + " · " + lvl.shortCount);
+        if (off.length > 0) {
+          setTimeout(
+            () => showToast(lvl.label, off.join(" + ") + " off for headroom"),
+            1200,
+          );
+        }
         if (key === "lush") {
           setTimeout(
             () => showToast("Lush mode", "bloom off recommended for 60fps"),
             1600,
           );
         }
+        // Stop any pending watchdog when we leave an experimental tier (or
+        // step down via the watchdog itself); start a fresh one if we just
+        // entered an experimental tier.
+        stopDensityWatchdog();
+        if (lvl.experimental) startDensityWatchdog(prevKey);
         if (activePanel === "settings") buildPanel("settings");
         reflectHudBodyCount();
       }
@@ -14209,6 +14641,7 @@
 
         // Pull FFT first so energy/onset are fresh for directorTick.
         audioReact.tick(realDt);
+        tickDensityWatchdog(realDt);
 
         // Priority: movie > follow-cam > director + drift.
         if (movie.active) {
@@ -14229,6 +14662,7 @@
         // Solar-system animation (runs during materialise/active/dissolve).
         updateSolarSystem(realDt);
         controls.update();
+        applyDensityPerfFrameClamp();
         composer.render();
 
         if (_debugOverlayVisible) updateDebugOverlay();
