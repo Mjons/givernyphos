@@ -1987,6 +1987,224 @@
         window.__wgpuTestVelStep = wgpuTestVelStep;
       }
 
+      // ----- step 4c: numeric comparison vs WebGL2 -----------------
+      // Compare WebGPU velocity output against WebGL2's for one substep
+      // on the same input state. Non-destructive: snapshots the live
+      // state, runs both paths, restores the snapshot.
+      // Returns { N, live, maxAbs, maxRel, rms, pass }.
+      async function wgpuStepVerify() {
+        if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
+          console.warn("[wgpu] verify: not ready");
+          return null;
+        }
+        const N = MAX_BODIES;
+        const len = N * 4;
+        const bytes = N * 16;
+
+        // Temporarily zero the flocking + radiation uniforms so this
+        // test compares gravity-only — the WGSL shader doesn't yet
+        // implement those branches (step 5). Restored at the end.
+        const savedFlock = velVar.material.uniforms.uFlock.value;
+        const savedRad = velVar.material.uniforms.uRadiation.value;
+        velVar.material.uniforms.uFlock.value = 0;
+        velVar.material.uniforms.uRadiation.value = 0;
+
+        // 1. Snapshot WebGL state.
+        const posSnap = new Float32Array(len);
+        const velSnap = new Float32Array(len);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(posVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          posSnap,
+        );
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(velVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          velSnap,
+        );
+
+        // 2. WebGL2: run one compute SYNCHRONOUSLY (before any await),
+        // read back the resulting velocity, restore the snapshot. Doing
+        // all of this before we yield to the event loop is critical —
+        // otherwise the render loop's rAF would interleave during our
+        // await and add extra substeps, making wglVel much further past
+        // the snapshot than wgpuVel.
+        gpu.compute();
+        const wglVel = new Float32Array(len);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(velVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          wglVel,
+        );
+        // Restore the snapshot to the now-current ping-pong target so
+        // the live sim is undisturbed. Both pos and vel advanced.
+        const posTex = new THREE.DataTexture(
+          posSnap,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        posTex.needsUpdate = true;
+        const velTex = new THREE.DataTexture(
+          velSnap,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        velTex.needsUpdate = true;
+        blit(posTex, gpu.getCurrentRenderTarget(posVar));
+        blit(velTex, gpu.getCurrentRenderTarget(velVar));
+        posTex.dispose();
+        velTex.dispose();
+
+        // 3. WebGPU: upload snapshot, write params, dispatch velStep,
+        // await readback. Safe to await now — WebGL is back at snapshot
+        // and the render loop won't disturb our comparison.
+        const device = wgpuSim.device;
+        device.queue.writeBuffer(
+          wgpuSim.buffers.posA,
+          0,
+          posSnap.buffer,
+          posSnap.byteOffset,
+          bytes,
+        );
+        device.queue.writeBuffer(
+          wgpuSim.buffers.velA,
+          0,
+          velSnap.buffer,
+          velSnap.byteOffset,
+          bytes,
+        );
+        writeWgpuParams();
+        const bindGroup = device.createBindGroup({
+          layout: wgpuSim.bindLayout,
+          entries: [
+            { binding: 0, resource: { buffer: wgpuSim.buffers.posA } },
+            { binding: 1, resource: { buffer: wgpuSim.buffers.velA } },
+            { binding: 2, resource: { buffer: wgpuSim.buffers.velB } },
+            { binding: 3, resource: { buffer: wgpuSim.buffers.params } },
+          ],
+        });
+        const enc = device.createCommandEncoder();
+        const cpass = enc.beginComputePass();
+        cpass.setPipeline(wgpuSim.pipelines.vel);
+        cpass.setBindGroup(0, bindGroup);
+        cpass.dispatchWorkgroups(Math.ceil(N / 256));
+        cpass.end();
+        enc.copyBufferToBuffer(
+          wgpuSim.buffers.velB,
+          0,
+          wgpuSim.buffers.staging[0],
+          0,
+          bytes,
+        );
+        device.queue.submit([enc.finish()]);
+        await wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ);
+        const wgpuVel = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        ).slice();
+        wgpuSim.buffers.staging[0].unmap();
+
+        // 5. Compare per-body velocity deltas. Skip dead bodies (mass<=0)
+        // and the .w channel (kind+age is discrete bookkeeping).
+        let maxAbs = 0;
+        let maxRel = 0;
+        let sumSq = 0;
+        let live = 0;
+        let comparisons = 0;
+        let worstIdx = -1;
+        let worstC = -1;
+        for (let i = 0; i < N; i++) {
+          const m = posSnap[i * 4 + 3];
+          if (m <= 0) continue;
+          live++;
+          for (let c = 0; c < 3; c++) {
+            const a = wgpuVel[i * 4 + c] - velSnap[i * 4 + c];
+            const b = wglVel[i * 4 + c] - velSnap[i * 4 + c];
+            const diff = a - b;
+            const adiff = Math.abs(diff);
+            if (adiff > maxAbs) {
+              maxAbs = adiff;
+              worstIdx = i;
+              worstC = c;
+            }
+            const denom = Math.max(1e-6, Math.abs(b));
+            const rel = adiff / denom;
+            if (rel > maxRel) maxRel = rel;
+            sumSq += diff * diff;
+            comparisons++;
+          }
+        }
+        // Restore flock + radiation uniforms now that comparison is done.
+        velVar.material.uniforms.uFlock.value = savedFlock;
+        velVar.material.uniforms.uRadiation.value = savedRad;
+
+        const rms = Math.sqrt(sumSq / Math.max(1, comparisons));
+        const ok = maxRel < 1e-3;
+        const tag = ok ? "OK" : "DIVERGED";
+        console.info(
+          `[wgpu] step verify (${tag}): N=${N} live=${live} maxAbs=${maxAbs.toExponential(2)} maxRel=${maxRel.toExponential(2)} rms=${rms.toExponential(2)}`,
+        );
+        if (!ok && worstIdx >= 0) {
+          const cName = ["x", "y", "z"][worstC];
+          const beforePos = [
+            posSnap[worstIdx * 4],
+            posSnap[worstIdx * 4 + 1],
+            posSnap[worstIdx * 4 + 2],
+          ];
+          const beforeMass = posSnap[worstIdx * 4 + 3];
+          const beforeVel = [
+            velSnap[worstIdx * 4],
+            velSnap[worstIdx * 4 + 1],
+            velSnap[worstIdx * 4 + 2],
+          ];
+          const beforeKindAge = velSnap[worstIdx * 4 + 3];
+          const wgpuDelta = wgpuVel[worstIdx * 4 + worstC] - beforeVel[worstC];
+          const wglDelta = wglVel[worstIdx * 4 + worstC] - beforeVel[worstC];
+          console.info(
+            `[wgpu] worst body=${worstIdx} comp=${cName} | pos=${beforePos.map((v) => v.toExponential(2))} mass=${beforeMass.toExponential(2)} kindAge=${beforeKindAge.toFixed(3)} | velBefore=${beforeVel[worstC].toExponential(3)} | wgpuDelta=${wgpuDelta.toExponential(3)} wglDelta=${wglDelta.toExponential(3)}`,
+          );
+          // Also dump first 3 alive bodies' deltas for reference.
+          const samples = [];
+          for (let i = 0; i < N && samples.length < 3; i++) {
+            if (posSnap[i * 4 + 3] <= 0) continue;
+            samples.push({
+              i,
+              wgpu: [
+                wgpuVel[i * 4] - velSnap[i * 4],
+                wgpuVel[i * 4 + 1] - velSnap[i * 4 + 1],
+                wgpuVel[i * 4 + 2] - velSnap[i * 4 + 2],
+              ],
+              wgl: [
+                wglVel[i * 4] - velSnap[i * 4],
+                wglVel[i * 4 + 1] - velSnap[i * 4 + 1],
+                wglVel[i * 4 + 2] - velSnap[i * 4 + 2],
+              ],
+            });
+          }
+          for (const s of samples) {
+            console.info(
+              `[wgpu] sample body=${s.i} wgpuDelta=[${s.wgpu.map((v) => v.toExponential(2)).join(",")}] wglDelta=[${s.wgl.map((v) => v.toExponential(2)).join(",")}]`,
+            );
+          }
+        }
+        return { N, live, maxAbs, maxRel, rms, pass: ok, worstIdx, worstC };
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuStepVerify = wgpuStepVerify;
+      }
+
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
