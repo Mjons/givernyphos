@@ -1627,7 +1627,14 @@
           let newVel = velA.xyz + acc * p.dt * p.sign;
           let dAge   = p.dt * abs(p.sign) / p.maxAge;
           let newAge = clamp(ageNorm + dAge, 0.0, 0.9999);
-          outVel[i]  = vec4<f32>(newVel, kindFloat + newAge);
+          // Dead bodies preserve velA unchanged — matches the GLSL
+          // early-return at index.html:1666 so age doesn't tick on
+          // empty texels and we don't drift away from the WebGL2 path.
+          if (alive) {
+            outVel[i] = vec4<f32>(newVel, kindFloat + newAge);
+          } else if (i < p.N) {
+            outVel[i] = velA;
+          }
         }
       `;
       const WGSL_POS_SHADER =
