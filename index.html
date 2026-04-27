@@ -1538,6 +1538,9 @@
         // write into posB/velB; 1 swaps them. Flipped after each wgpuStep.
         which: 0,
       };
+      // Module scope is sealed by <script type="module">; expose wgpuSim
+      // on window so devtools can poke at it (e.g. wgpuSim.posTex.image.data).
+      if (typeof window !== "undefined") window.__wgpuSim = wgpuSim;
 
       // ----- step 2: WGSL shaders ----------------------------------
       // SimParams lives in a storage buffer (not uniform) so the K[49]
@@ -1829,6 +1832,31 @@
         wgpuSim.capacity = N;
         const totalMB = ((4 * bodyBytes + 2 * bodyBytes) / 1048576).toFixed(1);
         console.info(`[wgpu] buffers allocated for N=${N} (~${totalMB} MB)`);
+
+        // Phase 7a: persistent CPU-mirror DataTextures the renderer can
+        // read from when WebGPU is the live source. Sized to TEX_SIZE,
+        // float RGBA, same shape as the GPGPU render targets so they're
+        // drop-in replacements at pointMat.uniforms.uPos/uVel.
+        if (wgpuSim.posTex) wgpuSim.posTex.dispose();
+        if (wgpuSim.velTex) wgpuSim.velTex.dispose();
+        const posData = new Float32Array(N * 4);
+        const velData = new Float32Array(N * 4);
+        wgpuSim.posTex = new THREE.DataTexture(
+          posData,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        wgpuSim.velTex = new THREE.DataTexture(
+          velData,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        wgpuSim.posTex.needsUpdate = true;
+        wgpuSim.velTex.needsUpdate = true;
       }
 
       // ----- step 3: upload + readback round-trip ------------------
@@ -2604,6 +2632,68 @@
         );
       }
 
+      // ----- step 7a: render hand-off — DataTexture push -----------
+      // Copy the current side's pos+vel buffers into the persistent
+      // DataTextures (wgpuSim.posTex / wgpuSim.velTex) via staging
+      // round-trip. Phase 7b will run this every frame; phase 7a just
+      // exposes it for devtools so we can verify the pipe works without
+      // touching the render loop.
+      async function wgpuPushToRender() {
+        if (!wgpuSim.available || !wgpuSim.buffers || !wgpuSim.posTex) {
+          console.warn("[wgpu] pushToRender: not ready");
+          return null;
+        }
+        const device = wgpuSim.device;
+        const N = wgpuSim.capacity;
+        const bytes = N * 16;
+        const which = wgpuSim.which | 0;
+        const posBuf =
+          which === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const velBuf =
+          which === 0 ? wgpuSim.buffers.velA : wgpuSim.buffers.velB;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(posBuf, 0, wgpuSim.buffers.staging[0], 0, bytes);
+        enc.copyBufferToBuffer(velBuf, 0, wgpuSim.buffers.staging[1], 0, bytes);
+        device.queue.submit([enc.finish()]);
+        await Promise.all([
+          wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ),
+          wgpuSim.buffers.staging[1].mapAsync(GPUMapMode.READ),
+        ]);
+        const posSrc = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        );
+        const velSrc = new Float32Array(
+          wgpuSim.buffers.staging[1].getMappedRange(),
+        );
+        wgpuSim.posTex.image.data.set(posSrc);
+        wgpuSim.velTex.image.data.set(velSrc);
+        wgpuSim.buffers.staging[0].unmap();
+        wgpuSim.buffers.staging[1].unmap();
+        wgpuSim.posTex.needsUpdate = true;
+        wgpuSim.velTex.needsUpdate = true;
+
+        // Sanity: the DataTextures should now hold non-zero data.
+        let posMaxAbs = 0;
+        let velMaxAbs = 0;
+        const len = N * 4;
+        for (let i = 0; i < len; i++) {
+          const ap = Math.abs(wgpuSim.posTex.image.data[i]);
+          const av = Math.abs(wgpuSim.velTex.image.data[i]);
+          if (ap > posMaxAbs) posMaxAbs = ap;
+          if (av > velMaxAbs) velMaxAbs = av;
+        }
+        console.info(
+          `[wgpu] pushToRender OK: N=${N} posMaxAbs=${posMaxAbs.toExponential(2)} velMaxAbs=${velMaxAbs.toExponential(2)}`,
+        );
+        return { N, posMaxAbs, velMaxAbs };
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuPushToRender = _wgpuGuard(
+          "pushToRender",
+          wgpuPushToRender,
+        );
+      }
+
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
@@ -2635,7 +2725,19 @@
           // Step 2: compile pipelines + allocate buffers for the
           // current density tier. Errors flip wgpuSim.available off.
           await wgpuInitPipelines();
-          if (wgpuSim.available) wgpuAllocateBuffers(MAX_BODIES);
+          if (wgpuSim.available) {
+            wgpuAllocateBuffers(MAX_BODIES);
+            // The first uploadStateToGPU fires while the probe is still
+            // suspended on requestAdapter / requestDevice — at that
+            // point wgpuSim.available is false and wgpuUploadState's
+            // bail check skips it, leaving the WebGPU buffers empty.
+            // Now that buffers exist, mirror the live WebGL state in.
+            try {
+              wgpuUploadState();
+            } catch (e) {
+              console.warn("[wgpu] initial state mirror failed:", e);
+            }
+          }
         } catch (e) {
           wgpuSim.reason = "init failed: " + ((e && e.message) || "unknown");
         } finally {
