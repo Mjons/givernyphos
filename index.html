@@ -1542,6 +1542,12 @@
         // pointMat reads from posTex / velTex DataTextures.
         active: false,
         readbackBusy: false,
+        // Bumped on every wgpuAllocateBuffers. A wgpuFrameStep snapshot
+        // of this counter is checked inside its mapAsync .then so an
+        // in-flight readback whose buffers were destroyed mid-flight by
+        // a density rebuild discards itself instead of writing stale
+        // data (or smaller data) into the freshly-resized DataTextures.
+        epoch: 0,
       };
       // Module scope is sealed by <script type="module">; expose wgpuSim
       // on window so devtools can poke at it (e.g. wgpuSim.posTex.image.data).
@@ -1565,6 +1571,8 @@
         video: null,
         landmarker: null,
         cursorEl: null,
+        tipEls: null, // [thumb, index, middle] DOM dots
+        tipsXY: null, // last screen-space positions for the 3 tips
         lastVideoTime: -1,
         // Smoothed image-space (mirrored, ±0.5; phase 1)
         worldX: 0,
@@ -1576,7 +1584,8 @@
         worldVel: new THREE.Vector3(),
         worldPosInited: false,
         strength: 0, // 0..1, presence-gated brush amplitude
-        radius: 40, // world-space Gaussian sigma; tuned per scale of scenes
+        pull: 0, // pinch-gated attractor amplitude
+        radius: 150, // world-space Gaussian sigma; tuned per scale of scenes
         // Diagnostics
         frames: 0,
         hits: 0,
@@ -1658,6 +1667,25 @@
           document.body.appendChild(cursor);
           handTracker.cursorEl = cursor;
 
+          const tipCss =
+            "position:fixed;left:0;top:0;width:18px;height:18px;border-radius:50%;" +
+            "transform:translate(-50%,-50%);" +
+            "background:radial-gradient(circle, rgba(220,235,255,0.85) 0%, rgba(180,220,255,0.4) 50%, rgba(180,220,255,0) 78%);" +
+            "pointer-events:none;opacity:0;will-change:transform,opacity;" +
+            "mix-blend-mode:screen;z-index:9999;";
+          handTracker.tipEls = [0, 1, 2].map(() => {
+            const el = document.createElement("div");
+            el.className = "hand-tip";
+            el.style.cssText = tipCss;
+            document.body.appendChild(el);
+            return el;
+          });
+          handTracker.tipsXY = [
+            { x: 0, y: 0 },
+            { x: 0, y: 0 },
+            { x: 0, y: 0 },
+          ];
+
           const vision = await import(
             `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.mjs`
           );
@@ -1698,7 +1726,18 @@
         const cy = (0.5 - handTracker.worldY) * window.innerHeight;
         const scale = 0.7 + 0.6 * handTracker.pinch;
         c.style.transform = `translate(${cx.toFixed(1)}px, ${cy.toFixed(1)}px) translate(-50%, -50%) scale(${scale.toFixed(3)})`;
-        c.style.opacity = handTracker.presence.toFixed(3);
+        c.style.opacity = (handTracker.presence * 0.7).toFixed(3);
+        const tipEls = handTracker.tipEls;
+        const tips = handTracker.tipsXY;
+        if (tipEls && tips) {
+          const tipOpacity = handTracker.presence.toFixed(3);
+          for (let i = 0; i < 3; i++) {
+            const t = tips[i];
+            tipEls[i].style.transform =
+              `translate(${t.x.toFixed(1)}px, ${t.y.toFixed(1)}px) translate(-50%, -50%)`;
+            tipEls[i].style.opacity = tipOpacity;
+          }
+        }
       }
 
       function handTrackerTick(now) {
@@ -1726,37 +1765,76 @@
         }
         handTracker.hits++;
 
-        const wrist = lm[0];
-        const nx = 1 - wrist.x - 0.5;
-        const ny = -(wrist.y - 0.5);
+        // Three-fingertip centroid: thumb (4), index (8), middle (12).
+        // Centroid drives the cursor position; spread drives "pinch".
+        const t0 = lm[4],
+          t1 = lm[8],
+          t2 = lm[12];
+        const cxImg = (t0.x + t1.x + t2.x) / 3;
+        const cyImg = (t0.y + t1.y + t2.y) / 3;
+        const nx = 1 - cxImg - 0.5;
+        const ny = -(cyImg - 0.5);
 
-        const tt = lm[4],
-          it = lm[8],
+        // Hand size = wrist (0) → middle MCP (9), used to scale spread
+        // so the metric is invariant to hand-to-camera distance.
+        const wrist = lm[0],
           mcp = lm[9];
-        const dxp = tt.x - it.x,
-          dyp = tt.y - it.y,
-          dzp = tt.z - it.z;
-        const pinchRaw = Math.sqrt(dxp * dxp + dyp * dyp + dzp * dzp);
         const sx = wrist.x - mcp.x,
           sy = wrist.y - mcp.y,
           sz = wrist.z - mcp.z;
         const handSize = Math.max(0.05, Math.sqrt(sx * sx + sy * sy + sz * sz));
-        const pinchNorm = pinchRaw / handSize;
-        const pinchClosed = Math.max(0, Math.min(1, 1 - pinchNorm / 1.2));
+
+        // Mean tip-to-centroid distance (3D, image-normalized).
+        const d0x = t0.x - cxImg,
+          d0y = t0.y - cyImg,
+          d0z = t0.z;
+        const d1x = t1.x - cxImg,
+          d1y = t1.y - cyImg,
+          d1z = t1.z;
+        const d2x = t2.x - cxImg,
+          d2y = t2.y - cyImg,
+          d2z = t2.z;
+        const spreadRaw =
+          (Math.sqrt(d0x * d0x + d0y * d0y + d0z * d0z) +
+            Math.sqrt(d1x * d1x + d1y * d1y + d1z * d1z) +
+            Math.sqrt(d2x * d2x + d2y * d2y + d2z * d2z)) /
+          3;
+        const spreadNorm = spreadRaw / handSize;
+        // Open hand spread ≈ 0.5–0.7, fist ≈ 0.05–0.15. Map to pinch
+        // 0..1 with a soft remap so closing the fingers fully reads as 1.
+        const pinchClosed = Math.max(
+          0,
+          Math.min(1, 1 - (spreadNorm - 0.1) / 0.5),
+        );
 
         handTracker.worldX = _oeHandX(nx, now);
         handTracker.worldY = _oeHandY(ny, now);
         handTracker.pinch = _oePinch(pinchClosed, now);
         handTracker.presence = Math.min(1, handTracker.presence + 0.06);
 
+        // Per-tip raw screen coords for the dot overlay.
+        const tips = handTracker.tipsXY;
+        if (tips) {
+          const W = window.innerWidth,
+            H = window.innerHeight;
+          tips[0].x = (1 - t0.x) * W;
+          tips[0].y = t0.y * H;
+          tips[1].x = (1 - t1.x) * W;
+          tips[1].y = t1.y * H;
+          tips[2].x = (1 - t2.x) * W;
+          tips[2].y = t2.y * H;
+        }
+
         _renderHandCursor();
 
         if (handTracker.hits % 30 === 0) {
+          const wp = handTracker.worldPos;
+          const wv = handTracker.worldVel;
           console.log(
-            `[hands] x=${handTracker.worldX.toFixed(3)} ` +
-              `y=${handTracker.worldY.toFixed(3)} ` +
-              `pinch=${handTracker.pinch.toFixed(3)} ` +
-              `presence=${handTracker.presence.toFixed(2)}`,
+            `[hands] ndc=(${handTracker.worldX.toFixed(2)},${handTracker.worldY.toFixed(2)}) ` +
+              `world=(${wp.x.toFixed(0)},${wp.y.toFixed(0)},${wp.z.toFixed(0)}) ` +
+              `vel=(${wv.x.toFixed(0)},${wv.y.toFixed(0)},${wv.z.toFixed(0)}) ` +
+              `str=${handTracker.strength.toFixed(4)} pinch=${handTracker.pinch.toFixed(2)}`,
           );
         }
       }
@@ -1765,7 +1843,9 @@
       // plane through the origin (perpendicular to the camera). Derive
       // a world-space velocity by differencing across frames.
       // Per-frame gain applied here so the shader term is just w * vel.
-      const HAND_GAIN = 0.0035;
+      const HAND_GAIN = 0.02;
+      const HAND_PULL_GAIN = 0.003; // pinch-driven Gaussian-weighted attractor
+      const HAND_PULL_THRESHOLD = 0.3; // pinch must exceed this to engage
       const _hRaycaster = new THREE.Raycaster();
       const _hNdc = new THREE.Vector2();
       const _hPlane = new THREE.Plane();
@@ -1776,12 +1856,14 @@
       function updateHandWorld(camera, dt) {
         if (!handTracker.ready || handTracker.disabled) {
           handTracker.strength = 0;
+          handTracker.pull = 0;
           handTracker.worldVel.set(0, 0, 0);
           return;
         }
         const presence = handTracker.presence;
         if (presence < 0.001) {
           handTracker.strength = 0;
+          handTracker.pull = 0;
           handTracker.worldVel.set(0, 0, 0);
           handTracker.worldPosInited = false;
           return;
@@ -1797,6 +1879,7 @@
         const hit = _hRaycaster.ray.intersectPlane(_hPlane, _hWorldNext);
         if (!hit) {
           handTracker.strength = 0;
+          handTracker.pull = 0;
           return;
         }
         if (handTracker.worldPosInited) {
@@ -1810,6 +1893,11 @@
         }
         handTracker.worldPos.copy(_hWorldNext);
         handTracker.strength = presence * HAND_GAIN;
+        const pinchActive = Math.max(
+          0,
+          (handTracker.pinch - HAND_PULL_THRESHOLD) / (1 - HAND_PULL_THRESHOLD),
+        );
+        handTracker.pull = presence * pinchActive * HAND_PULL_GAIN;
       }
 
       // ----- step 2: WGSL shaders ----------------------------------
@@ -1842,6 +1930,10 @@
           handVy: f32,
           handVz: f32,
           handRadius: f32,
+          handPull: f32,
+          _pad2: f32,
+          _pad3: f32,
+          _pad4: f32,
           K: array<f32, 49>,
         };
       `;
@@ -1982,12 +2074,17 @@
           // Hand brush — push particles in the direction of cursor
           // motion with a Gaussian falloff around the cursor position.
           // handStrength includes the JS-side gain; zero = no work.
-          if (alive && p.handStrength > 0.0) {
-            let toHand = pA - vec3<f32>(p.handX, p.handY, p.handZ);
-            let r2h    = dot(toHand, toHand);
-            let sigma2 = max(p.handRadius * p.handRadius, 1e-3);
-            let w      = exp(-r2h / sigma2);
+          if (alive && (p.handStrength > 0.0 || p.handPull > 0.0)) {
+            let handPos = vec3<f32>(p.handX, p.handY, p.handZ);
+            let toHand  = pA - handPos;
+            let r2h     = dot(toHand, toHand);
+            let sigma2  = max(p.handRadius * p.handRadius, 1e-3);
+            let w       = exp(-r2h / sigma2);
+            // Brush: push along motion vector.
             acc = acc + p.handStrength * w * vec3<f32>(p.handVx, p.handVy, p.handVz);
+            // Pull: spring-style toward cursor. Gaussian-weighted so it
+            // dies off outside the brush radius.
+            acc = acc - p.handPull * w * toHand;
           }
 
           let newVel = velA.xyz + acc * p.dt * p.sign;
@@ -2081,6 +2178,12 @@
       function wgpuAllocateBuffers(N) {
         if (!wgpuSim.available || !wgpuSim.pipelines) return;
         const device = wgpuSim.device;
+        // Bump epoch BEFORE destroy so any in-flight readback's .then
+        // snapshot mismatches and bails out instead of writing into the
+        // freshly-resized DataTextures. Pair with readbackBusy=false so
+        // the next wgpuFrameStep isn't blocked by a now-orphaned token.
+        wgpuSim.epoch = (wgpuSim.epoch | 0) + 1;
+        wgpuSim.readbackBusy = false;
         if (wgpuSim.buffers) {
           for (const k of ["posA", "posB", "velA", "velB", "params"]) {
             const b = wgpuSim.buffers[k];
@@ -2091,7 +2194,7 @@
             if (sb) sb.destroy();
         }
         const bodyBytes = N * 16; // vec4<f32>
-        const PARAMS_BYTES = 320; // SimParams (292B w/ hand uniforms) + headroom
+        const PARAMS_BYTES = 320; // SimParams (308B w/ hand brush + pull) + headroom
         const make = () =>
           device.createBuffer({
             size: bodyBytes,
@@ -2308,9 +2411,13 @@
         _wgpuParamsF32[21] = hv ? hv.y : 0;
         _wgpuParamsF32[22] = hv ? hv.z : 0;
         _wgpuParamsF32[23] = u.uHandRadius ? u.uHandRadius.value : 1;
+        _wgpuParamsF32[24] = u.uHandPull ? u.uHandPull.value : 0;
+        _wgpuParamsF32[25] = 0;
+        _wgpuParamsF32[26] = 0;
+        _wgpuParamsF32[27] = 0;
         const K = u.uK.value;
         for (let i = 0; i < NUM_KINDS * NUM_KINDS; i++) {
-          _wgpuParamsF32[24 + i] = K[i];
+          _wgpuParamsF32[28 + i] = K[i];
         }
         wgpuSim.device.queue.writeBuffer(
           wgpuSim.buffers.params,
@@ -3076,8 +3183,19 @@
         if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
           return;
         }
+        // Skip during a density rebuild — buffers / staging / pipelines
+        // are being torn down and recreated; touching them mid-rebuild
+        // can destroy something in flight.
+        if (rebuildingPipeline) return;
         const subs = Math.max(1, params.substeps | 0);
         for (let s = 0; s < subs; s++) wgpuStep();
+        // Per-tier readback throttle. Compute keeps full rate; the
+        // CPU↔GPU bounce only fires every Nth frame at heavy tiers so
+        // the WebGL renderer can sample stale-but-recent DataTextures
+        // instead of stalling on a 16+ MB mapAsync every frame.
+        wgpuSim.frameTick = ((wgpuSim.frameTick | 0) + 1) | 0;
+        const stride = currentReadbackStride();
+        if (stride > 1 && wgpuSim.frameTick % stride !== 0) return;
         if (wgpuSim.readbackBusy) return;
         wgpuSim.readbackBusy = true;
         const device = wgpuSim.device;
@@ -3089,6 +3207,11 @@
         const velBuf =
           which === 0 ? wgpuSim.buffers.velA : wgpuSim.buffers.velB;
         const fs = wgpuSim.buffers.frameStaging;
+        // Stamp the readback with the current allocator epoch. If a
+        // density rebuild bumps wgpuSim.epoch before mapAsync resolves,
+        // we discard the result rather than writing into DataTextures
+        // that have been resized out from under us.
+        const myEpoch = wgpuSim.epoch | 0;
         const enc = device.createCommandEncoder();
         enc.copyBufferToBuffer(posBuf, 0, fs[0], 0, bytes);
         enc.copyBufferToBuffer(velBuf, 0, fs[1], 0, bytes);
@@ -3098,6 +3221,12 @@
           fs[1].mapAsync(GPUMapMode.READ),
         ])
           .then(() => {
+            if ((wgpuSim.epoch | 0) !== myEpoch) {
+              // Buffers were swapped — drop this readback. fs[0]/fs[1]
+              // were destroyed by wgpuAllocateBuffers; getMappedRange
+              // would throw, so do nothing.
+              return;
+            }
             const posSrc = new Float32Array(fs[0].getMappedRange());
             const velSrc = new Float32Array(fs[1].getMappedRange());
             wgpuSim.posTex.image.data.set(posSrc);
@@ -3109,6 +3238,9 @@
             wgpuSim.readbackBusy = false;
           })
           .catch((e) => {
+            // Density rebuild destroying buffers mid-flight is the
+            // expected source of AbortError here — quiet that case.
+            if ((wgpuSim.epoch | 0) !== myEpoch) return;
             console.warn("[wgpu] frame readback failed:", e);
             // Defensive: try to unmap in case one mapAsync succeeded
             // and the other rejected, leaving its partner stuck mapped.
@@ -3259,6 +3391,73 @@
         window.__wgpuDeactivate = _wgpuGuard("deactivate", wgpuDeactivate);
       }
 
+      // ----- compute backend preference (step 9) -------------------
+      // Persisted user choice between WebGL2 (default) and WebGPU.
+      // Read once at boot; written when the toggle UI fires. The
+      // localStorage key is intentionally narrow so we can tweak the
+      // default without invalidating a user's prior preference.
+      const COMPUTE_PREF_KEY = "computeBackend";
+      function loadComputeBackendPref() {
+        try {
+          const v = localStorage.getItem(COMPUTE_PREF_KEY);
+          if (v === "webgpu" || v === "webgl") return v;
+        } catch (_) {}
+        return "webgl";
+      }
+      function saveComputeBackendPref(v) {
+        try {
+          localStorage.setItem(COMPUTE_PREF_KEY, v);
+        } catch (_) {}
+      }
+      let computeBackendPref = loadComputeBackendPref();
+      // List of pill-pair refresh callbacks the panel registers so
+      // applyComputeBackend can update their .active class after a
+      // successful activate/deactivate. Cleared on panel rebuild.
+      const computeBackendUIRefreshers = [];
+      // Drives wgpuActivate/wgpuDeactivate based on the persisted
+      // preference + current availability. Idempotent. Returns the
+      // backend that's actually live afterwards (may differ from the
+      // requested one if WebGPU isn't available).
+      async function applyComputeBackend(key) {
+        const want = key === "webgpu" ? "webgpu" : "webgl";
+        if (want === "webgpu") {
+          if (!wgpuSim.available) {
+            // Probe hasn't succeeded — fall back to WebGL but keep the
+            // preference so a future reload (where WebGPU may be
+            // available) honours the user's choice.
+            if (wgpuSim.active) {
+              try {
+                await window.__wgpuDeactivate();
+              } catch (_) {}
+            }
+            for (const fn of computeBackendUIRefreshers) fn();
+            return "webgl";
+          }
+          if (!wgpuSim.active) {
+            try {
+              await window.__wgpuActivate();
+            } catch (e) {
+              console.warn("[compute] activate failed:", e);
+            }
+          }
+        } else {
+          if (wgpuSim.active) {
+            try {
+              await window.__wgpuDeactivate();
+            } catch (e) {
+              console.warn("[compute] deactivate failed:", e);
+            }
+          }
+        }
+        for (const fn of computeBackendUIRefreshers) fn();
+        return wgpuSim.active ? "webgpu" : "webgl";
+      }
+      function setComputeBackend(key) {
+        computeBackendPref = key === "webgpu" ? "webgpu" : "webgl";
+        saveComputeBackendPref(computeBackendPref);
+        applyComputeBackend(computeBackendPref);
+      }
+
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
@@ -3315,6 +3514,16 @@
                 showToast("WebGPU", "detected");
               } else {
                 showToast("WebGPU", wgpuSim.reason);
+              }
+              // Honour a persisted "webgpu" preference now that the
+              // probe has resolved. If unavailable, applyComputeBackend
+              // is a no-op + UI refresh; if available, it activates.
+              if (computeBackendPref === "webgpu") {
+                applyComputeBackend("webgpu");
+              } else {
+                // WebGL pref — still refresh the UI now that pills
+                // can reflect actual availability.
+                for (const fn of computeBackendUIRefreshers) fn();
               }
             });
           });
@@ -3466,6 +3675,7 @@
         uniform vec3  uHandVel;
         uniform float uHandStrength;
         uniform float uHandRadius;
+        uniform float uHandPull;
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
@@ -3559,14 +3769,15 @@
             acc += cross(vec3(0.0, uSpin, 0.0), r);
           }
 
-          // Hand brush — Gaussian-weighted push in the direction of
-          // cursor motion. uHandStrength includes the JS-side gain.
-          if (uHandStrength > 0.0) {
+          // Hand brush — Gaussian-weighted push along cursor motion.
+          // Pull — Gaussian-weighted spring toward cursor (pinch-driven).
+          if (uHandStrength > 0.0 || uHandPull > 0.0) {
             vec3 toHand = p - uHandPos;
             float r2h = dot(toHand, toHand);
             float sigma2 = max(uHandRadius * uHandRadius, 1e-3);
             float w = exp(-r2h / sigma2);
             acc += uHandStrength * w * uHandVel;
+            acc -= uHandPull * w * toHand;
           }
 
           vec3 newVel = v + acc * uDt * uSign;
@@ -3633,6 +3844,9 @@
         };
         velVar.material.uniforms.uHandRadius = {
           value: preserve?.uHandRadius ?? 40.0,
+        };
+        velVar.material.uniforms.uHandPull = {
+          value: preserve?.uHandPull ?? 0.0,
         };
       }
 
@@ -7588,6 +7802,10 @@
       function buildPanel(id) {
         panelEl.innerHTML = "";
         panelRefreshers.length = 0;
+        // Step 9 toggle pills are torn out with the rest of the panel
+        // DOM each rebuild — drop their refresher closures so
+        // applyComputeBackend doesn't poke at detached nodes.
+        computeBackendUIRefreshers.length = 0;
         switch (id) {
           case "scenes":
             return buildScenesPanel();
@@ -9006,6 +9224,63 @@
           dens.appendChild(expHint);
         }
         panelEl.appendChild(dens);
+
+        // Compute backend — manual WebGL/WebGPU toggle (step 9). Pills
+        // refresh after applyComputeBackend so the active state stays
+        // honest if probe resolves late or activate fails.
+        const compute = Section();
+        compute.appendChild(SectionTitle("Compute"));
+        const computeLabel = el("div");
+        computeLabel.style.cssText =
+          "font-size: 10px; color: var(--text-2); letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 6px;";
+        computeLabel.textContent = "Backend";
+        compute.appendChild(computeLabel);
+        const computeRow = el("div", "pill-row");
+        const wglPill = el("button", "pill");
+        wglPill.textContent = "WebGL";
+        wglPill.addEventListener("click", () => setComputeBackend("webgl"));
+        computeRow.appendChild(wglPill);
+        const wgpuPill = el("button", "pill");
+        wgpuPill.innerHTML =
+          'WebGPU<br><span style="opacity:0.6;font-size:9px">beta</span>';
+        wgpuPill.addEventListener("click", () => setComputeBackend("webgpu"));
+        computeRow.appendChild(wgpuPill);
+        compute.appendChild(computeRow);
+        const computeHint = el("div");
+        computeHint.style.cssText =
+          "font-size: 10px; color: var(--text-2); margin-top: 8px; line-height: 1.4;";
+        compute.appendChild(computeHint);
+        // Refresher closes over the two pills and the hint so probe
+        // completion / activate / deactivate can re-paint the active
+        // state and availability message in place.
+        const refreshComputePills = () => {
+          const live = wgpuSim.active ? "webgpu" : "webgl";
+          wglPill.classList.toggle("active", live === "webgl");
+          wgpuPill.classList.toggle("active", live === "webgpu");
+          if (!wgpuSim.available) {
+            wgpuPill.disabled = true;
+            wgpuPill.style.opacity = "0.4";
+            wgpuPill.style.cursor = "not-allowed";
+            wgpuPill.title =
+              "WebGPU unavailable: " + (wgpuSim.reason || "unsupported");
+            computeHint.textContent =
+              "WebGPU unavailable on this browser/GPU (" +
+              (wgpuSim.reason || "unsupported") +
+              "). Using WebGL.";
+          } else {
+            wgpuPill.disabled = false;
+            wgpuPill.style.opacity = "";
+            wgpuPill.style.cursor = "";
+            wgpuPill.title = "";
+            computeHint.textContent =
+              live === "webgpu"
+                ? "WebGPU compute active — faster at high tiers, beta."
+                : "WebGL2 compute (default). WebGPU is opt-in.";
+          }
+        };
+        computeBackendUIRefreshers.push(refreshComputePills);
+        refreshComputePills();
+        panelEl.appendChild(compute);
       }
 
       // ===============================================================
@@ -9538,6 +9813,22 @@
         // uniforms.
         createGPGPU(TEX_SIZE, preserve);
 
+        // Step 8: also re-allocate WebGPU buffers + DataTextures to
+        // match the new TEX_SIZE before applyScene fires its
+        // uploadStateToGPU — wgpuUploadState writes into posA/velA
+        // there and would silently no-op if capacity didn't match.
+        // The frame-loop's pointMat re-bind picks up the new
+        // DataTextures next frame, so an active WebGPU mode survives
+        // density tier hot-swap with at most a single-frame stale
+        // texture flash.
+        if (wgpuSim.available) {
+          try {
+            wgpuAllocateBuffers(MAX_BODIES);
+          } catch (e) {
+            console.warn("[wgpu] buffer rebuild failed:", e);
+          }
+        }
+
         // Re-run the current scene so the new buffers are populated, then
         // restore camera framing (the scene's default pose would otherwise
         // yank us around).
@@ -9554,13 +9845,28 @@
       // expensive post-FX passes hard-capped (or disabled outright on
       // abyssal) so the gravity step has more GPU headroom. Applied each
       // frame so scene transitions / pulses / moods can't sneak past.
+      // readbackStride only matters when WebGPU is the live source. It's
+      // the number of compute frames per CPU readback into the
+      // DataTextures the WebGL renderer samples. 1 = every frame
+      // (smoothest motion, max bounce). 2/4 = render-fps halves/quarters
+      // while compute keeps full rate. The bounce (mapAsync + DataTexture
+      // re-upload) is ~2N*16 bytes per readback, ~33MB at abyssal —
+      // skipping it on alternate frames is the cheapest way to find out
+      // whether compute is winning under option A.b's CPU bounce or
+      // whether bandwidth is the wall.
       const DENSITY_PERF_PRESETS = {
-        titanic: { bloomCap: 0.6, trailCap: 0.7, lensCap: 0.5 },
+        titanic: {
+          bloomCap: 0.6,
+          trailCap: 0.7,
+          lensCap: 0.5,
+          readbackStride: 1,
+        },
         colossal: {
           bloomCap: 0.3,
           trailCap: 0.4,
           lensCap: 0.2,
           caCap: 0.012,
+          readbackStride: 2,
         },
         abyssal: {
           bloomCap: 0.0,
@@ -9568,8 +9874,15 @@
           lensCap: 0.0,
           caCap: 0.005,
           grainCap: 0.02,
+          readbackStride: 4,
         },
       };
+      function currentReadbackStride() {
+        const lvl = DENSITY_LEVELS[currentDensityKey];
+        if (!lvl || !lvl.experimental) return 1;
+        const p = DENSITY_PERF_PRESETS[currentDensityKey];
+        return p && p.readbackStride > 0 ? p.readbackStride | 0 : 1;
+      }
       function applyDensityPerfFrameClamp() {
         const lvl = DENSITY_LEVELS[currentDensityKey];
         if (!lvl || !lvl.experimental) return;
@@ -16554,6 +16867,7 @@
           velVar.material.uniforms.uHandVel.value.copy(handTracker.worldVel);
           velVar.material.uniforms.uHandStrength.value = handTracker.strength;
           velVar.material.uniforms.uHandRadius.value = handTracker.radius;
+          velVar.material.uniforms.uHandPull.value = handTracker.pull;
         }
 
         framesAccum++;
