@@ -1556,7 +1556,11 @@
           N: u32,
           numKinds: u32,
           texSize: u32,
-          _pad0: u32,
+          spin: f32,
+          comX: f32,
+          comY: f32,
+          comZ: f32,
+          _pad1: f32,
           K: array<f32, 49>,
         };
       `;
@@ -1687,6 +1691,13 @@
             }
           }
 
+          // Vorticity around the system barycenter (Y axis).
+          // Bipolar slider: negative = retrograde. Zero = no work.
+          if (alive && p.spin != 0.0) {
+            let r = pA - vec3<f32>(p.comX, p.comY, p.comZ);
+            acc = acc + cross(vec3<f32>(0.0, p.spin, 0.0), r);
+          }
+
           let newVel = velA.xyz + acc * p.dt * p.sign;
           let dAge   = p.dt * abs(p.sign) / p.maxAge;
           let newAge = clamp(ageNorm + dAge, 0.0, 0.9999);
@@ -1786,7 +1797,7 @@
           for (const sb of wgpuSim.buffers.staging) if (sb) sb.destroy();
         }
         const bodyBytes = N * 16; // vec4<f32>
-        const PARAMS_BYTES = 256; // SimParams + headroom
+        const PARAMS_BYTES = 320; // SimParams (260B) + headroom for alignment
         const make = () =>
           device.createBuffer({
             size: bodyBytes,
@@ -1915,13 +1926,13 @@
       // Devtools-friendly entry point — call from console anytime to
       // re-run the round-trip against current GPU state.
       if (typeof window !== "undefined") {
-        window.__wgpuVerify = wgpuReadbackVerify;
+        window.__wgpuVerify = _wgpuGuard("readback verify", wgpuReadbackVerify);
       }
 
       // ----- step 4a: writeWgpuParams + dispatch sanity test -------
       // Pack current sim uniforms into the WebGPU params storage
       // buffer. Layout matches the WGSL SimParams struct.
-      const _wgpuParamsScratch = new ArrayBuffer(256);
+      const _wgpuParamsScratch = new ArrayBuffer(320);
       const _wgpuParamsF32 = new Float32Array(_wgpuParamsScratch);
       const _wgpuParamsU32 = new Uint32Array(_wgpuParamsScratch);
       function writeWgpuParams(overrides) {
@@ -1943,17 +1954,22 @@
         _wgpuParamsU32[8] = MAX_BODIES | 0;
         _wgpuParamsU32[9] = NUM_KINDS | 0;
         _wgpuParamsU32[10] = TEX_SIZE | 0;
-        _wgpuParamsU32[11] = 0;
+        _wgpuParamsF32[11] = o.spin ?? u.uSpin.value;
+        const com = u.uCom.value;
+        _wgpuParamsF32[12] = o.comX ?? com.x;
+        _wgpuParamsF32[13] = o.comY ?? com.y;
+        _wgpuParamsF32[14] = o.comZ ?? com.z;
+        _wgpuParamsF32[15] = 0;
         const K = u.uK.value;
         for (let i = 0; i < NUM_KINDS * NUM_KINDS; i++) {
-          _wgpuParamsF32[12 + i] = K[i];
+          _wgpuParamsF32[16 + i] = K[i];
         }
         wgpuSim.device.queue.writeBuffer(
           wgpuSim.buffers.params,
           0,
           _wgpuParamsScratch,
           0,
-          256,
+          320,
         );
         return true;
       }
@@ -2047,7 +2063,7 @@
         return null;
       }
       if (typeof window !== "undefined") {
-        window.__wgpuTestVelStep = wgpuTestVelStep;
+        window.__wgpuTestVelStep = _wgpuGuard("vel-step test", wgpuTestVelStep);
       }
 
       // ----- step 4c: numeric comparison vs WebGL2 -----------------
@@ -2263,8 +2279,37 @@
         }
         return { N, live, maxAbs, maxRel, rms, pass: ok, worstIdx, worstC };
       }
+      // Guard: the staging buffers can only be in one mapAsync at a time.
+      // Calling any of the wgpu verify helpers while another is in flight
+      // would race on staging[0]. wgpuVerifyBusy serializes them at the
+      // devtools layer.
+      let _wgpuVerifyBusy = false;
+      function _wgpuClaim(name) {
+        if (_wgpuVerifyBusy) {
+          console.warn(
+            `[wgpu] ${name}: another verify is in flight, await it first`,
+          );
+          return false;
+        }
+        _wgpuVerifyBusy = true;
+        return true;
+      }
+      function _wgpuRelease() {
+        _wgpuVerifyBusy = false;
+      }
+      function _wgpuGuard(name, fn) {
+        return async (...args) => {
+          if (!_wgpuClaim(name)) return null;
+          try {
+            return await fn(...args);
+          } finally {
+            _wgpuRelease();
+          }
+        };
+      }
+
       if (typeof window !== "undefined") {
-        window.__wgpuStepVerify = wgpuStepVerify;
+        window.__wgpuStepVerify = _wgpuGuard("step verify", wgpuStepVerify);
       }
 
       // ----- step 6: position step + ping-pong --------------------
@@ -2412,7 +2457,151 @@
         return null;
       }
       if (typeof window !== "undefined") {
-        window.__wgpuTestFullStep = wgpuTestFullStep;
+        window.__wgpuTestFullStep = _wgpuGuard(
+          "full-step test",
+          wgpuTestFullStep,
+        );
+      }
+
+      // Run K substeps WebGPU vs K substeps WebGL2 from the same
+      // snapshot, compare final positions. Drift accumulates with K
+      // because both paths are chaotic; the criterion is per-step rms.
+      // Default K=5; pass an int to override.
+      async function wgpuMultiStepVerify(steps) {
+        if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
+          console.warn("[wgpu] multi-step verify: not ready");
+          return null;
+        }
+        const K = Math.max(1, steps | 0 || 5);
+        const N = MAX_BODIES;
+        const len = N * 4;
+        const bytes = N * 16;
+
+        const posSnap = new Float32Array(len);
+        const velSnap = new Float32Array(len);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(posVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          posSnap,
+        );
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(velVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          velSnap,
+        );
+
+        // K WebGL2 substeps synchronously (no awaits → render loop
+        // can't interleave).
+        for (let k = 0; k < K; k++) gpu.compute();
+        const wglPos = new Float32Array(len);
+        renderer.readRenderTargetPixels(
+          gpu.getCurrentRenderTarget(posVar),
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          wglPos,
+        );
+
+        // Restore the snapshot so the live sim is undisturbed.
+        const posTex = new THREE.DataTexture(
+          posSnap,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        posTex.needsUpdate = true;
+        const velTex = new THREE.DataTexture(
+          velSnap,
+          TEX_SIZE,
+          TEX_SIZE,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        velTex.needsUpdate = true;
+        blit(posTex, gpu.getCurrentRenderTarget(posVar));
+        blit(velTex, gpu.getCurrentRenderTarget(velVar));
+        posTex.dispose();
+        velTex.dispose();
+
+        // K WebGPU substeps from the same snapshot.
+        const device = wgpuSim.device;
+        const startWhich = wgpuSim.which | 0;
+        const startPos =
+          startWhich === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const startVel =
+          startWhich === 0 ? wgpuSim.buffers.velA : wgpuSim.buffers.velB;
+        device.queue.writeBuffer(
+          startPos,
+          0,
+          posSnap.buffer,
+          posSnap.byteOffset,
+          bytes,
+        );
+        device.queue.writeBuffer(
+          startVel,
+          0,
+          velSnap.buffer,
+          velSnap.byteOffset,
+          bytes,
+        );
+        for (let k = 0; k < K; k++) wgpuStep();
+        const finalWhich = wgpuSim.which | 0;
+        const finalPos =
+          finalWhich === 0 ? wgpuSim.buffers.posA : wgpuSim.buffers.posB;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(
+          finalPos,
+          0,
+          wgpuSim.buffers.staging[0],
+          0,
+          bytes,
+        );
+        device.queue.submit([enc.finish()]);
+        await wgpuSim.buffers.staging[0].mapAsync(GPUMapMode.READ);
+        const wgpuPos = new Float32Array(
+          wgpuSim.buffers.staging[0].getMappedRange(),
+        ).slice();
+        wgpuSim.buffers.staging[0].unmap();
+
+        let maxAbs = 0;
+        let sumSq = 0;
+        let live = 0;
+        let comparisons = 0;
+        for (let i = 0; i < N; i++) {
+          if (posSnap[i * 4 + 3] <= 0) continue;
+          live++;
+          for (let c = 0; c < 3; c++) {
+            const diff = wgpuPos[i * 4 + c] - wglPos[i * 4 + c];
+            const adiff = Math.abs(diff);
+            if (adiff > maxAbs) maxAbs = adiff;
+            sumSq += diff * diff;
+            comparisons++;
+          }
+        }
+        const rms = Math.sqrt(sumSq / Math.max(1, comparisons));
+        const perStepRms = rms / K;
+        // Per-step drift catches systematic bugs; chaos amplification
+        // is real but bounded for small K. 5e-3 is generous.
+        const ok = perStepRms < 5e-3;
+        const tag = ok ? "OK" : "DIVERGED";
+        console.info(
+          `[wgpu] multi-step verify (${tag}): K=${K} N=${N} live=${live} maxAbs=${maxAbs.toExponential(2)} rms=${rms.toExponential(2)} perStepRms=${perStepRms.toExponential(2)}`,
+        );
+        return { K, N, live, maxAbs, rms, perStepRms, pass: ok };
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuMultiStepVerify = _wgpuGuard(
+          "multi-step verify",
+          wgpuMultiStepVerify,
+        );
       }
 
       (async function probeWebGPU() {
@@ -2604,6 +2793,8 @@
         uniform float uFlock;
         uniform float uRadiation;
         uniform float uMaxAge;
+        uniform float uSpin;
+        uniform vec3  uCom;
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
@@ -2690,6 +2881,13 @@
             }
           }
 
+          // Vorticity around the system barycenter (Y axis).
+          // Bipolar slider: negative = retrograde. Zero = no work.
+          if (abs(uSpin) > 0.0) {
+            vec3 r = p - uCom;
+            acc += cross(vec3(0.0, uSpin, 0.0), r);
+          }
+
           vec3 newVel = v + acc * uDt * uSign;
 
           // Age: increment normalised age (saturated to < 1 so floor(kind) is preserved)
@@ -2739,6 +2937,10 @@
           value: preserve?.uRadiation ?? 0.0,
         };
         velVar.material.uniforms.uMaxAge = { value: MAX_AGE };
+        velVar.material.uniforms.uSpin = { value: preserve?.uSpin ?? 0.0 };
+        velVar.material.uniforms.uCom = {
+          value: preserve?.uCom ?? new THREE.Vector3(0, 0, 0),
+        };
       }
 
       function createGPGPU(texSize, preserve) {
@@ -6027,6 +6229,7 @@
         lens: 0.0,
         flock: 0.3,
         radiation: 0.15,
+        spin: 0.0,
         showHalo: false,
         fov: 55,
         autoOrbit: true,
@@ -6054,6 +6257,53 @@
         velVar.material.uniforms.uRadiation.value = sc.radiation || 0;
         params.flock = sc.flock || 0;
         params.radiation = sc.radiation || 0;
+        params.spin = sc.physics.spin || 0;
+        velVar.material.uniforms.uSpin.value = params.spin;
+      }
+
+      // Mass-weighted barycenter, refreshed on a slow cadence and only
+      // when spin is active. Stalls the GPU briefly via readRenderTargetPixels
+      // (same pattern as the followCam pick), so we throttle and skip
+      // entirely when the force term is zero.
+      let _comFrameCounter = 0;
+      let _comReadBuf = null;
+      function maybeUpdateBarycenter() {
+        if (Math.abs(params.spin) < 1e-5) return;
+        if (--_comFrameCounter > 0) return;
+        _comFrameCounter = 12;
+        const need = TEX_SIZE * TEX_SIZE * 4;
+        if (!_comReadBuf || _comReadBuf.length !== need) {
+          _comReadBuf = new Float32Array(need);
+        }
+        const rt = gpu.getCurrentRenderTarget(posVar);
+        renderer.readRenderTargetPixels(
+          rt,
+          0,
+          0,
+          TEX_SIZE,
+          TEX_SIZE,
+          _comReadBuf,
+        );
+        let sx = 0,
+          sy = 0,
+          sz = 0,
+          sm = 0;
+        for (let i = 0; i < MAX_BODIES; i++) {
+          const m = _comReadBuf[i * 4 + 3];
+          if (m <= 0) continue;
+          sx += _comReadBuf[i * 4 + 0] * m;
+          sy += _comReadBuf[i * 4 + 1] * m;
+          sz += _comReadBuf[i * 4 + 2] * m;
+          sm += m;
+        }
+        if (sm <= 0) return;
+        // Lerp toward the new COM so the spin axis doesn't snap when
+        // mass distribution shifts (mood pulses, scene transitions).
+        const com = velVar.material.uniforms.uCom.value;
+        const k = 0.4;
+        com.x += (sx / sm - com.x) * k;
+        com.y += (sy / sm - com.y) * k;
+        com.z += (sz / sm - com.z) * k;
       }
 
       function channelValueFromName(name) {
@@ -7862,6 +8112,20 @@
           },
         });
         phys.appendChild(sS.el);
+        const spinS = Slider({
+          label: "Spin",
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          hint: "Adds rotation around the system's centre of gravity, like a galactic disk forming. Negative spins the other way.",
+          get: () => params.spin,
+          set: (v) => {
+            params.spin = v;
+            velVar.material.uniforms.uSpin.value = v;
+          },
+          fmt: (v) => v.toFixed(2),
+        });
+        phys.appendChild(spinS.el);
         const dtS = Slider({
           label: "Timestep",
           min: 0.001,
@@ -7892,6 +8156,7 @@
         panelRefreshers.push(() => {
           gS.refresh();
           sS.refresh();
+          spinS.refresh();
           dtS.refresh();
           subS.refresh();
         });
@@ -8535,6 +8800,8 @@
           uK: velVar.material.uniforms.uK.value.slice(),
           uFlock: velVar.material.uniforms.uFlock.value,
           uRadiation: velVar.material.uniforms.uRadiation.value,
+          uSpin: velVar.material.uniforms.uSpin.value,
+          uCom: velVar.material.uniforms.uCom.value.clone(),
         };
 
         // Flash to cover the pop.
@@ -15651,6 +15918,7 @@
           simTime += effDt * sign * params.substeps;
           stepReverse = false;
           stepOnce = false;
+          maybeUpdateBarycenter();
         }
 
         pointMat.uniforms.uPos.value =
