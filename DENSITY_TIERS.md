@@ -26,12 +26,14 @@ Three new tiers above lush:
 
 | Key (proposed) | TEX_SIZE | Body count | Vs lush | Vs standard |
 | -------------- | -------- | ---------- | ------- | ----------- |
-| `titanic`      | 360      | 129 600    | 2×      | 8×          |
+| `titanic`      | 315      | 99 225     | 1.5×    | 6×          |
 | `colossal`     | 512      | 262 144    | 4×      | 16×         |
 | `abyssal`      | 720      | 518 400    | 8×      | 32×         |
 
-(360, 512, 720 are convenient — 512 is a clean power of two, 720 lands
-exactly at ~500k, 360 lands cleanly at ~128k.)
+(315, 512, 720 — 512 is a clean power of two, 720 lands exactly at
+~500k, 315 lands cleanly at ~99k. titanic was previously 360 / 130k
+and was dropped a step to keep solid 60 fps headroom on the WebGL2
+path while WebGPU phase 1 lands.)
 
 ## Compute & memory budget
 
@@ -41,7 +43,7 @@ The gravity step is O(N²). Per-frame numbers:
 | ------------ | ----------- | ------------------- | -------------------- |
 | standard     | 16 384      | 268 M               | 524 KB               |
 | lush         | 65 536      | 4.3 G               | 2.1 MB               |
-| **titanic**  | **129 600** | **16.8 G**          | **4.1 MB**           |
+| **titanic**  | **99 225**  | **9.8 G**           | **3.2 MB**           |
 | **colossal** | **262 144** | **68.7 G**          | **8.4 MB**           |
 | **abyssal**  | **518 400** | **268.7 G**         | **16.6 MB**          |
 
@@ -178,7 +180,7 @@ Where the changes land:
    warning again.
 4. **UI grouping:** new tiers live under a separate "⚠ Experimental"
    sub-section in the density panel.
-5. **Naming:** name + count (`titanic 130k`, `colossal 262k`,
+5. **Naming:** name + count (`titanic 99k`, `colossal 262k`,
    `abyssal 518k`) — matches the existing `lite / standard / dense /
 lush` pattern.
 
