@@ -1529,7 +1529,226 @@
         queue: null,
         adapter: null,
         reason: "probing",
+        // Filled in by step 2 (wgpuInitPipelines / wgpuAllocateBuffers).
+        bindLayout: null,
+        pipelines: null, // { vel, pos }
+        buffers: null, // { posA, posB, velA, velB, params, staging: [a, b] }
+        capacity: 0, // body count the buffers are sized for
       };
+
+      // ----- step 2: WGSL shaders ----------------------------------
+      // SimParams lives in a storage buffer (not uniform) so the K[49]
+      // matrix doesn't force per-element padding; storage stride for
+      // f32 is 4 bytes vs 16 in a uniform array.
+      const WGSL_SIM_PARAMS = /* wgsl */ `
+        struct SimParams {
+          dt: f32,
+          G: f32,
+          eps2: f32,
+          sign: f32,
+          frame: f32,
+          flock: f32,
+          radiation: f32,
+          maxAge: f32,
+          N: u32,
+          numKinds: u32,
+          _pad0: u32,
+          _pad1: u32,
+          K: array<f32, 49>,
+        };
+      `;
+      // Velocity step — gravity only for now. Stochastic flocking +
+      // radiation pressure is a step-5 addition; current scenes that
+      // don't use flock/radiation behave identically with this shader.
+      const WGSL_VEL_SHADER =
+        WGSL_SIM_PARAMS +
+        /* wgsl */ `
+        const NUM_KINDS: u32 = 7u;
+        const TILE: u32 = 256u;
+
+        @group(0) @binding(0) var<storage, read>       positions:  array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read>       velocities: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read_write> outVel:     array<vec4<f32>>;
+        @group(0) @binding(3) var<storage, read>       p:          SimParams;
+
+        var<workgroup> tilePos: array<vec4<f32>, TILE>;
+        var<workgroup> tileVel: array<vec4<f32>, TILE>;
+
+        @compute @workgroup_size(TILE)
+        fn velStep(
+          @builtin(global_invocation_id) gid: vec3<u32>,
+          @builtin(local_invocation_id)  lid: vec3<u32>,
+        ) {
+          let i = gid.x;
+          let alive = i < p.N && positions[i].w > 0.0;
+
+          let posA = positions[i];
+          let velA = velocities[i];
+          let pA   = posA.xyz;
+
+          let kindFloat = floor(velA.w + 0.001);
+          let ageNorm   = velA.w - kindFloat;
+          var kindA     = i32(kindFloat);
+          if (kindA > i32(NUM_KINDS) - 1) { kindA = i32(NUM_KINDS) - 1; }
+          if (kindA < 0)                  { kindA = 0; }
+
+          var acc = vec3<f32>(0.0);
+          let numTiles = (p.N + TILE - 1u) / TILE;
+
+          for (var t: u32 = 0u; t < numTiles; t = t + 1u) {
+            let srcIdx = t * TILE + lid.x;
+            if (srcIdx < p.N) {
+              tilePos[lid.x] = positions[srcIdx];
+              tileVel[lid.x] = velocities[srcIdx];
+            } else {
+              tilePos[lid.x] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+              tileVel[lid.x] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+            }
+            workgroupBarrier();
+
+            if (alive) {
+              for (var j: u32 = 0u; j < TILE; j = j + 1u) {
+                let posB = tilePos[j];
+                if (posB.w <= 0.0) { continue; }
+                let velB = tileVel[j];
+                var kindB = i32(floor(velB.w + 0.001));
+                if (kindB > i32(NUM_KINDS) - 1) { kindB = i32(NUM_KINDS) - 1; }
+                if (kindB < 0)                  { kindB = 0; }
+                let K     = p.K[u32(kindA) * NUM_KINDS + u32(kindB)];
+                let d     = posB.xyz - pA;
+                let r2    = dot(d, d) + p.eps2;
+                let invR3 = inverseSqrt(r2 * r2 * r2);
+                acc = acc + p.G * posB.w * K * d * invR3;
+              }
+            }
+            workgroupBarrier();
+          }
+
+          let newVel = velA.xyz + acc * p.dt * p.sign;
+          let dAge   = p.dt * abs(p.sign) / p.maxAge;
+          let newAge = clamp(ageNorm + dAge, 0.0, 0.9999);
+          outVel[i]  = vec4<f32>(newVel, kindFloat + newAge);
+        }
+      `;
+      const WGSL_POS_SHADER =
+        WGSL_SIM_PARAMS +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read>       positions:  array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read>       velocities: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read_write> outPos:     array<vec4<f32>>;
+        @group(0) @binding(3) var<storage, read>       p:          SimParams;
+
+        @compute @workgroup_size(256)
+        fn posStep(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x;
+          if (i >= p.N) { return; }
+          let pos = positions[i];
+          let vel = velocities[i];
+          outPos[i] = vec4<f32>(pos.xyz + vel.xyz * p.dt * p.sign, pos.w);
+        }
+      `;
+
+      async function wgpuInitPipelines() {
+        if (!wgpuSim.available || wgpuSim.pipelines) return;
+        const device = wgpuSim.device;
+        device.pushErrorScope("validation");
+        const bindLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "read-only-storage" },
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "read-only-storage" },
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "storage" },
+            },
+            {
+              binding: 3,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: "read-only-storage" },
+            },
+          ],
+        });
+        const layout = device.createPipelineLayout({
+          bindGroupLayouts: [bindLayout],
+        });
+        const velModule = device.createShaderModule({ code: WGSL_VEL_SHADER });
+        const posModule = device.createShaderModule({ code: WGSL_POS_SHADER });
+        const velPipeline = device.createComputePipeline({
+          layout,
+          compute: { module: velModule, entryPoint: "velStep" },
+        });
+        const posPipeline = device.createComputePipeline({
+          layout,
+          compute: { module: posModule, entryPoint: "posStep" },
+        });
+        const err = await device.popErrorScope();
+        if (err) {
+          console.warn("[wgpu] pipeline validation failed:", err.message);
+          wgpuSim.available = false;
+          wgpuSim.reason = "pipeline validation failed";
+          return;
+        }
+        wgpuSim.bindLayout = bindLayout;
+        wgpuSim.pipelines = { vel: velPipeline, pos: posPipeline };
+        console.info("[wgpu] pipelines compiled");
+      }
+
+      // Allocate ping-pong storage buffers + params + double-buffered
+      // staging buffers for the requested body count. Replaces any
+      // existing allocation. Called once at probe success and again
+      // by step 8 when the user changes density tier.
+      function wgpuAllocateBuffers(N) {
+        if (!wgpuSim.available || !wgpuSim.pipelines) return;
+        const device = wgpuSim.device;
+        if (wgpuSim.buffers) {
+          for (const k of ["posA", "posB", "velA", "velB", "params"]) {
+            const b = wgpuSim.buffers[k];
+            if (b) b.destroy();
+          }
+          for (const sb of wgpuSim.buffers.staging) if (sb) sb.destroy();
+        }
+        const bodyBytes = N * 16; // vec4<f32>
+        const PARAMS_BYTES = 256; // SimParams + headroom
+        const make = () =>
+          device.createBuffer({
+            size: bodyBytes,
+            usage:
+              GPUBufferUsage.STORAGE |
+              GPUBufferUsage.COPY_DST |
+              GPUBufferUsage.COPY_SRC,
+          });
+        wgpuSim.buffers = {
+          posA: make(),
+          posB: make(),
+          velA: make(),
+          velB: make(),
+          params: device.createBuffer({
+            size: PARAMS_BYTES,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          }),
+          staging: [
+            device.createBuffer({
+              size: bodyBytes,
+              usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            }),
+            device.createBuffer({
+              size: bodyBytes,
+              usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            }),
+          ],
+        };
+        wgpuSim.capacity = N;
+        const totalMB = ((4 * bodyBytes + 2 * bodyBytes) / 1048576).toFixed(1);
+        console.info(`[wgpu] buffers allocated for N=${N} (~${totalMB} MB)`);
+      }
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
@@ -1558,6 +1777,10 @@
           wgpuSim.queue = device.queue;
           wgpuSim.available = true;
           wgpuSim.reason = "ready";
+          // Step 2: compile pipelines + allocate buffers for the
+          // current density tier. Errors flip wgpuSim.available off.
+          await wgpuInitPipelines();
+          if (wgpuSim.available) wgpuAllocateBuffers(MAX_BODIES);
         } catch (e) {
           wgpuSim.reason = "init failed: " + ((e && e.message) || "unknown");
         } finally {
