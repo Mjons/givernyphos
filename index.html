@@ -1512,6 +1512,70 @@
       const MAX_AGE = 300.0;
       const NUM_KINDS = 7; // star, planet, BH, dust, halo, galaxyA, galaxyB
 
+      // ===============================================================
+      // 1b. WEBGPU CAPABILITY DETECTION  (PHASE1_WEBGPU.md, step 1)
+      // ===============================================================
+      // Probe for WebGPU availability so a follow-up step can install a
+      // tiled-shared-memory gravity compute behind the experimental-tier
+      // flag. Step 1 does only detection — the WebGL2 GPGPU path stays
+      // load-bearing for every density tier, including experimental. The
+      // probe is async and runs in the background; consumers read
+      // `wgpuSim.available` and `wgpuSim.reason` once it resolves.
+      //   ?nogpu URL flag forces the path off (debug aid for diffing the
+      //   two backends once both are wired up).
+      const wgpuSim = {
+        available: false,
+        device: null,
+        queue: null,
+        adapter: null,
+        reason: "probing",
+      };
+      (async function probeWebGPU() {
+        try {
+          const url = new URL(location.href);
+          if (url.searchParams.has("nogpu")) {
+            wgpuSim.reason = "disabled via ?nogpu";
+            return;
+          }
+        } catch (_) {}
+        if (!("gpu" in navigator)) {
+          wgpuSim.reason = "no navigator.gpu";
+          return;
+        }
+        try {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter) {
+            wgpuSim.reason = "no adapter";
+            return;
+          }
+          const device = await adapter.requestDevice();
+          if (!device) {
+            wgpuSim.reason = "no device";
+            return;
+          }
+          wgpuSim.adapter = adapter;
+          wgpuSim.device = device;
+          wgpuSim.queue = device.queue;
+          wgpuSim.available = true;
+          wgpuSim.reason = "ready";
+        } catch (e) {
+          wgpuSim.reason = "init failed: " + ((e && e.message) || "unknown");
+        } finally {
+          // showToast isn't defined this early in the script. Defer past
+          // first paint so the toast helper is available.
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (typeof showToast !== "function") return;
+              if (wgpuSim.available) {
+                showToast("WebGPU", "detected");
+              } else {
+                showToast("WebGPU", wgpuSim.reason);
+              }
+            });
+          });
+        }
+      })();
+
       const $ = (s) => document.querySelector(s);
       const el = (tag, cls) => {
         const e = document.createElement(tag);
