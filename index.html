@@ -1584,8 +1584,20 @@
         worldVel: new THREE.Vector3(),
         worldPosInited: false,
         strength: 0, // 0..1, presence-gated brush amplitude
-        pull: 0, // pinch-gated attractor amplitude
-        radius: 150, // world-space Gaussian sigma; tuned per scale of scenes
+        radius: 150, // brush Gaussian sigma in world units
+        // Phase 3 — per-fingertip gravity (thumb, index, middle).
+        // Image-space (mirrored, ±0.5) + projected world-space.
+        tipImgX: [0, 0, 0],
+        tipImgY: [0, 0, 0],
+        tipWorld: [
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+        ],
+        tipFinGain: 0, // presence-scaled, ramps with TIP_GAIN
+        tipFinRadius: 180,
+        comPull: 0, // pinch-driven attractor centered on scene COM
+        comPullGain: 50, // live-tunable from devtools
         // Diagnostics
         frames: 0,
         hits: 0,
@@ -1630,6 +1642,16 @@
       const _oeHandX = makeOneEuro(1.0, 0.01);
       const _oeHandY = makeOneEuro(1.0, 0.01);
       const _oePinch = makeOneEuro(1.5, 0.02);
+      const _oeTipX = [
+        makeOneEuro(1.5, 0.015),
+        makeOneEuro(1.5, 0.015),
+        makeOneEuro(1.5, 0.015),
+      ];
+      const _oeTipY = [
+        makeOneEuro(1.5, 0.015),
+        makeOneEuro(1.5, 0.015),
+        makeOneEuro(1.5, 0.015),
+      ];
 
       async function initHandTracker() {
         if (!handTracker.enabled || handTracker.disabled) return;
@@ -1812,6 +1834,16 @@
         handTracker.pinch = _oePinch(pinchClosed, now);
         handTracker.presence = Math.min(1, handTracker.presence + 0.06);
 
+        // Per-tip mirrored image coords (±0.5), one-euro smoothed —
+        // these feed updateHandWorld's per-tip projection.
+        const rawTips = [t0, t1, t2];
+        for (let i = 0; i < 3; i++) {
+          const tnx = 1 - rawTips[i].x - 0.5;
+          const tny = -(rawTips[i].y - 0.5);
+          handTracker.tipImgX[i] = _oeTipX[i](tnx, now);
+          handTracker.tipImgY[i] = _oeTipY[i](tny, now);
+        }
+
         // Per-tip raw screen coords for the dot overlay.
         const tips = handTracker.tipsXY;
         if (tips) {
@@ -1829,12 +1861,19 @@
 
         if (handTracker.hits % 30 === 0) {
           const wp = handTracker.worldPos;
-          const wv = handTracker.worldVel;
+          const tA = handTracker.tipWorld[0];
+          const tB = handTracker.tipWorld[1];
+          const tC = handTracker.tipWorld[2];
+          const tipSpread = Math.max(
+            tA.distanceTo(tB),
+            tA.distanceTo(tC),
+            tB.distanceTo(tC),
+          );
           console.log(
-            `[hands] ndc=(${handTracker.worldX.toFixed(2)},${handTracker.worldY.toFixed(2)}) ` +
-              `world=(${wp.x.toFixed(0)},${wp.y.toFixed(0)},${wp.z.toFixed(0)}) ` +
-              `vel=(${wv.x.toFixed(0)},${wv.y.toFixed(0)},${wv.z.toFixed(0)}) ` +
-              `str=${handTracker.strength.toFixed(4)} pinch=${handTracker.pinch.toFixed(2)}`,
+            `[hands] world=(${wp.x.toFixed(0)},${wp.y.toFixed(0)},${wp.z.toFixed(0)}) ` +
+              `spread=${tipSpread.toFixed(0)} ` +
+              `pinch=${handTracker.pinch.toFixed(2)} ` +
+              `comPull=${handTracker.comPull.toFixed(2)}`,
           );
         }
       }
@@ -1844,8 +1883,7 @@
       // a world-space velocity by differencing across frames.
       // Per-frame gain applied here so the shader term is just w * vel.
       const HAND_GAIN = 0.02;
-      const HAND_PULL_GAIN = 0.003; // pinch-driven Gaussian-weighted attractor
-      const HAND_PULL_THRESHOLD = 0.3; // pinch must exceed this to engage
+      const TIP_GAIN = 0.005; // per-fingertip Gaussian-spring attractor gain
       const _hRaycaster = new THREE.Raycaster();
       const _hNdc = new THREE.Vector2();
       const _hPlane = new THREE.Plane();
@@ -1853,33 +1891,48 @@
       const _hPlanePoint = new THREE.Vector3();
       const _hWorldNext = new THREE.Vector3();
       const _hVelTmp = new THREE.Vector3();
+      const _hTipNdc = new THREE.Vector2();
+      function _projectImgToWorld(camera, ndcX, ndcY, out) {
+        // Plane already set by caller. Reuses _hRaycaster.
+        _hTipNdc.set(ndcX, ndcY);
+        _hRaycaster.setFromCamera(_hTipNdc, camera);
+        return _hRaycaster.ray.intersectPlane(_hPlane, out);
+      }
       function updateHandWorld(camera, dt) {
         if (!handTracker.ready || handTracker.disabled) {
           handTracker.strength = 0;
-          handTracker.pull = 0;
+          handTracker.tipFinGain = 0;
+          handTracker.comPull = 0;
           handTracker.worldVel.set(0, 0, 0);
           return;
         }
         const presence = handTracker.presence;
         if (presence < 0.001) {
           handTracker.strength = 0;
-          handTracker.pull = 0;
+          handTracker.tipFinGain = 0;
+          handTracker.comPull = 0;
           handTracker.worldVel.set(0, 0, 0);
           handTracker.worldPosInited = false;
           return;
         }
-        _hNdc.set(handTracker.worldX * 2, handTracker.worldY * 2);
-        _hRaycaster.setFromCamera(_hNdc, camera);
+        // Build the focal plane once, used for centroid + 3 tips.
         camera.getWorldDirection(_hPlaneNormal);
         _hPlanePoint.set(0, 0, 0);
         _hPlane.setFromNormalAndCoplanarPoint(
           _hPlaneNormal.negate(),
           _hPlanePoint,
         );
-        const hit = _hRaycaster.ray.intersectPlane(_hPlane, _hWorldNext);
+        // Centroid (drives brush position + velocity).
+        const hit = _projectImgToWorld(
+          camera,
+          handTracker.worldX * 2,
+          handTracker.worldY * 2,
+          _hWorldNext,
+        );
         if (!hit) {
           handTracker.strength = 0;
-          handTracker.pull = 0;
+          handTracker.tipFinGain = 0;
+          handTracker.comPull = 0;
           return;
         }
         if (handTracker.worldPosInited) {
@@ -1893,11 +1946,23 @@
         }
         handTracker.worldPos.copy(_hWorldNext);
         handTracker.strength = presence * HAND_GAIN;
-        const pinchActive = Math.max(
-          0,
-          (handTracker.pinch - HAND_PULL_THRESHOLD) / (1 - HAND_PULL_THRESHOLD),
-        );
-        handTracker.pull = presence * pinchActive * HAND_PULL_GAIN;
+        // Per-fingertip projection. Always-on, presence-gated; gather
+        // emerges from the geometry (fingers close → tip envelopes
+        // overlap → particles between feel triple pull).
+        for (let i = 0; i < 3; i++) {
+          _projectImgToWorld(
+            camera,
+            handTracker.tipImgX[i] * 2,
+            handTracker.tipImgY[i] * 2,
+            handTracker.tipWorld[i],
+          );
+        }
+        handTracker.tipFinGain = presence * TIP_GAIN;
+        // Pinch tightens the gravity well at the scene's COM. Acts on
+        // every particle, not just those near the cursor — that's what
+        // makes the gather visible cluster-wide.
+        handTracker.comPull =
+          presence * handTracker.pinch * handTracker.comPullGain;
       }
 
       // ----- step 2: WGSL shaders ----------------------------------
@@ -1930,10 +1995,18 @@
           handVy: f32,
           handVz: f32,
           handRadius: f32,
-          handPull: f32,
-          _pad2: f32,
-          _pad3: f32,
-          _pad4: f32,
+          tipAx: f32,
+          tipAy: f32,
+          tipAz: f32,
+          tipFinGain: f32,
+          tipBx: f32,
+          tipBy: f32,
+          tipBz: f32,
+          tipFinRadius: f32,
+          tipCx: f32,
+          tipCy: f32,
+          tipCz: f32,
+          comPull: f32,
           K: array<f32, 49>,
         };
       `;
@@ -2065,26 +2138,51 @@
           }
 
           // Vorticity around the system barycenter (Y axis).
-          // Bipolar slider: negative = retrograde. Zero = no work.
+          // Soft pull toward rigid rotation: the old "acc += cross(omega, r)"
+          // grew tangential velocity unbounded — see GLSL path for full
+          // notes. Nudge only the planar tangential component toward the
+          // target speed; once v matches, acceleration is zero.
           if (alive && p.spin != 0.0) {
             let r = pA - vec3<f32>(p.comX, p.comY, p.comZ);
-            acc = acc + cross(vec3<f32>(0.0, p.spin, 0.0), r);
+            let t = vec3<f32>(-r.z, 0.0, r.x);
+            let tLen = length(t);
+            if (tLen > 1e-3) {
+              let tHat = t / tLen;
+              let vTarget = p.spin * tLen;
+              let vTan = dot(velA.xyz, tHat);
+              acc = acc + tHat * (vTarget - vTan) * 0.4;
+            }
           }
 
           // Hand brush — push particles in the direction of cursor
-          // motion with a Gaussian falloff around the cursor position.
-          // handStrength includes the JS-side gain; zero = no work.
-          if (alive && (p.handStrength > 0.0 || p.handPull > 0.0)) {
-            let handPos = vec3<f32>(p.handX, p.handY, p.handZ);
-            let toHand  = pA - handPos;
-            let r2h     = dot(toHand, toHand);
-            let sigma2  = max(p.handRadius * p.handRadius, 1e-3);
-            let w       = exp(-r2h / sigma2);
-            // Brush: push along motion vector.
+          // motion with a Gaussian falloff around the cursor centroid.
+          if (alive && p.handStrength > 0.0) {
+            let toHand = pA - vec3<f32>(p.handX, p.handY, p.handZ);
+            let sigma2 = max(p.handRadius * p.handRadius, 1e-3);
+            let w      = exp(-dot(toHand, toHand) / sigma2);
             acc = acc + p.handStrength * w * vec3<f32>(p.handVx, p.handVy, p.handVz);
-            // Pull: spring-style toward cursor. Gaussian-weighted so it
-            // dies off outside the brush radius.
-            acc = acc - p.handPull * w * toHand;
+          }
+          // Per-fingertip gravity — three Gaussian-spring attractors
+          // (thumb, index, middle). Always-on, presence-gated. Gather
+          // emerges from geometry: as fingertips converge in world
+          // space, particles between them feel triple pull.
+          if (alive && p.tipFinGain > 0.0) {
+            let s2  = max(p.tipFinRadius * p.tipFinRadius, 1e-3);
+            let dA  = vec3<f32>(p.tipAx, p.tipAy, p.tipAz) - pA;
+            let dB  = vec3<f32>(p.tipBx, p.tipBy, p.tipBz) - pA;
+            let dC  = vec3<f32>(p.tipCx, p.tipCy, p.tipCz) - pA;
+            let wA  = exp(-dot(dA, dA) / s2);
+            let wB  = exp(-dot(dB, dB) / s2);
+            let wC  = exp(-dot(dC, dC) / s2);
+            acc = acc + p.tipFinGain * (wA * dA + wB * dB + wC * dC);
+          }
+          // Pinch tightens the gravity well at the scene's COM.
+          // Inverse-linear with floor avoids singularity; acts on
+          // every body so the gather is cluster-wide.
+          if (alive && p.comPull > 0.0) {
+            let toCom = vec3<f32>(p.comX, p.comY, p.comZ) - pA;
+            let r     = length(toCom) + 50.0;
+            acc = acc + p.comPull * toCom / r;
           }
 
           let newVel = velA.xyz + acc * p.dt * p.sign;
@@ -2194,7 +2292,7 @@
             if (sb) sb.destroy();
         }
         const bodyBytes = N * 16; // vec4<f32>
-        const PARAMS_BYTES = 320; // SimParams (308B w/ hand brush + pull) + headroom
+        const PARAMS_BYTES = 384; // SimParams (340B w/ brush + 3 fingertips) + headroom
         const make = () =>
           device.createBuffer({
             size: bodyBytes,
@@ -2373,7 +2471,7 @@
       // ----- step 4a: writeWgpuParams + dispatch sanity test -------
       // Pack current sim uniforms into the WebGPU params storage
       // buffer. Layout matches the WGSL SimParams struct.
-      const _wgpuParamsScratch = new ArrayBuffer(320);
+      const _wgpuParamsScratch = new ArrayBuffer(384);
       const _wgpuParamsF32 = new Float32Array(_wgpuParamsScratch);
       const _wgpuParamsU32 = new Uint32Array(_wgpuParamsScratch);
       function writeWgpuParams(overrides) {
@@ -2411,20 +2509,33 @@
         _wgpuParamsF32[21] = hv ? hv.y : 0;
         _wgpuParamsF32[22] = hv ? hv.z : 0;
         _wgpuParamsF32[23] = u.uHandRadius ? u.uHandRadius.value : 1;
-        _wgpuParamsF32[24] = u.uHandPull ? u.uHandPull.value : 0;
-        _wgpuParamsF32[25] = 0;
-        _wgpuParamsF32[26] = 0;
-        _wgpuParamsF32[27] = 0;
+        // Per-fingertip gravity: 3 vec3 tips interleaved with shared
+        // gain (slot [27]) and radius (slot [31]). _padTip at [35].
+        const tA = u.uTipA ? u.uTipA.value : null;
+        const tB = u.uTipB ? u.uTipB.value : null;
+        const tC = u.uTipC ? u.uTipC.value : null;
+        _wgpuParamsF32[24] = tA ? tA.x : 0;
+        _wgpuParamsF32[25] = tA ? tA.y : 0;
+        _wgpuParamsF32[26] = tA ? tA.z : 0;
+        _wgpuParamsF32[27] = u.uTipFinGain ? u.uTipFinGain.value : 0;
+        _wgpuParamsF32[28] = tB ? tB.x : 0;
+        _wgpuParamsF32[29] = tB ? tB.y : 0;
+        _wgpuParamsF32[30] = tB ? tB.z : 0;
+        _wgpuParamsF32[31] = u.uTipFinRadius ? u.uTipFinRadius.value : 1;
+        _wgpuParamsF32[32] = tC ? tC.x : 0;
+        _wgpuParamsF32[33] = tC ? tC.y : 0;
+        _wgpuParamsF32[34] = tC ? tC.z : 0;
+        _wgpuParamsF32[35] = u.uComPull ? u.uComPull.value : 0;
         const K = u.uK.value;
         for (let i = 0; i < NUM_KINDS * NUM_KINDS; i++) {
-          _wgpuParamsF32[28 + i] = K[i];
+          _wgpuParamsF32[36 + i] = K[i];
         }
         wgpuSim.device.queue.writeBuffer(
           wgpuSim.buffers.params,
           0,
           _wgpuParamsScratch,
           0,
-          320,
+          384,
         );
         return true;
       }
@@ -3675,7 +3786,12 @@
         uniform vec3  uHandVel;
         uniform float uHandStrength;
         uniform float uHandRadius;
-        uniform float uHandPull;
+        uniform vec3  uTipA;
+        uniform vec3  uTipB;
+        uniform vec3  uTipC;
+        uniform float uTipFinGain;
+        uniform float uTipFinRadius;
+        uniform float uComPull;
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
@@ -3763,21 +3879,49 @@
           }
 
           // Vorticity around the system barycenter (Y axis).
-          // Bipolar slider: negative = retrograde. Zero = no work.
-          if (abs(uSpin) > 0.0) {
+          // Soft pull toward rigid rotation (NOT a constant force — adding
+          // cross(omega, r) directly to acc was the old bug: it grew
+          // tangential velocity unbounded at every dt, so even tiny slider
+          // values flung bodies apart). Now we nudge only the planar
+          // tangential component toward its target speed; once v matches,
+          // acceleration is zero. Radial motion is preserved.
+          if (abs(uSpin) > 1e-6) {
             vec3 r = p - uCom;
-            acc += cross(vec3(0.0, uSpin, 0.0), r);
+            // Tangent direction in the XZ plane (Y is spin axis):
+            // 90° rotation of r-projection in XZ.
+            vec3 t = vec3(-r.z, 0.0, r.x);
+            float tLen = length(t);
+            if (tLen > 1e-3) {
+              vec3 tHat = t / tLen;
+              float vTarget = uSpin * tLen;
+              float vTan = dot(v, tHat);
+              acc += tHat * (vTarget - vTan) * 0.4;
+            }
           }
 
           // Hand brush — Gaussian-weighted push along cursor motion.
-          // Pull — Gaussian-weighted spring toward cursor (pinch-driven).
-          if (uHandStrength > 0.0 || uHandPull > 0.0) {
+          if (uHandStrength > 0.0) {
             vec3 toHand = p - uHandPos;
-            float r2h = dot(toHand, toHand);
             float sigma2 = max(uHandRadius * uHandRadius, 1e-3);
-            float w = exp(-r2h / sigma2);
+            float w = exp(-dot(toHand, toHand) / sigma2);
             acc += uHandStrength * w * uHandVel;
-            acc -= uHandPull * w * toHand;
+          }
+          // Per-fingertip gravity — three Gaussian-spring attractors.
+          if (uTipFinGain > 0.0) {
+            float s2 = max(uTipFinRadius * uTipFinRadius, 1e-3);
+            vec3 dA = uTipA - p;
+            vec3 dB = uTipB - p;
+            vec3 dC = uTipC - p;
+            float wA = exp(-dot(dA, dA) / s2);
+            float wB = exp(-dot(dB, dB) / s2);
+            float wC = exp(-dot(dC, dC) / s2);
+            acc += uTipFinGain * (wA * dA + wB * dB + wC * dC);
+          }
+          // Pinch tightens the gravity well at the scene's COM.
+          if (uComPull > 0.0) {
+            vec3 toCom = uCom - p;
+            float r = length(toCom) + 50.0;
+            acc += uComPull * toCom / r;
           }
 
           vec3 newVel = v + acc * uDt * uSign;
@@ -3845,8 +3989,23 @@
         velVar.material.uniforms.uHandRadius = {
           value: preserve?.uHandRadius ?? 40.0,
         };
-        velVar.material.uniforms.uHandPull = {
-          value: preserve?.uHandPull ?? 0.0,
+        velVar.material.uniforms.uTipA = {
+          value: preserve?.uTipA ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uTipB = {
+          value: preserve?.uTipB ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uTipC = {
+          value: preserve?.uTipC ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uTipFinGain = {
+          value: preserve?.uTipFinGain ?? 0.0,
+        };
+        velVar.material.uniforms.uTipFinRadius = {
+          value: preserve?.uTipFinRadius ?? 60.0,
+        };
+        velVar.material.uniforms.uComPull = {
+          value: preserve?.uComPull ?? 0.0,
         };
       }
 
@@ -7872,7 +8031,7 @@
               onClick: () => applyScene(currentSceneKey, { immediate: true }),
             },
             {
-              label: "Roll dice",
+              label: "Stir",
               onClick: () => rollDice(),
             },
           ]).el,
@@ -9032,16 +9191,16 @@
         phys.appendChild(sS.el);
         const spinS = Slider({
           label: "Spin",
-          min: -0.5,
-          max: 0.5,
-          step: 0.01,
-          hint: "Adds rotation around the system's centre of gravity, like a galactic disk forming. Negative spins the other way.",
+          min: -0.2,
+          max: 0.2,
+          step: 0.001,
+          hint: "Adds rotation around the system's centre of gravity, like a galactic disk forming. Negative spins the other way. Stable disks usually live near 0.05–0.07.",
           get: () => params.spin,
           set: (v) => {
             params.spin = v;
             velVar.material.uniforms.uSpin.value = v;
           },
-          fmt: (v) => v.toFixed(2),
+          fmt: (v) => v.toFixed(3),
         });
         phys.appendChild(spinS.el);
         const dtS = Slider({
@@ -9418,7 +9577,7 @@
               ["B", "Open scene browser"],
               ["1 … 8", "Switch to scene N"],
               ["R", "Reset current scene"],
-              ["G", "Roll the dice"],
+              ["G", "Stir (perturb velocities)"],
               ["C", "Cinematic mode (on / off)"],
               ["Shift+C", "Play / stop the selected film"],
             ],
@@ -16405,10 +16564,12 @@
       }
 
       // ===============================================================
-      // 24. EMERGENCE PERTURBATION  ("roll the dice")
+      // 24. EMERGENCE PERTURBATION  ("stir")
       // ===============================================================
       function rollDice() {
-        // Small random velocity kick to every body, ~0.5% of mean speed.
+        // Random velocity kick to every body, ~7% of mean speed — large
+        // enough to be visible (clusters ripple, dust eddies, orbits
+        // wobble) without scattering the system. 1% was inaudible.
         const rt = gpu.getCurrentRenderTarget(velVar);
         const buf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
         renderer.readRenderTargetPixels(rt, 0, 0, TEX_SIZE, TEX_SIZE, buf);
@@ -16425,7 +16586,7 @@
           }
         }
         const avg = n > 0 ? sumSp / n : 1.0;
-        const kick = avg * 0.01;
+        const kick = avg * 0.07;
         for (let i = 0; i < MAX_BODIES; i++) {
           buf[i * 4 + 0] += randn() * kick;
           buf[i * 4 + 1] += randn() * kick;
@@ -16863,11 +17024,17 @@
         handTrackerTick(now);
         updateHandWorld(camera, realDt);
         if (velVar && velVar.material && velVar.material.uniforms.uHandPos) {
-          velVar.material.uniforms.uHandPos.value.copy(handTracker.worldPos);
-          velVar.material.uniforms.uHandVel.value.copy(handTracker.worldVel);
-          velVar.material.uniforms.uHandStrength.value = handTracker.strength;
-          velVar.material.uniforms.uHandRadius.value = handTracker.radius;
-          velVar.material.uniforms.uHandPull.value = handTracker.pull;
+          const u = velVar.material.uniforms;
+          u.uHandPos.value.copy(handTracker.worldPos);
+          u.uHandVel.value.copy(handTracker.worldVel);
+          u.uHandStrength.value = handTracker.strength;
+          u.uHandRadius.value = handTracker.radius;
+          u.uTipA.value.copy(handTracker.tipWorld[0]);
+          u.uTipB.value.copy(handTracker.tipWorld[1]);
+          u.uTipC.value.copy(handTracker.tipWorld[2]);
+          u.uTipFinGain.value = handTracker.tipFinGain;
+          u.uTipFinRadius.value = handTracker.tipFinRadius;
+          u.uComPull.value = handTracker.comPull;
         }
 
         framesAccum++;
