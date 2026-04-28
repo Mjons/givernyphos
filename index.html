@@ -7249,8 +7249,9 @@
       }
 
       // Mass-weighted barycenter, refreshed on a slow cadence and only
-      // when spin is active. Stalls the GPU briefly via readRenderTargetPixels
-      // (same pattern as the followCam pick), so we throttle and skip
+      // when spin is active. Routes through readPosTexels so it works on
+      // both the WebGL2 path (sync render-target read) and the WebGPU
+      // path (CPU mirror of the DataTexture). Throttled and skipped
       // entirely when the force term is zero.
       let _comFrameCounter = 0;
       let _comReadBuf = null;
@@ -7262,15 +7263,10 @@
         if (!_comReadBuf || _comReadBuf.length !== need) {
           _comReadBuf = new Float32Array(need);
         }
-        const rt = gpu.getCurrentRenderTarget(posVar);
-        renderer.readRenderTargetPixels(
-          rt,
-          0,
-          0,
-          TEX_SIZE,
-          TEX_SIZE,
-          _comReadBuf,
-        );
+        // On the WebGPU path this is a buf.set(image.data) — no GPU
+        // round-trip. On the WebGL2 path it stalls briefly to read the
+        // render target, same pattern the followCam pick already uses.
+        readPosTexels(0, 0, TEX_SIZE, TEX_SIZE, _comReadBuf);
         let sx = 0,
           sy = 0,
           sz = 0,
@@ -7361,6 +7357,10 @@
           params.trail = sc.post.trail ?? 0;
           params.doppler = sc.doppler ?? 0;
           params.lens = sc.lens?.strength ?? 0;
+          if (sc.pointScale !== undefined) {
+            params.pointScale = sc.pointScale;
+            pointMat.uniforms.uPointScale.value = sc.pointScale;
+          }
           camera.position.fromArray(sc.camera.pos);
           controls.target.fromArray(sc.camera.tgt);
           camera.fov = sc.camera.fov;
@@ -7405,6 +7405,8 @@
         const endSM = sc.speedMax !== undefined ? sc.speedMax : 30.0;
         const startDop = pointMat.uniforms.uDoppler.value;
         const endDop = sc.doppler !== undefined ? sc.doppler : 0.0;
+        const startPS = pointMat.uniforms.uPointScale.value;
+        const endPS = sc.pointScale !== undefined ? sc.pointScale : startPS;
         const startRingOpacity = ringMat.uniforms.uOpacity.value;
         const endRingCfg = sc.photonRing || null;
         const endRingOpacity = endRingCfg ? (endRingCfg.opacity ?? 1.0) : 0.0;
@@ -7473,6 +7475,7 @@
           pointMat.uniforms.uBHHighlight.value = lerp(startBH, endBH, e);
           pointMat.uniforms.uSpeedMax.value = lerp(startSM, endSM, e);
           pointMat.uniforms.uDoppler.value = lerp(startDop, endDop, e);
+          pointMat.uniforms.uPointScale.value = lerp(startPS, endPS, e);
 
           // Photon ring: fade out to 0 before the body swap, then fade in the new one.
           if (t < swapT) {
@@ -7541,6 +7544,7 @@
             params.trail = sc.post.trail ?? 0;
             params.doppler = sc.doppler ?? 0;
             params.lens = sc.lens?.strength ?? 0;
+            if (sc.pointScale !== undefined) params.pointScale = sc.pointScale;
             params.fov = sc.camera.fov;
             currentSceneKey = key;
             syncUIToScene();
@@ -9362,6 +9366,28 @@
       const sceneBrowserEl = $("#scene-browser");
       const hotkeyOverlayEl = $("#hotkey-overlay");
 
+      // Hand-curated cover art per scene. Wins over any auto-captured
+      // localStorage thumbnail when present. Filenames preserve the
+      // numbering the artist supplied.
+      const SCENE_COVERS = {
+        "quiet-drift": "scene_cards/1. Quiet Drift.webp",
+        "milky-way": "scene_cards/02. milkyway.webp",
+        sagittarius: "scene_cards/03. universe_sagittarius.webp",
+        collision: "scene_cards/04. universe_collision.webp",
+        birth: "scene_cards/05. birth.webp",
+        "event-horizon": "scene_cards/06. event horizon.webp",
+        "dust-storm": "scene_cards/07. dust storm.webp",
+        orrery: "scene_cards/08. universe_orrery.webp",
+        lattice: "scene_cards/09. universe_lattice.webp",
+        antennae: "scene_cards/10. universe_antennae.webp",
+        "stephans-quintet": "scene_cards/11. universe_stephans-quintet.webp",
+        "virgo-m87": "scene_cards/12. universe_virgo-m87.webp",
+        "bullet-cluster": "scene_cards/13. universe_bullet-cluster.webp",
+        coma: "scene_cards/14. coma.webp",
+        sombrero: "scene_cards/15. universe_sombrero.webp",
+        horsehead: "scene_cards/16. universe_horsehead.webp",
+      };
+
       function buildSceneBrowser() {
         sceneBrowserEl.innerHTML = "";
         const close = el("button", "overlay-close");
@@ -9388,8 +9414,14 @@
             "scene-card" + (key === currentSceneKey ? " active" : ""),
           );
           card.dataset.key = key;
+          const coverPath = SCENE_COVERS[key];
           const thumbSrc = localStorage.getItem(thumbStorageKey(key));
-          if (thumbSrc) {
+          if (coverPath) {
+            const img = el("img", "thumb");
+            img.src = encodeURI(coverPath);
+            img.alt = sc.name;
+            card.appendChild(img);
+          } else if (thumbSrc) {
             const img = el("img", "thumb");
             img.src = thumbSrc;
             card.appendChild(img);
