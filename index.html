@@ -7055,6 +7055,79 @@
       ];
 
       // ===============================================================
+      // 13b. CINEMATIC ARCS  (BREATHING_ARCS_PLAN.md, phase 1)
+      // ===============================================================
+      // An "arc" groups a handful of scenes into a 30–75 minute
+      // emotional shape. Within an arc, transitions are slow soft
+      // dissolves (60s); between arcs, they're shorter "edits" (20s)
+      // using the existing pickTransitionFlavour grammar. ARC_GRAPH
+      // governs which arc can follow which — keeps macro flow
+      // coherent across the night.
+      const ARCS = {
+        "evening-drift": {
+          name: "Evening Drift",
+          durationMin: [45, 75],
+          scenes: [
+            "quiet-drift",
+            "milky-way",
+            "dust-storm",
+            "lattice",
+            "horsehead",
+          ],
+          energyCurve: "bell", // slow build → peak → slow fall
+        },
+        "orrery-meditation": {
+          name: "Orrery Meditation",
+          durationMin: [30, 55],
+          scenes: ["orrery", "lattice", "horsehead", "milky-way"],
+          energyCurve: "flat", // steady contemplation, no envelope
+        },
+        "deep-cluster": {
+          name: "Deep Cluster",
+          durationMin: [40, 65],
+          scenes: [
+            "coma",
+            "stephans-quintet",
+            "virgo-m87",
+            "sagittarius",
+            "sombrero",
+          ],
+          energyCurve: "bell",
+        },
+        "collision-suite": {
+          name: "Collision Suite",
+          durationMin: [25, 45],
+          scenes: ["collision", "antennae", "bullet-cluster", "birth"],
+          energyCurve: "wave", // two peaks separated by a lull
+        },
+        "event-horizon-suite": {
+          name: "Event Horizon Suite",
+          durationMin: [20, 35],
+          scenes: ["event-horizon", "virgo-m87", "sagittarius"],
+          energyCurve: "sigh", // fast rise, long release
+        },
+      };
+      const ARC_GRAPH = {
+        "evening-drift": ["orrery-meditation", "deep-cluster"],
+        "orrery-meditation": ["evening-drift", "deep-cluster"],
+        "deep-cluster": [
+          "evening-drift",
+          "collision-suite",
+          "orrery-meditation",
+        ],
+        "collision-suite": [
+          "event-horizon-suite",
+          "evening-drift",
+          "deep-cluster",
+        ],
+        "event-horizon-suite": ["collision-suite", "deep-cluster"],
+      };
+      const ARC_ORDER = Object.keys(ARCS);
+      const ARC_HISTORY_DEPTH = 2;
+      const WITHIN_ARC_TRANSITION_MS = 60000; // soft dissolves inside an arc
+      const BETWEEN_ARC_TRANSITION_MS = 20000; // grand edits between arcs
+
+      // ===============================================================
       // 14. STATE UPLOAD / BLIT HELPERS
       // ===============================================================
       const blitScene = new THREE.Scene();
@@ -11209,6 +11282,81 @@
         return r[0] + Math.random() * (r[1] - r[0]);
       }
 
+      // ----- arc helpers (BREATHING_ARCS_PLAN.md phase 1) ----------
+      function currentArc() {
+        return ARCS[director.currentArcId] || null;
+      }
+      function pickArc(prevArcId) {
+        let candidates;
+        if (prevArcId && ARC_GRAPH[prevArcId]) {
+          candidates = ARC_GRAPH[prevArcId].filter(
+            (id) => !director.recentArcs.includes(id),
+          );
+          if (candidates.length === 0)
+            candidates = ARC_GRAPH[prevArcId].slice();
+        } else {
+          candidates = ARC_ORDER.filter(
+            (id) => !director.recentArcs.includes(id),
+          );
+          if (candidates.length === 0) candidates = ARC_ORDER.slice();
+        }
+        return candidates[Math.floor(Math.random() * candidates.length)];
+      }
+      function arcRandomDurationMs(arcId) {
+        const arc = ARCS[arcId];
+        if (!arc) return 30 * 60 * 1000;
+        const minutes = rangeSample(arc.durationMin);
+        return minutes * 60 * 1000;
+      }
+      function setActiveArc(arcId) {
+        if (director.currentArcId && director.currentArcId !== arcId) {
+          director.recentArcs.unshift(director.currentArcId);
+          if (director.recentArcs.length > ARC_HISTORY_DEPTH) {
+            director.recentArcs.pop();
+          }
+        }
+        director.currentArcId = arcId;
+        director.arcStartTime = performance.now();
+        director.arcDurationMs = arcRandomDurationMs(arcId);
+      }
+      function isWithinArcTransition(fromKey, toKey) {
+        const arc = currentArc();
+        if (!arc) return false;
+        return arc.scenes.includes(fromKey) && arc.scenes.includes(toKey);
+      }
+      function arcDirectorTick(now) {
+        if (!director.enabled) return;
+        if (!director.currentArcId) {
+          setActiveArc(pickArc(null));
+          return;
+        }
+        if (now - director.arcStartTime >= director.arcDurationMs) {
+          setActiveArc(pickArc(director.currentArcId));
+        }
+      }
+      // Phase 2: macro envelope evaluated at normalised arc time arcT
+      // ∈ [0, 1]. Returns 0..1; multiplied by ARC_AMP at the call site.
+      // Curves: bell (slow swell), wave (two peaks), sigh (fast rise +
+      // long decay), flat (no envelope).
+      function arcEnvelopeAt(arcT, curve) {
+        if (curve === "flat") return 0;
+        const t = Math.max(0, Math.min(1, arcT));
+        if (curve === "bell") return Math.sin(Math.PI * t);
+        if (curve === "wave") return Math.abs(Math.sin(2 * Math.PI * t));
+        if (curve === "sigh") {
+          return t < 0.15 ? t / 0.15 : Math.max(0, 1 - (t - 0.15) / 0.85);
+        }
+        return 0;
+      }
+      function currentArcEnvelope() {
+        const arc = currentArc();
+        if (!arc || !director.arcDurationMs) return 0;
+        const arcT =
+          (performance.now() - director.arcStartTime) / director.arcDurationMs;
+        return arcEnvelopeAt(arcT, arc.energyCurve);
+      }
+      const ARC_AMP = 0.15; // depth of arc envelope on bloom + exposure
+
       const director = {
         enabled: false,
         pace: "normal",
@@ -11224,6 +11372,13 @@
         recentPalettes: [],
         recentChannels: [],
         recentCollisionScenarios: [],
+
+        // Phase 1 arcs (BREATHING_ARCS_PLAN.md). Arc-level state lives
+        // alongside per-scene state and changes on a much slower clock.
+        currentArcId: null,
+        arcStartTime: 0, // performance.now() at activation
+        arcDurationMs: 0, // randomised in [durationMin[0], durationMin[1]] × 60s
+        recentArcs: [],
 
         // Breathing clock (preserved across transitions)
         breathT: 0,
@@ -11466,8 +11621,17 @@
         const flav = currentFlavour();
         const banned = new Set(director.recentScenes);
         banned.add(currentKey);
-        // Flavour scene filter: pulse = energetic only, long-shadow = calm only, oracle = event-rich
+        // Arc filter (BREATHING_ARCS_PLAN.md): primary structure.
+        // Restricts the pool to scenes belonging to the active arc.
+        // Soft-degrades when the arc and flavour conflict so we never
+        // wedge with an empty pool.
         let pool = SCENE_ORDER;
+        const arc = currentArc();
+        if (arc) {
+          const arcFiltered = pool.filter((k) => arc.scenes.includes(k));
+          if (arcFiltered.length >= 2) pool = arcFiltered;
+        }
+        // Flavour scene filter: pulse = energetic only, long-shadow = calm only, oracle = event-rich
         if (flav.sceneFilter) {
           const filtered = pool.filter((k) => flav.sceneFilter(sceneTags(k)));
           if (filtered.length >= 2) pool = filtered; // need ≥2 or we'd loop one scene
@@ -11604,6 +11768,11 @@
         };
         const pm = amp.periodMul || 1;
 
+        // Phase 2 arc envelope (BREATHING_ARCS_PLAN.md §4): a slow
+        // shape over the active arc's lifetime that lifts bloom +
+        // exposure together. Scene-level breathing layers on top.
+        const arcEnv = currentArcEnvelope();
+
         // Bloom: two sines at irrational ratio (55s + 39.7s), ±8% · flavour amp.
         // Low-band audio energy further scales the amp so bass swells read
         // as breathing, not as a separate visual track.
@@ -11614,12 +11783,13 @@
           energyBoost *
           (Math.sin((TAU * t) / (55.0 * pm) + p.bloom1) * 0.65 +
             Math.sin((TAU * t) / (39.7 * pm) + p.bloom2) * 0.35);
-        bloom.strength = b.bloom * (1 + bOsc);
+        bloom.strength = b.bloom * (1 + bOsc + arcEnv * ARC_AMP);
 
-        // Exposure: ±0.05 EV on 110s period · flavour amp
+        // Exposure: ±0.05 EV on 110s period · flavour amp,
+        // plus arc envelope (additive, EV units).
         const eOsc =
           0.05 * (amp.exp ?? 1) * Math.sin((TAU * t) / (110.0 * pm) + p.exp);
-        renderer.toneMappingExposure = b.exposure + eOsc;
+        renderer.toneMappingExposure = b.exposure + eOsc + arcEnv * ARC_AMP;
 
         // CA: ±15% of baseline on 50s period · flavour amp
         const cOsc =
@@ -11669,12 +11839,22 @@
         );
         // If transitioning to collision, pick a different scenario
         const opts = { flavour };
-        // Flavour scales the transition duration (pulse = snappy, long-shadow = slow).
-        // §9: bespoke from→to pairs can further stretch or squeeze duration.
-        const baseDur =
-          { dissolve: 3200, flare: 1600, pullback: 2400, pushin: 2400 }[
-            flavour
-          ] || 1600;
+        // BREATHING_ARCS_PLAN.md §3: within-arc transitions are slow
+        // soft dissolves (60s) so the night unfolds; between-arc
+        // transitions are short (20s) so they read as edits.
+        // Falls back to flavour-default base when no arc is active.
+        const withinArc = isWithinArcTransition(currentSceneKey, next);
+        let baseDur;
+        if (currentArc()) {
+          baseDur = withinArc
+            ? WITHIN_ARC_TRANSITION_MS
+            : BETWEEN_ARC_TRANSITION_MS;
+        } else {
+          baseDur =
+            { dissolve: 3200, flare: 1600, pullback: 2400, pushin: 2400 }[
+              flavour
+            ] || 1600;
+        }
         opts.durationMs =
           baseDur *
           (flav.transitionDurationMul || 1) *
@@ -11707,9 +11887,11 @@
         // should never leap forward when a frame drops or the tab
         // refocuses — every spike would otherwise land as visible judder.
         const dt = Math.min(realDt, 0.05);
-        const idle = (performance.now() - lastUserInputTime) / 1000;
+        const now = performance.now();
+        const idle = (now - lastUserInputTime) / 1000;
         const userActive = idle < 8;
         applyBreathing(dt);
+        arcDirectorTick(now);
 
         // If the scene changed underneath us (user scrolled through the
         // browser, hit a number key, etc.), restart the dwell cycle.
@@ -11819,12 +12001,20 @@
           director.state = "IDLE";
           director.stateTimer = 0;
           captureBaseline();
+          // Phase 1 arcs: pick an opening arc immediately so the very
+          // first scene pick is filtered correctly. arcDirectorTick
+          // would do this on the next frame, but pickNextScene may
+          // run before that depending on dwell timing.
+          setActiveArc(pickArc(null));
           showToast("Cinematic", currentFlavour().label);
         } else {
           director.state = "IDLE";
           restoreBaseline();
           // Reset any in-flight mood cross-fade state on the shader
           pointMat.uniforms.uChannelMix.value = 0.0;
+          // Drop arc state so a re-enable starts fresh.
+          director.currentArcId = null;
+          director.recentArcs = [];
           showToast("Cinematic", "off");
         }
         reflectCinematicOnRail();
