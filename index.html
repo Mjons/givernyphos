@@ -5136,6 +5136,7 @@
         uniform float uStarMass;
         uniform float uPlanetMass;
         uniform float uAstroThrust;
+        uniform float uPlanetRadius; // arrival trigger (0 disables respawn)
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
@@ -5165,6 +5166,17 @@
           // migration is a force of nature, not user-interactive. This keeps
           // the scene O(N) instead of O(N^2).
           if (kindA == 7) {
+            // Arrival check (mirror of position-shader respawn block).
+            // If this body is within uPlanetRadius of the planet, the
+            // position shader is snapping it back to a fresh spawn —
+            // we zero out velocity so it starts the migration at rest.
+            if (uPlanetRadius > 0.0
+                && length(p - uPlanetPos) < uPlanetRadius) {
+              float dAge0 = uDt * abs(uSign) / uMaxAge;
+              float newAge0 = clamp(ageNorm + dAge0, 0.0, 0.9999);
+              gl_FragColor = vec4(0.0, 0.0, 0.0, kindAf + newAge0);
+              return;
+            }
             vec3 toStar   = uStarPos   - p;
             vec3 toPlanet = uPlanetPos - p;
             float r2s = dot(toStar,   toStar)   + uEps2;
@@ -5274,11 +5286,48 @@
       const positionShader = /* glsl */ `
         uniform float uDt;
         uniform float uSign;
+        uniform float uFrame;
+        uniform vec3  uStarPos;
+        uniform vec3  uPlanetPos;
+        uniform float uPlanetRadius;
+
+        vec2 hash22(vec2 p, float seed) {
+          vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
+          p3 += dot(p3, p3.yzx + 19.19);
+          return fract((p3.xx + p3.yz) * p3.zy);
+        }
+
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec4 pos = texture2D(texturePosition, uv);
           vec4 vel = texture2D(textureVelocity, uv);
-          pos.xyz += vel.xyz * uDt * uSign;
+
+          // Astrophage respawn (PETROVA_LINE.md §3.4). When a kind-7
+          // body arrives within uPlanetRadius of the planet, snap it
+          // back to a fresh hemispherical spawn near the star. The
+          // velocity shader runs the same arrival check and zeros out
+          // velocity, so position and velocity stay in sync.
+          float kindAf = floor(vel.w + 0.001);
+          bool astroArrived = (kindAf > 6.5) && (uPlanetRadius > 0.0)
+              && (length(pos.xyz - uPlanetPos) < uPlanetRadius);
+
+          if (astroArrived) {
+            // Match scenePetrovaLine's launch disc: x = +4 from star,
+            // y/z uniform in disc of radius 2. Hardcoded for now;
+            // scene-controlled if we generalize later.
+            vec2 hA = hash22(uv, uFrame * 0.0007);
+            vec2 hB = hash22(uv * 1.7, uFrame * 0.0011 + 0.31);
+            float az = 6.2832 * hA.x;
+            float rho = 2.0 * sqrt(hB.x);
+            pos.xyz = uStarPos + vec3(
+              4.0,
+              rho * cos(az),
+              rho * sin(az)
+            );
+          } else {
+            pos.xyz += vel.xyz * uDt * uSign;
+          }
+
           gl_FragColor = pos;
         }
       `;
@@ -5332,7 +5381,8 @@
         // Astrophage (PETROVA_LINE.md). Defaults zero; petrova-line scene
         // populates these. uStarMass / uPlanetMass = 0 means no force, so
         // the kindA==7 branch in the velocity shader is effectively a no-op
-        // for any scene that doesn't set these.
+        // for any scene that doesn't set these. uPlanetRadius = 0 disables
+        // the respawn lifecycle (position shader skips the snap).
         velVar.material.uniforms.uStarPos = {
           value: preserve?.uStarPos ?? new THREE.Vector3(0, 0, 0),
         };
@@ -5348,6 +5398,20 @@
         velVar.material.uniforms.uAstroThrust = {
           value: preserve?.uAstroThrust ?? 0.0,
         };
+        velVar.material.uniforms.uPlanetRadius = {
+          value: preserve?.uPlanetRadius ?? 0.0,
+        };
+
+        // Position shader needs the same uStarPos / uPlanetPos /
+        // uPlanetRadius (for the §3.4 respawn block) plus uFrame for
+        // the hash seed. Share Vector3 refs so a single applyScenePhysics
+        // update reaches both shaders.
+        posVar.material.uniforms.uFrame = velVar.material.uniforms.uFrame;
+        posVar.material.uniforms.uStarPos = velVar.material.uniforms.uStarPos;
+        posVar.material.uniforms.uPlanetPos =
+          velVar.material.uniforms.uPlanetPos;
+        posVar.material.uniforms.uPlanetRadius =
+          velVar.material.uniforms.uPlanetRadius;
       }
 
       function createGPGPU(texSize, preserve) {
@@ -6467,6 +6531,19 @@
       // Milky Way tint — bulge (kind 5) reads warm gold, disk (kind 0) stays
       // slightly cool so the arms feel blue-white against the core.  Dust
       // (kind 3) is sepia-darkened; halo (kind 4) is faded neutral.
+      // Petrova Line — astrophage glow in the IR / deep red. Tints
+      // multiply the base palette colour, so kind 7 (astrophage) reads
+      // as red-on-red against the ember palette + speed channel:
+      // bright red where the beam moves fast, deep crimson where slow.
+      const TINT_PETROVA = (() => {
+        const t = TINT_NEUTRAL.slice();
+        // kind 7 — astrophage: deep red, kill green/blue.
+        t[7 * 3 + 0] = 1.6;
+        t[7 * 3 + 1] = 0.18;
+        t[7 * 3 + 2] = 0.1;
+        return t;
+      })();
+
       const TINT_MILKYWAY = (() => {
         const t = TINT_NEUTRAL.slice();
         // kind 0 — disk stars: slight blue-white bias
@@ -7240,6 +7317,131 @@
             const mass = 0.06 + rng() * 0.12;
             setBody(i++, x, y, z, mass, vx, vy, vz, 0.0);
           }
+        }
+
+        state.count = i;
+      }
+
+      // PETROVA_LINE.md step 2 — minimal scene to verify the curved beam
+      // emerges from physics. Star at origin, planet at +30 along X, ~100
+      // astrophage clustered around the star with no initial velocity.
+      // The kindA==7 branch in the velocity shader applies star-grav +
+      // planet-grav + thrust-toward-planet; the curve arises from the
+      // tangential component of the net force as bodies fall outward
+      // against the star while being pulled toward the planet.
+      //
+      // Scene config provides star/planet positions + masses + thrust
+      // magnitude through the `astrophage` field, plumbed via
+      // applyScenePhysics into the velocity-shader uniforms.
+      //
+      // v1 = 100 astrophage, no respawn. Step 3 adds the despawn-at-planet
+      // / respawn-at-star lifecycle; step 4 scales to ~50k.
+      function scenePetrovaLine() {
+        zero();
+        let i = 0;
+
+        // Star — gravitational anchor (kind 0). Heavy enough to dominate
+        // the inner trajectory of nearby astrophage.
+        setBody(i++, 0, 0, 0, 5000.0, 0, 0, 0, 0.0);
+
+        // Planet — astrophage destination (kind 1). Light enough that
+        // the star's gravity wins for most of the transit; planet's
+        // pull only matters in the last third (which is what gives the
+        // beam its curve at the end). Position must match
+        // SCENES["petrova-line"].astrophage.planetPos.
+        setBody(i++, 60, 12, 0, 100.0, 0, 0, 0, 1.0);
+
+        // Astrophage (kind 7) — spawn in a forward-facing hemispherical
+        // shell on the planet-facing (+X) side of the star, between
+        // r=SPAWN_R_MIN and r=SPAWN_R_MAX. Mass ~0 so they don't
+        // perturb anything. The shader accelerates them via star-grav
+        // (pulls back), planet-grav (small), and thrust toward planet
+        // (dominant). The off-axis spawn is what gives the trajectory
+        // a tangential component → the curve.
+        //
+        // Each particle gets a random initial velocity (0..V_INIT_MAX)
+        // pointed roughly toward the planet, so they're at varied
+        // stages of flight at any instant. Without respawn (step 3)
+        // this fakes the steady-state distribution of bodies along
+        // the beam.
+        // Tight launch disc just outside the star on the planet-facing
+        // side. All bodies start at roughly (4, ±2, ±2) with no initial
+        // velocity — physics drives them forward. Tight spawn keeps the
+        // trajectories similar so the steady-state flow reads as a beam.
+        // Position-shader §3.4 respawn samples the same disc.
+        //
+        // Astrophage skip the all-pairs gravity loop (kindA==7
+        // early-return), so per-body cost is O(1). We fill the entire
+        // density tier minus a small reserve for the star/planet — the
+        // user controls the beam density via the existing density
+        // slider. lush (~65k) hits the design-doc target.
+        const ASTROPHAGE_RESERVE = 16; // slots saved for non-astrophage
+        const N_ASTROPHAGE = Math.max(0, MAX_BODIES - ASTROPHAGE_RESERVE - i);
+        const SPAWN_X = 4.0;
+        const SPAWN_DISC_R = 2.0;
+        for (let k = 0; k < N_ASTROPHAGE && i < MAX_BODIES; k++) {
+          const az = 2 * Math.PI * rng();
+          const rho = SPAWN_DISC_R * Math.sqrt(rng()); // uniform in disc
+          const x = SPAWN_X;
+          const y = rho * Math.cos(az);
+          const z = rho * Math.sin(az);
+          setBody(i++, x, y, z, 0.001, 0, 0, 0, 7.0);
+        }
+
+        state.count = i;
+      }
+
+      // Ship-test scene (PASSING_SHIPS.md §5.1). Pure visualization of
+      // the Hail Mary as an interpretation-B constellation: 18 bodies
+      // in formation, no other content, no gravity. Lets us judge
+      // whether the silhouette reads as a ship before wiring up
+      // trajectory / centrifuge animation / spawn lifecycle. Pass
+      // ?scene=ship-test to view.
+      function sceneShipTest() {
+        zero();
+        let i = 0;
+
+        const SHIP_SCALE = 4.0;
+        // Local coords: ship oriented along +Z forward.
+        // Ring at +Z is the centrifuge, spine along Z, spin drive at -Z.
+        const HAIL_MARY_NODES = [
+          // Nose (control deck) — single bright forward node
+          [0, 0, 2.0, 2.0],
+          // Centrifuge ring — 3 nodes at 120° around +Z, radius 0.7
+          [0.7, 0.0, 1.0, 1.5],
+          [-0.35, 0.606, 1.0, 1.5],
+          [-0.35, -0.606, 1.0, 1.5],
+          // Spine modules
+          [0, 0, 0.4, 1.5], // lab
+          [0, 0, -0.2, 1.5], // dorm
+          [0, 0, -0.8, 1.5], // storage
+          [0, 0, -1.4, 1.5], // junction
+          // Spin drive cluster at -Z (rear) — brighter for engine glow
+          [0, 0, -2.0, 2.5],
+          [0.4, 0, -2.4, 2.0],
+          [-0.4, 0, -2.4, 2.0],
+          [0, 0.4, -2.4, 2.0],
+          [0, -0.4, -2.4, 2.0],
+          [0, 0, -2.8, 2.5],
+          // Antennae / sensors — small forward off-axis nodes
+          [0.6, 0.8, 1.2, 0.8],
+          [-0.6, 0.8, 1.2, 0.8],
+          [0.6, -0.8, 1.2, 0.8],
+          [-0.6, -0.8, 1.2, 0.8],
+        ];
+        for (const [lx, ly, lz, m] of HAIL_MARY_NODES) {
+          if (i >= MAX_BODIES) break;
+          setBody(
+            i++,
+            lx * SHIP_SCALE,
+            ly * SHIP_SCALE,
+            lz * SHIP_SCALE,
+            m,
+            0,
+            0,
+            0,
+            0.0, // kind 0 — renders like a star
+          );
         }
 
         state.count = i;
@@ -8256,6 +8458,46 @@
             center: [0, 0, 0],
           },
         },
+        "petrova-line": {
+          name: "Petrova Line",
+          caption: "Astrophage migration · Tau Ceti",
+          make: scenePetrovaLine,
+          // Camera: 3/4 view framing both the star (origin) and the
+          // off-axis planet (+60 X, +12 Y). Beam runs diagonally with
+          // a curve in the last third where planet gravity dominates.
+          camera: { pos: [30, 40, 95], tgt: [30, 6, 0], fov: 50 },
+          palette: "ember",
+          channel: "speed",
+          post: {
+            bloom: 1.2,
+            bloomRadius: 0.5,
+            exposure: 1.1,
+            ca: 0.2,
+            vignette: 0.4,
+            grain: 0.04,
+            trail: 0.985, // long trails so the beam paints continuously
+          },
+          physics: { G: 1.0, softening: 0.5, dt: 0.008, speed: 1.0 },
+          K: "neutral",
+          flock: 0.0,
+          radiation: 0.0,
+          tint: TINT_PETROVA, // kind 7 → red / deep red
+          bhHighlight: 0.0,
+          // Astrophage forces — PETROVA_LINE.md §3.1. Planet is
+          // off-axis at (60, 12, 0): star gravity dominates the first
+          // 2/3 of flight (beam mostly straight along +X), then planet
+          // gravity dominates the last 1/3 (beam curves up to the
+          // planet). The curve is not authored — it falls out of the
+          // gravity-vs-thrust crossover.
+          astrophage: {
+            starPos: [0, 0, 0],
+            planetPos: [60, 12, 0],
+            starMass: 200.0,
+            planetMass: 100.0,
+            thrust: 15.0,
+            planetRadius: 4.0,
+          },
+        },
         "dust-storm": {
           name: "Dust Storm",
           caption: "Flocks · attractors",
@@ -8746,6 +8988,26 @@
         params.radiation = sc.radiation || 0;
         params.spin = sc.physics.spin || 0;
         velVar.material.uniforms.uSpin.value = params.spin;
+
+        // Astrophage forces (PETROVA_LINE.md §3.1). Defaults to zeros so
+        // non-petrova scenes leave the kindA==7 shader branch as a no-op
+        // (no kind-7 bodies + zero forces = nothing to integrate).
+        const astro = sc.astrophage || {};
+        const sPos = astro.starPos || [0, 0, 0];
+        const pPos = astro.planetPos || [0, 0, 0];
+        velVar.material.uniforms.uStarPos.value.set(sPos[0], sPos[1], sPos[2]);
+        velVar.material.uniforms.uPlanetPos.value.set(
+          pPos[0],
+          pPos[1],
+          pPos[2],
+        );
+        velVar.material.uniforms.uStarMass.value = astro.starMass || 0.0;
+        velVar.material.uniforms.uPlanetMass.value = astro.planetMass || 0.0;
+        velVar.material.uniforms.uAstroThrust.value = astro.thrust || 0.0;
+        // planetRadius = 0 disables the §3.4 respawn lifecycle. Scenes
+        // that want continuous flow set this to ~1.5–3.0.
+        velVar.material.uniforms.uPlanetRadius.value =
+          astro.planetRadius || 0.0;
       }
 
       // Mass-weighted barycenter, refreshed on a slow cadence and only
@@ -11399,6 +11661,7 @@
           uStarMass: velVar.material.uniforms.uStarMass.value,
           uPlanetMass: velVar.material.uniforms.uPlanetMass.value,
           uAstroThrust: velVar.material.uniforms.uAstroThrust.value,
+          uPlanetRadius: velVar.material.uniforms.uPlanetRadius.value,
         };
 
         // Flash to cover the pop.
@@ -12688,6 +12951,7 @@
         collision: { energetic: true, event: true },
         birth: { energetic: true, event: true },
         "event-horizon": { energetic: true, event: true },
+        "petrova-line": { calm: true, event: true },
         "dust-storm": { calm: true },
         orrery: { calm: true },
         lattice: { calm: true },
