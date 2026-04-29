@@ -1369,6 +1369,54 @@
       #err.show {
         display: flex;
       }
+
+      /* Stargazer intro overlay */
+      #intro-skip {
+        position: fixed;
+        top: 16px;
+        right: 18px;
+        z-index: 60;
+        font-family: var(--font-sans);
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        color: var(--text-2);
+        background: transparent;
+        border: 0;
+        padding: 6px 10px;
+        cursor: pointer;
+        opacity: 0;
+        pointer-events: none;
+        text-transform: lowercase;
+        transition:
+          opacity 420ms var(--ease),
+          color 220ms var(--ease);
+      }
+      #intro-skip.show {
+        opacity: 0.7;
+        pointer-events: auto;
+      }
+      #intro-skip:hover {
+        color: var(--text-0);
+      }
+      #intro-prompt {
+        position: fixed;
+        bottom: 12vh;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 58;
+        font-family: var(--font-sans);
+        font-size: 10px;
+        letter-spacing: 0.32em;
+        color: var(--text-2);
+        text-transform: lowercase;
+        opacity: 0;
+        pointer-events: none;
+        text-shadow: 0 1px 6px #000;
+        transition: opacity 600ms var(--ease);
+      }
+      #intro-prompt.show {
+        opacity: 0.7;
+      }
     </style>
   </head>
   <body>
@@ -1405,6 +1453,8 @@
     <div id="toast"></div>
     <div id="film-title"></div>
     <div id="err"></div>
+    <button id="intro-skip" type="button">skip →</button>
+    <div id="intro-prompt">click to begin</div>
     <pre id="debug-overlay" class="hidden"></pre>
     <div id="density-modal" class="overlay hidden">
       <div class="density-modal-card">
@@ -3591,6 +3641,1400 @@
       controls.dampingFactor = 0.08;
       controls.maxDistance = 10000;
       controls.minDistance = 1;
+
+      // ===============================================================
+      // 2b. STARGAZER INTRO (cold open — see STARGAZER_INTRO_PLAN.md)
+      // ===============================================================
+      // A short cinematic pre-roll: cute character + telescope on a
+      // hill, the camera glides over and into the eyepiece, which is
+      // textured with the live sim composer. After ~12s, the canvas
+      // hands off to the regular sim render path.
+      //
+      // State lives on `intro`. When `intro.active === true` the main
+      // loop renders `intro.scene` instead of `composer.render()` and
+      // skips the sim physics step.
+      const INTRO_BEATS = {
+        ESTABLISH: 10.0,
+        APPROACH: 4.0,
+        LEAN_IN: 3.0,
+        REACT: 3.0,
+        THROUGH: 3.0,
+      };
+      const INTRO_TOTAL =
+        INTRO_BEATS.ESTABLISH +
+        INTRO_BEATS.APPROACH +
+        INTRO_BEATS.LEAN_IN +
+        INTRO_BEATS.REACT +
+        INTRO_BEATS.THROUGH;
+      const intro = {
+        active: false, // gated in boot()
+        beat: "IDLE", // ESTABLISH | APPROACH | LEAN_IN | REACT | THROUGH | DONE
+        t: 0, // seconds within the current beat
+        T: 0, // seconds since intro start
+        scene: null, // THREE.Scene built in step 2
+        camera: null, // shares main `camera` — set on enter
+        // Cache of beat durations so the cinematic move can read them.
+        beatDur: { ...INTRO_BEATS },
+        // Set by skip / click handlers; consumed in tickIntro().
+        clickAdvance: false,
+        skipToEnd: false,
+        // Saved camera state so we can restore on intro end.
+        savedCam: null,
+        savedFov: null,
+        savedControlsEnabled: null,
+      };
+
+      function introShouldPlay() {
+        try {
+          const url = new URL(location.href);
+          const p = url.searchParams.get("intro");
+          if (p === "0") return false;
+          if (p === "1") return true;
+          // Honor user's reduced-motion preference: a 12-second cinematic
+          // dolly is exactly the kind of thing the setting is meant to
+          // opt out of. Treat it as "intro already seen."
+          if (
+            window.matchMedia &&
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ) {
+            try {
+              localStorage.setItem("phos.introSeen", "1");
+            } catch (e) {}
+            return false;
+          }
+          // Default: only on first visit. localStorage flag persists
+          // across sessions; set on intro completion or skip.
+          const seen = localStorage.getItem("phos.introSeen");
+          return seen !== "1";
+        } catch (e) {
+          return false;
+        }
+      }
+
+      function introMarkSeen() {
+        try {
+          localStorage.setItem("phos.introSeen", "1");
+        } catch (e) {}
+      }
+
+      // Build the intro scene: hillside + character + telescope under a
+      // moonlit starfield. Cute-chibi character is ~7 primitives; the
+      // telescope is 4. Cheap to build, cheap to render.
+      function buildIntroScene() {
+        const s = new THREE.Scene();
+        s.background = new THREE.Color(0x080b14);
+        s.fog = new THREE.FogExp2(0x080b14, 0.011);
+
+        // ---- Lighting -------------------------------------------------
+        // Soft cool moonlight from above-left — bright enough to read
+        // the silhouettes against the sky and pick out the hillside
+        // contours.
+        const moon = new THREE.DirectionalLight(0xb8c8e8, 1.0);
+        moon.position.set(-8, 12, 6);
+        s.add(moon);
+        // A second, opposite-side fill so the character has rim light
+        // when the camera comes around for the side-profile bow shot.
+        const fill = new THREE.DirectionalLight(0x6a78a0, 0.45);
+        fill.position.set(8, 6, -4);
+        s.add(fill);
+        // Warm lantern at the telescope base — gives a focal point.
+        const lantern = new THREE.PointLight(0xffd089, 2.2, 16, 1.6);
+        lantern.position.set(0.5, 0.45, -0.35);
+        s.add(lantern);
+        // A small warm light at the eyepiece — only turned up during
+        // LEAN_IN/THROUGH so it reads as "the cosmos through the lens
+        // is lighting the character's face."
+        const eyepieceGlow = new THREE.PointLight(0xfff0c8, 0.0, 4, 1.4);
+        eyepieceGlow.position.set(-0.66, 1.015, 0);
+        s.add(eyepieceGlow);
+        intro.eyepieceGlowLight = eyepieceGlow;
+        // Ambient lift — warmer and brighter than before so silhouettes
+        // read clearly without losing the night mood.
+        s.add(new THREE.AmbientLight(0x2a3048, 0.7));
+        intro.lantern = lantern;
+
+        // ---- Starfield (dedicated to introScene) ----------------------
+        // Smaller than the sim starfield — we don't need the same
+        // density at this camera distance. Same twinkle math, scaled
+        // for a much smaller world.
+        {
+          const N = 3200;
+          const pos = new Float32Array(N * 3);
+          const phase = new Float32Array(N);
+          const sz = new Float32Array(N);
+          for (let i = 0; i < N; i++) {
+            // Hemisphere above the horizon — denser overhead, sparser
+            // toward the horizon haze line.
+            const u = Math.random();
+            const v = Math.random();
+            const theta = Math.acos(0.05 + 0.95 * v); // 0 = up, ~π/2 = horizon
+            const phi = u * 2 * Math.PI;
+            const r = 220 + Math.random() * 120;
+            const sy = Math.cos(theta);
+            const sxz = Math.sin(theta);
+            pos[i * 3 + 0] = r * sxz * Math.cos(phi);
+            pos[i * 3 + 1] = r * sy + 6; // lift a touch off the horizon
+            pos[i * 3 + 2] = r * sxz * Math.sin(phi);
+            phase[i] = Math.random() * 6.2831853;
+            sz[i] =
+              Math.random() < 0.03
+                ? 2.4 + Math.random() * 1.4
+                : 0.8 + Math.random() * 1.3;
+          }
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+          geo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
+          geo.setAttribute("aSize", new THREE.BufferAttribute(sz, 1));
+          const mat = new THREE.ShaderMaterial({
+            uniforms: { uTime: { value: 0 }, uIntensity: { value: 0.85 } },
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            vertexShader: `
+              uniform float uTime;
+              attribute float aPhase;
+              attribute float aSize;
+              varying float vT;
+              void main() {
+                vec4 mv = modelViewMatrix * vec4(position, 1.0);
+                gl_Position = projectionMatrix * mv;
+                float tw = 0.55 + 0.45 * sin(uTime * 0.9 + aPhase)
+                                + 0.35 * sin(uTime * 0.31 + aPhase * 2.17);
+                vT = clamp(tw * 0.5 + 0.3, 0.15, 1.0);
+                gl_PointSize = aSize;
+              }
+            `,
+            fragmentShader: `
+              uniform float uIntensity;
+              varying float vT;
+              void main() {
+                vec2 c = gl_PointCoord - 0.5;
+                float d = length(c);
+                if (d > 0.5) discard;
+                float a = smoothstep(0.5, 0.0, d) * vT * uIntensity;
+                gl_FragColor = vec4(vec3(0.78, 0.88, 1.02) * a, a);
+              }
+            `,
+          });
+          const stars = new THREE.Points(geo, mat);
+          stars.frustumCulled = false;
+          s.add(stars);
+          intro.starsMat = mat;
+        }
+
+        // ---- Hillside ------------------------------------------------
+        // A subdivided plane displaced by a low-freq smoothed noise so
+        // the silhouette against the sky has gentle bumps. Tilted very
+        // slightly forward so the foreground sits a touch lower than
+        // the horizon.
+        {
+          const W = 80,
+            H = 60,
+            SX = 96,
+            SY = 72;
+          const geo = new THREE.PlaneGeometry(W, H, SX, SY);
+          // Deterministic tiny "noise" so the bumps stay put each load.
+          const seed = 17.31;
+          const pos = geo.attributes.position;
+          for (let i = 0; i < pos.count; i++) {
+            const x = pos.getX(i);
+            const y = pos.getY(i); // pre-rotation Y is the depth axis
+            // Two octaves of cheap sin-noise.
+            const n =
+              0.55 *
+                Math.sin(x * 0.18 + seed) *
+                Math.cos(y * 0.21 + seed * 0.7) +
+              0.22 *
+                Math.sin(x * 0.42 + seed * 1.7) *
+                Math.cos(y * 0.37 + seed * 0.3);
+            // Lift the back edge so the hill rolls up to a horizon.
+            const back = Math.max(0, (y + H * 0.5) / H);
+            pos.setZ(i, n + back * 1.4);
+          }
+          pos.needsUpdate = true;
+          geo.computeVertexNormals();
+          const mat = new THREE.MeshStandardMaterial({
+            color: 0x2a3344,
+            roughness: 1,
+            metalness: 0,
+            flatShading: false,
+          });
+          const ground = new THREE.Mesh(geo, mat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.y = 0;
+          s.add(ground);
+        }
+
+        // ---- Telescope -----------------------------------------------
+        // Tripod (3 thin cylinders) + barrel (one cylinder) tilted at
+        // the sky + tiny eyepiece sphere on the back end.
+        {
+          const tele = new THREE.Group();
+          const dark = new THREE.MeshStandardMaterial({
+            color: 0x2a2018,
+            roughness: 0.85,
+            metalness: 0.1,
+          });
+          const brass = new THREE.MeshStandardMaterial({
+            color: 0x9b7242,
+            roughness: 0.55,
+            metalness: 0.55,
+            emissive: 0x2a1808,
+            emissiveIntensity: 0.25,
+          });
+          // Tripod legs — three around y-axis.
+          for (let i = 0; i < 3; i++) {
+            const ang = (i / 3) * Math.PI * 2;
+            const leg = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.025, 0.025, 1.3, 6),
+              dark,
+            );
+            leg.position.set(Math.cos(ang) * 0.28, 0.65, Math.sin(ang) * 0.28);
+            leg.rotation.z = -Math.cos(ang) * 0.22;
+            leg.rotation.x = Math.sin(ang) * 0.22;
+            tele.add(leg);
+          }
+          // Barrel — pointing up and slightly toward the sky.
+          // Barrel tilts at ~51° above horizontal toward +X. The +Y end
+          // (objective) points up at the sky; the -Y end (eyepiece) sits
+          // at character head height on the -X side, where the character
+          // can walk up to it.
+          const BARREL_TILT = -Math.PI / 3.5;
+          const barrel = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.085, 0.07, 1.55, 16),
+            brass,
+          );
+          barrel.position.set(0, 1.55, 0);
+          barrel.rotation.z = BARREL_TILT;
+          tele.add(barrel);
+          // Eyepiece — small sphere at the back end of the barrel.
+          // Local -Y direction after BARREL_TILT rotation around Z,
+          // scaled to just outside the cylinder length (half-len 0.775,
+          // so 0.85 puts the sphere a hair beyond the end).
+          const eyepiece = new THREE.Mesh(
+            new THREE.SphereGeometry(0.13, 24, 16),
+            new THREE.MeshBasicMaterial({ color: 0x0a0610 }),
+          );
+          const eyepieceDir = new THREE.Vector3(0, -1, 0).applyEuler(
+            new THREE.Euler(0, 0, BARREL_TILT),
+          );
+          eyepiece.position.set(
+            0 + eyepieceDir.x * 0.85,
+            1.55 + eyepieceDir.y * 0.85,
+            0 + eyepieceDir.z * 0.85,
+          );
+          tele.add(eyepiece);
+          // Pulsing glow ring around the eyepiece — reads as "click here"
+          // during ESTABLISH. Fades out once the camera starts moving.
+          const glowGeo = new THREE.RingGeometry(0.16, 0.26, 24);
+          const glowMat = new THREE.MeshBasicMaterial({
+            color: 0xffd089,
+            transparent: true,
+            opacity: 0.0,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          });
+          const glow = new THREE.Mesh(glowGeo, glowMat);
+          glow.position.copy(eyepiece.position);
+          // Face the glow toward the camera's likely ESTABLISH location.
+          glow.lookAt(8, 4, 8);
+          tele.add(glow);
+
+          tele.position.set(0, 0, 0);
+          s.add(tele);
+          intro.telescope = tele;
+          intro.eyepiece = eyepiece;
+          intro.eyepieceGlow = glow;
+          intro.eyepieceGlowMat = glowMat;
+        }
+
+        // ---- "giverny" garden sign -----------------------------------
+        // A small wooden marker plank with painted text. Single post
+        // sits BEHIND the plank (negative local Z) so it doesn't
+        // obstruct the text from the camera POV — earlier centered
+        // post hid the 'e' in "giverny."
+        {
+          const sign = new THREE.Group();
+          const wood = new THREE.MeshStandardMaterial({
+            color: 0x7a5230,
+            roughness: 0.95,
+            metalness: 0,
+          });
+          const woodDark = new THREE.MeshStandardMaterial({
+            color: 0x4a2e18,
+            roughness: 1,
+            metalness: 0,
+          });
+          const post = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.04, 0.04, 0.95, 6),
+            woodDark,
+          );
+          // Behind the plank: local z negative pushes the post past
+          // the plank's back face (plank depth is 0.05, half = 0.025).
+          post.position.set(0, 0.42, -0.07);
+          sign.add(post);
+          // Slightly larger plank with a touch more thickness so the
+          // plank itself reads from a distance.
+          const plank = new THREE.Mesh(
+            new THREE.BoxGeometry(0.78, 0.26, 0.05),
+            wood,
+          );
+          plank.position.y = 0.78;
+          sign.add(plank);
+          // Painted text via a CanvasTexture — bumped resolution +
+          // tighter font for legibility at the establishing distance.
+          const canvas = document.createElement("canvas");
+          canvas.width = 768;
+          canvas.height = 256;
+          const c2d = canvas.getContext("2d");
+          c2d.clearRect(0, 0, 768, 256);
+          // Soft warm dropshadow to lift the letters off the wood.
+          c2d.shadowColor = "rgba(0, 0, 0, 0.55)";
+          c2d.shadowBlur = 6;
+          c2d.shadowOffsetY = 3;
+          c2d.font = "italic 700 168px Georgia, 'Times New Roman', serif";
+          c2d.textAlign = "center";
+          c2d.textBaseline = "middle";
+          c2d.fillStyle = "#fce7c0";
+          c2d.fillText("giverny", 384, 140);
+          const tex = new THREE.CanvasTexture(canvas);
+          tex.anisotropy = renderer.capabilities.getMaxAnisotropy
+            ? renderer.capabilities.getMaxAnisotropy()
+            : 1;
+          tex.minFilter = THREE.LinearMipmapLinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          const textMat = new THREE.MeshBasicMaterial({
+            map: tex,
+            transparent: true,
+            depthWrite: false,
+          });
+          // Front face of the plank — placed clearly past the front
+          // face (plank front at z=+0.025; text at +0.028).
+          const textFront = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.72, 0.22),
+            textMat,
+          );
+          textFront.position.set(0, 0.78, 0.028);
+          sign.add(textFront);
+          // Position: off to the +X side of the telescope, angled to
+          // catch the camera in the ESTABLISH wide shot at (5, 3.5, 8).
+          sign.position.set(1.7, 0, 0.8);
+          sign.rotation.y = -0.55;
+          s.add(sign);
+        }
+
+        // ---- Character (cute-chibi) ----------------------------------
+        // Big round head with knit cap + pom-pom, tiny round body,
+        // stub limbs. Upper body lives under a "torso" pivot at the
+        // waist so we can bow the character forward over the eyepiece
+        // without the legs tilting too.
+        {
+          const ch = new THREE.Group();
+          const skin = new THREE.MeshStandardMaterial({
+            color: 0x5a6478,
+            roughness: 0.9,
+            metalness: 0,
+          });
+          const cap = new THREE.MeshStandardMaterial({
+            color: 0x8a4a4a,
+            roughness: 1,
+            metalness: 0,
+          });
+          const pom = new THREE.MeshStandardMaterial({
+            color: 0xf6dbb6,
+            roughness: 1,
+            metalness: 0,
+            emissive: 0x2a1408,
+            emissiveIntensity: 0.3,
+          });
+          const scarf = new THREE.MeshStandardMaterial({
+            color: 0xd66a48,
+            roughness: 1,
+            metalness: 0,
+            emissive: 0x180603,
+            emissiveIntensity: 0.15,
+          });
+          const eyeMat = new THREE.MeshBasicMaterial({ color: 0x0a0608 });
+
+          // Torso pivot at waist height. All upper-body parts attach
+          // here so torso.rotation.x bows the entire upper half.
+          const torso = new THREE.Group();
+          torso.position.y = 0.4;
+          ch.add(torso);
+
+          // Body — small rounded sphere, a touch squashed. Was at
+          // world y=0.5; relative to torso pivot at 0.4 → local y=0.1.
+          const body = new THREE.Mesh(
+            new THREE.SphereGeometry(0.42, 18, 14),
+            skin,
+          );
+          body.scale.set(1, 0.95, 1);
+          body.position.y = 0.1;
+          torso.add(body);
+          // Head — big round sphere on top. Was world y=1.05 → local 0.65.
+          const head = new THREE.Mesh(
+            new THREE.SphereGeometry(0.42, 22, 18),
+            skin,
+          );
+          head.position.y = 0.65;
+          torso.add(head);
+          // Knit cap. Was world y=1.07 → local 0.67.
+          const capMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(
+              0.44,
+              20,
+              14,
+              0,
+              Math.PI * 2,
+              0,
+              Math.PI / 2.1,
+            ),
+            cap,
+          );
+          capMesh.position.y = 0.67;
+          torso.add(capMesh);
+          // Pom-pom. Was world y=1.5 → local 1.1.
+          const pomMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.13, 14, 10),
+            pom,
+          );
+          pomMesh.position.y = 1.1;
+          torso.add(pomMesh);
+          // Scarf. Was world y=0.78 → local 0.38.
+          const scarfMesh = new THREE.Mesh(
+            new THREE.TorusGeometry(0.32, 0.09, 10, 22),
+            scarf,
+          );
+          scarfMesh.rotation.x = Math.PI / 2;
+          scarfMesh.position.y = 0.38;
+          scarfMesh.scale.set(1, 1, 0.6);
+          torso.add(scarfMesh);
+          // Two tiny dot eyes on the +X face of the head.
+          const eyeL = new THREE.Mesh(
+            new THREE.SphereGeometry(0.035, 8, 6),
+            eyeMat,
+          );
+          const eyeR = eyeL.clone();
+          eyeL.position.set(0.36, 0.7, 0.11);
+          eyeR.position.set(0.36, 0.7, -0.11);
+          torso.add(eyeL);
+          torso.add(eyeR);
+          // Arms — stubby capsules. Were y=0.6 → local 0.2.
+          const armGeo = new THREE.CapsuleGeometry(0.1, 0.28, 4, 8);
+          const armL = new THREE.Mesh(armGeo, skin);
+          armL.position.set(0, 0.2, 0.4);
+          armL.rotation.x = 0.2;
+          torso.add(armL);
+          const armR = new THREE.Mesh(armGeo, skin);
+          armR.position.set(0, 0.2, -0.4);
+          armR.rotation.x = -0.2;
+          torso.add(armR);
+          // Legs — direct children of the character group (not torso),
+          // so the bow doesn't tilt them.
+          const legGeo = new THREE.CapsuleGeometry(0.12, 0.22, 4, 8);
+          const legL = new THREE.Mesh(legGeo, skin);
+          legL.position.set(0, 0.18, 0.16);
+          ch.add(legL);
+          const legR = new THREE.Mesh(legGeo, skin);
+          legR.position.set(0, 0.18, -0.16);
+          ch.add(legR);
+
+          // Stash refs so the per-beat code can pose them.
+          intro.character = ch;
+          intro.charParts = {
+            torso,
+            body,
+            head,
+            cap: capMesh,
+            pom: pomMesh,
+            scarf: scarfMesh,
+            armL,
+            armR,
+            legL,
+            legR,
+          };
+
+          // Spawn pose: standing 5 units away along -X, facing +X
+          // toward the telescope. The walk to the look-pose is part of
+          // the cinematic — long enough that the audience reads it.
+          ch.position.set(-5.0, 0, 0);
+          ch.rotation.y = -Math.PI / 2; // face +X toward telescope
+          s.add(ch);
+        }
+
+        intro.scene = s;
+      }
+
+      // Spawn / look-pose / eyepiece world position. Tuned so the
+      // character's head ends up right at the eyepiece when bowed by
+      // ~30°. See arithmetic in STARGAZER_INTRO_PLAN.md.
+      const CHAR_SPAWN = new THREE.Vector3(-5.0, 0, 0);
+      const CHAR_LOOK = new THREE.Vector3(-0.95, 0, 0.05);
+      // Camera key-poses for the cinematic move.
+      // The path through THROUGH must NOT cross the character — earlier
+      // version routed via NEAR_EYEPIECE which sat behind the bowed
+      // character's head and gave a "going through their skull" read.
+      // Now THROUGH dollies straight from the side-profile vantage to
+      // the eyepiece, passing alongside the +Z side of the barrel.
+      const INTRO_CAM = {
+        // ESTABLISH is now 10s and shows a "sky preview" disc above
+        // the scene. Camera is pulled up + back so the upper third of
+        // frame is sky (where the preview lives), and the look-at is
+        // lifted to tilt the camera up toward it.
+        EST_START: new THREE.Vector3(5.5, 4.2, 9.0),
+        EST_END: new THREE.Vector3(5.0, 4.0, 8.4),
+        EST_LOOK: new THREE.Vector3(-0.5, 2.2, 0.0),
+        // End-of-APPROACH: side-profile camera so the bow reads as a
+        // bow, not as "the camera is staring down a hat."
+        SIDE_PROFILE: new THREE.Vector3(-0.7, 1.7, 3.6),
+        SIDE_PROFILE_CLOSE: new THREE.Vector3(-0.7, 1.4, 2.6),
+        // End-of-THROUGH: dead center of the eyepiece sphere. With
+        // side=DoubleSide on the porthole material, the camera ends
+        // inside the sphere and the porthole texture wraps the full
+        // field of view.
+        INTO_EYEPIECE: new THREE.Vector3(-0.66, 1.015, 0.0),
+      };
+      const INTRO_FOV = {
+        EST: 50,
+        APPROACH: 50,
+        LEAN_END: 36,
+        THROUGH_END: 14,
+      };
+      // Eyepiece world-position is computed in introBegin once the scene
+      // exists, so the camera curves point at the right spot.
+      const _eyepieceWorld = new THREE.Vector3();
+      const _tmpVec3 = new THREE.Vector3();
+
+      // Audio for the intro: wind bed + footstep thuds + a single soft
+      // chime on the LEAN_IN bow. WebAudio requires a user gesture, so
+      // the context is lazy-initialized on the first user input. If the
+      // intro auto-plays without input, audio is silently skipped — the
+      // visuals carry the moment.
+      function ensureIntroAudio() {
+        if (intro._audioInited) return intro.audioCtx;
+        intro._audioInited = true;
+        try {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return null;
+          const ctx = new Ctx();
+          intro.audioCtx = ctx;
+          intro.audioMaster = ctx.createGain();
+          intro.audioMaster.gain.value = 0.7;
+          intro.audioMaster.connect(ctx.destination);
+          // Wind bed: 4s loop of brown-ish noise through a low-pass.
+          const len = Math.floor(ctx.sampleRate * 4);
+          const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+          const d = buf.getChannelData(0);
+          let last = 0;
+          for (let i = 0; i < len; i++) {
+            const w = Math.random() * 2 - 1;
+            last = (last + 0.02 * w) / 1.02;
+            d[i] = last * 3.5;
+          }
+          const wind = ctx.createBufferSource();
+          wind.buffer = buf;
+          wind.loop = true;
+          const lpf = ctx.createBiquadFilter();
+          lpf.type = "lowpass";
+          lpf.frequency.value = 380;
+          const g = ctx.createGain();
+          g.gain.value = 0.0;
+          wind.connect(lpf);
+          lpf.connect(g);
+          g.connect(intro.audioMaster);
+          wind.start();
+          intro.audioWindGain = g;
+          // Fade wind in over 1.5s.
+          g.gain.linearRampToValueAtTime(0.18, ctx.currentTime + 1.5);
+          return ctx;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function playFootstepThud() {
+        const ctx = intro.audioCtx;
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        const len = Math.floor(0.18 * ctx.sampleRate);
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) {
+          const env = Math.pow(1 - i / len, 4);
+          d[i] = (Math.random() * 2 - 1) * env;
+        }
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const lpf = ctx.createBiquadFilter();
+        lpf.type = "lowpass";
+        lpf.frequency.value = 220;
+        const g = ctx.createGain();
+        g.gain.value = 0.32;
+        src.connect(lpf);
+        lpf.connect(g);
+        g.connect(intro.audioMaster);
+        src.start(t);
+      }
+
+      function playPomChime() {
+        const ctx = intro.audioCtx;
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        const o = ctx.createOscillator();
+        o.type = "sine";
+        o.frequency.value = 880;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0, t);
+        g.gain.linearRampToValueAtTime(0.16, t + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
+        o.connect(g);
+        g.connect(intro.audioMaster);
+        o.start(t);
+        o.stop(t + 1.5);
+        // Tiny soft fifth above for warmth.
+        const o2 = ctx.createOscillator();
+        o2.type = "sine";
+        o2.frequency.value = 880 * 1.5;
+        const g2 = ctx.createGain();
+        g2.gain.setValueAtTime(0.0, t);
+        g2.gain.linearRampToValueAtTime(0.07, t + 0.015);
+        g2.gain.exponentialRampToValueAtTime(0.001, t + 1.1);
+        o2.connect(g2);
+        g2.connect(intro.audioMaster);
+        o2.start(t);
+        o2.stop(t + 1.2);
+      }
+
+      // Exclaim chime: an upward-pitched cute "oh!" — two-note rising
+      // arpeggio over half a second. Fires when the character steps
+      // back from the eyepiece in surprise/wonder.
+      function playExclaimChime() {
+        const ctx = intro.audioCtx;
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        const notes = [880, 1175]; // A5, D6 — perfect fourth up
+        notes.forEach((freq, i) => {
+          const at = t + i * 0.09;
+          const o = ctx.createOscillator();
+          o.type = "sine";
+          o.frequency.value = freq;
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(0.0, at);
+          g.gain.linearRampToValueAtTime(0.22, at + 0.015);
+          g.gain.exponentialRampToValueAtTime(0.001, at + 0.9);
+          o.connect(g);
+          g.connect(intro.audioMaster);
+          o.start(at);
+          o.stop(at + 1.0);
+          // Octave shimmer.
+          const o2 = ctx.createOscillator();
+          o2.type = "sine";
+          o2.frequency.value = freq * 2;
+          const g2 = ctx.createGain();
+          g2.gain.setValueAtTime(0.0, at);
+          g2.gain.linearRampToValueAtTime(0.06, at + 0.02);
+          g2.gain.exponentialRampToValueAtTime(0.001, at + 0.7);
+          o2.connect(g2);
+          g2.connect(intro.audioMaster);
+          o2.start(at);
+          o2.stop(at + 0.8);
+        });
+      }
+
+      function fadeOutIntroAudio() {
+        const ctx = intro.audioCtx;
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        if (intro.audioMaster) {
+          intro.audioMaster.gain.cancelScheduledValues(t);
+          intro.audioMaster.gain.setValueAtTime(
+            intro.audioMaster.gain.value,
+            t,
+          );
+          intro.audioMaster.gain.linearRampToValueAtTime(0.0, t + 1.2);
+        }
+      }
+
+      // Lazy init for the eyepiece-as-portal plumbing: a render target
+      // for the live sim view, a dedicated cinematic camera that frames
+      // the sim from a fixed pleasant distance, and a fullscreen overlay
+      // quad that fades in during THROUGH so the porthole engulfs the
+      // canvas before the intro hands off.
+      function introInitPortal() {
+        if (intro._portalReady) return;
+        const w = Math.max(64, Math.floor(innerWidth * 0.5));
+        const h = Math.max(64, Math.floor(innerHeight * 0.5));
+        intro.portholeRT = new THREE.WebGLRenderTarget(w, h, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          depthBuffer: true,
+        });
+        // Dedicated camera so the intro main camera can frame the
+        // hillside while this one frames the sim into the porthole.
+        intro.portholeCam = new THREE.PerspectiveCamera(
+          45,
+          innerWidth / innerHeight,
+          0.1,
+          50000,
+        );
+        intro.portholeCam.position.set(80, 40, 80);
+        intro.portholeCam.lookAt(0, 0, 0);
+        intro.portholeCam.updateProjectionMatrix();
+        // Replace the eyepiece's flat black material with one that
+        // samples the porthole RT. side=BackSide so we render the
+        // INSIDE of the sphere when the camera enters it.
+        if (intro.eyepiece) {
+          intro.eyepiece.material.dispose();
+          intro.eyepiece.material = new THREE.MeshBasicMaterial({
+            map: intro.portholeRT.texture,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+        }
+        // Fullscreen overlay: a 2x2 plane in NDC, drawn with a custom
+        // shader that bypasses MVP. Lives in its own ortho scene so it
+        // composites over whatever was rendered to canvas this frame.
+        intro.overlayScene = new THREE.Scene();
+        intro.overlayCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        intro.overlayMat = new THREE.ShaderMaterial({
+          uniforms: {
+            tMap: { value: intro.portholeRT.texture },
+            uOpacity: { value: 0.0 },
+          },
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = vec4(position.xy, 0.0, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform sampler2D tMap;
+            uniform float uOpacity;
+            varying vec2 vUv;
+            void main() {
+              vec4 c = texture2D(tMap, vUv);
+              gl_FragColor = vec4(c.rgb, uOpacity);
+            }
+          `,
+        });
+        const overlayQuad = new THREE.Mesh(
+          new THREE.PlaneGeometry(2, 2),
+          intro.overlayMat,
+        );
+        overlayQuad.frustumCulled = false;
+        intro.overlayScene.add(overlayQuad);
+
+        // Sky preview disc: a "moon-sized" porthole floating high in
+        // the sky during ESTABLISH/APPROACH so the user gets a sample
+        // of what the sim looks like before committing to enter the
+        // lens. Same RT texture as the eyepiece — a literal preview.
+        // Material has fog: false so the night haze doesn't kill it.
+        // Positioned and oriented to the camera each frame in
+        // tickIntroPose.
+        {
+          // Soft-edged disc via a custom alpha shader so it doesn't
+          // read as a hard-cut clip-art moon.
+          const diskMat = new THREE.ShaderMaterial({
+            uniforms: {
+              tMap: { value: intro.portholeRT.texture },
+              uOpacity: { value: 0.0 },
+              uRimColor: { value: new THREE.Color(0xfff0c8) },
+            },
+            transparent: true,
+            depthWrite: false,
+            fog: false,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            vertexShader: `
+              varying vec2 vUv;
+              void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+              }
+            `,
+            fragmentShader: `
+              uniform sampler2D tMap;
+              uniform float uOpacity;
+              uniform vec3 uRimColor;
+              varying vec2 vUv;
+              void main() {
+                vec2 c = vUv - 0.5;
+                float d = length(c);
+                if (d > 0.5) discard;
+                // Soft inner edge.
+                float disk = smoothstep(0.5, 0.46, d);
+                // Warm rim glow at the very edge.
+                float rim = smoothstep(0.5, 0.47, d) - smoothstep(0.47, 0.42, d);
+                vec4 cosmos = texture2D(tMap, vUv);
+                vec3 rgb = cosmos.rgb * disk + uRimColor * rim * 0.55;
+                gl_FragColor = vec4(rgb, (disk + rim * 0.6) * uOpacity);
+              }
+            `,
+          });
+          const disk = new THREE.Mesh(
+            new THREE.PlaneGeometry(3.6, 3.6),
+            diskMat,
+          );
+          disk.position.set(-1.2, 6.2, -1.0);
+          disk.frustumCulled = false;
+          if (intro.scene) intro.scene.add(disk);
+          intro.skyDisk = disk;
+          intro.skyDiskMat = diskMat;
+        }
+
+        intro._portalReady = true;
+      }
+
+      function introResizePortal() {
+        if (!intro._portalReady) return;
+        const w = Math.max(64, Math.floor(innerWidth * 0.5));
+        const h = Math.max(64, Math.floor(innerHeight * 0.5));
+        intro.portholeRT.setSize(w, h);
+      }
+
+      function introDisposePortal() {
+        if (!intro._portalReady) return;
+        if (intro.portholeRT) intro.portholeRT.dispose();
+        if (intro.overlayMat) intro.overlayMat.dispose();
+        if (intro.skyDiskMat) intro.skyDiskMat.dispose();
+        if (intro.skyDisk && intro.skyDisk.geometry)
+          intro.skyDisk.geometry.dispose();
+        intro.portholeRT = null;
+        intro.portholeCam = null;
+        intro.overlayScene = null;
+        intro.overlayCam = null;
+        intro.overlayMat = null;
+        intro.skyDisk = null;
+        intro.skyDiskMat = null;
+        intro._portalReady = false;
+      }
+
+      // Set the music system to play "Lamplighter" — perfect tonal
+      // match for a small lantern-lit telescope on a hill. Tries to
+      // autoplay; if blocked, the existing music IIFE's unlockAudio
+      // handler will play it on the first user gesture.
+      function introSelectIntroTrack() {
+        if (intro._musicSelected) return;
+        try {
+          if (typeof TRACKS !== "object" || typeof music !== "object") return;
+          let idx = -1;
+          for (let i = 0; i < TRACKS.length; i++) {
+            if (TRACKS[i].title === "Lamplighter") {
+              idx = i;
+              break;
+            }
+          }
+          if (idx < 0) return;
+          intro._musicSelected = true;
+          music.load(idx, true);
+        } catch (e) {}
+      }
+
+      function introBegin() {
+        if (!intro.active) return;
+        if (!intro.scene) buildIntroScene();
+        intro.beat = "ESTABLISH";
+        intro.t = 0;
+        intro.T = 0;
+        intro.clickAdvance = false;
+        intro.skipToEnd = false;
+        // Stash camera / FOV / controls so we can restore on END.
+        intro.savedCam = camera.position.clone();
+        intro.savedFov = camera.fov;
+        intro.savedControlsEnabled = controls.enabled;
+        controls.enabled = false;
+        // Cache the eyepiece's world position for camera curves.
+        if (intro.eyepiece) {
+          intro.eyepiece.getWorldPosition(_eyepieceWorld);
+        } else {
+          _eyepieceWorld.set(-0.66, 1.015, 0);
+        }
+        // Set up the eyepiece-as-portal plumbing now (after the eyepiece
+        // exists). Its render target is sized at half-canvas — invisible
+        // at the porthole's apparent size during LEAN_IN, and a tasteful
+        // soft-resolve when the overlay fades in during THROUGH.
+        introInitPortal();
+        // Queue Lamplighter as the intro track. Plays on first gesture
+        // (or immediately if the browser permits autoplay).
+        introSelectIntroTrack();
+        // Apply ESTABLISH start pose immediately (no first-frame snap).
+        camera.fov = INTRO_FOV.EST;
+        camera.position.copy(INTRO_CAM.EST_START);
+        camera.lookAt(INTRO_CAM.EST_LOOK);
+        camera.updateProjectionMatrix();
+        // Reset character to spawn pose.
+        if (intro.character) {
+          intro.character.position.copy(CHAR_SPAWN);
+          intro.character.rotation.set(0, -Math.PI / 2, 0);
+        }
+        if (intro.charParts) {
+          intro.charParts.armR.rotation.set(-0.2, 0, 0);
+          intro.charParts.armL.rotation.set(0.2, 0, 0);
+          if (intro.charParts.torso)
+            intro.charParts.torso.rotation.set(0, 0, 0);
+          if (intro.charParts.body) intro.charParts.body.rotation.set(0, 0, 0);
+          if (intro.charParts.head) intro.charParts.head.rotation.set(0, 0, 0);
+        }
+        // Eyepiece glow light starts dim.
+        if (intro.eyepieceGlowLight) intro.eyepieceGlowLight.intensity = 0;
+        // Skip button visible from frame 1.
+        const btn = document.getElementById("intro-skip");
+        if (btn) btn.classList.add("show");
+        const prompt = document.getElementById("intro-prompt");
+        if (prompt) prompt.classList.add("show");
+      }
+
+      // Per-frame camera + character pose for the current beat.
+      // `t` is seconds into this beat; `dur` is its full length.
+      function tickIntroPose(beat, t, dur) {
+        const p = dur > 0 ? Math.min(1, t / dur) : 0;
+        const ep = easeInOutCubic(p);
+
+        // Sky preview disc — billboards to face the camera, opacity
+        // ramps in during ESTABLISH, holds through APPROACH, fades out
+        // during LEAN_IN, gone for REACT/THROUGH.
+        if (intro.skyDisk && intro.skyDiskMat) {
+          intro.skyDisk.lookAt(camera.position);
+          let target = 0;
+          if (beat === "ESTABLISH") target = Math.min(1, t / 1.8) * 0.92;
+          else if (beat === "APPROACH") target = 0.92 * (1 - 0.35 * p);
+          else if (beat === "LEAN_IN") target = 0.6 * (1 - p);
+          intro.skyDiskMat.uniforms.uOpacity.value = lerp(
+            intro.skyDiskMat.uniforms.uOpacity.value,
+            target,
+            0.12,
+          );
+        }
+
+        if (beat === "ESTABLISH") {
+          // Slow drift from EST_START → EST_END.
+          camera.position.lerpVectors(
+            INTRO_CAM.EST_START,
+            INTRO_CAM.EST_END,
+            p,
+          );
+          camera.lookAt(INTRO_CAM.EST_LOOK);
+          camera.fov = INTRO_FOV.EST;
+          camera.updateProjectionMatrix();
+          // Character watches the sky preview — sustained head tilt-up
+          // with subtle micro-motion. Reads as "they're seeing the same
+          // thing the audience is."
+          if (intro.charParts && intro.charParts.head) {
+            const baseUp = -0.42;
+            const drift = -0.05 * Math.sin(intro.T * 0.7);
+            intro.charParts.head.rotation.z = baseUp + drift;
+          }
+        } else if (beat === "APPROACH") {
+          // Camera arcs from ESTABLISH_END to a side-profile vantage,
+          // so the bow that follows reads as a bow (not as the camera
+          // staring down a hat-top).
+          camera.position.lerpVectors(
+            INTRO_CAM.EST_END,
+            INTRO_CAM.SIDE_PROFILE,
+            ep,
+          );
+          // LookAt slides from wide-shot point toward the look-pose at
+          // the telescope — character is the subject during the walk.
+          _tmpVec3.lerpVectors(INTRO_CAM.EST_LOOK, CHAR_LOOK, ep);
+          _tmpVec3.y = 1.0;
+          camera.lookAt(_tmpVec3);
+          camera.fov = INTRO_FOV.APPROACH;
+          camera.updateProjectionMatrix();
+          // Character walks from CHAR_SPAWN → CHAR_LOOK along +X.
+          if (intro.character) {
+            intro.character.position.x =
+              CHAR_SPAWN.x + (CHAR_LOOK.x - CHAR_SPAWN.x) * ep;
+            intro.character.position.z =
+              CHAR_SPAWN.z + (CHAR_LOOK.z - CHAR_SPAWN.z) * ep;
+            const phase = t * 5.5;
+            intro.character.position.y = Math.abs(Math.sin(phase)) * 0.045;
+          }
+          if (intro.charParts) {
+            const phase = t * 5.5;
+            // Arm swing decays to zero by APPROACH end so the arms
+            // arrive at neutral before the bow takes over their pose.
+            const settle = 1 - p * p;
+            intro.charParts.armL.rotation.x =
+              0.2 + Math.sin(phase) * 0.5 * settle;
+            intro.charParts.armR.rotation.x =
+              -0.2 - Math.sin(phase) * 0.5 * settle;
+            if (intro.charParts.pom)
+              intro.charParts.pom.position.y =
+                1.1 +
+                0.018 * Math.sin(intro.T * 2.1) +
+                Math.abs(Math.sin(phase)) * 0.035 * settle;
+            if (intro.charParts.head) {
+              intro.charParts.head.rotation.z = -0.04;
+            }
+          }
+        } else if (beat === "LEAN_IN") {
+          // Camera holds at side-profile through the entire bow — small
+          // push-in from SIDE_PROFILE → SIDE_PROFILE_CLOSE for breath.
+          // The bow IS the moment; camera shouldn't compete with it.
+          camera.position.lerpVectors(
+            INTRO_CAM.SIDE_PROFILE,
+            INTRO_CAM.SIDE_PROFILE_CLOSE,
+            ep,
+          );
+          // Look at a point between character head and eyepiece so the
+          // bow lands in the upper-center of frame.
+          _tmpVec3.copy(_eyepieceWorld).add(new THREE.Vector3(-0.18, 0.06, 0));
+          camera.lookAt(_tmpVec3);
+          camera.fov =
+            INTRO_FOV.APPROACH +
+            (INTRO_FOV.LEAN_END - INTRO_FOV.APPROACH) * ep * 0.3;
+          camera.updateProjectionMatrix();
+          // Character locks at the look-pose.
+          if (intro.character) {
+            intro.character.position.x = CHAR_LOOK.x;
+            intro.character.position.y = 0;
+            intro.character.position.z = CHAR_LOOK.z;
+          }
+          if (intro.charParts) {
+            // The bow: torso pivots forward at the waist over the
+            // eyepiece. Negative rotation.x because after the
+            // character's yaw -π/2, the head moves toward world +X
+            // (the telescope) when local +Y tilts toward local -Z.
+            const bowT = easeInOutCubic(Math.min(1, p / 0.75));
+            if (intro.charParts.torso)
+              intro.charParts.torso.rotation.x = -0.55 * bowT;
+            // Head tucks down a touch so the eyes align with the
+            // eyepiece, not the sky behind it.
+            intro.charParts.head.rotation.x = 0.18 * bowT;
+            intro.charParts.head.rotation.z = -0.04;
+            // Right arm raises and rests on the barrel.
+            intro.charParts.armR.rotation.x = -0.2 + 0.7 * bowT;
+            intro.charParts.armR.rotation.z = -1.1 * bowT;
+            intro.charParts.armL.rotation.x = 0.2;
+          }
+        } else if (beat === "REACT") {
+          // Camera holds at SIDE_PROFILE_CLOSE — the audience is
+          // watching the character react. Tiny push to keep it alive.
+          _tmpVec3
+            .copy(INTRO_CAM.SIDE_PROFILE_CLOSE)
+            .add(new THREE.Vector3(0, 0.05 * ep, -0.1 * ep));
+          camera.position.copy(_tmpVec3);
+          // Look-at lifts upward to follow the head + tiny jump.
+          _tmpVec3
+            .copy(_eyepieceWorld)
+            .add(new THREE.Vector3(-0.18, 0.12 + 0.08 * ep, 0));
+          camera.lookAt(_tmpVec3);
+          camera.fov = INTRO_FOV.LEAN_END;
+          camera.updateProjectionMatrix();
+          // Two phases: 0..0.4 step back + un-bow; 0.4..1 arms up + jump.
+          const stepX = -0.65; // backward in character's facing direction
+          const stepZ = -0.08;
+          if (intro.character) {
+            if (p < 0.4) {
+              const sp = p / 0.4;
+              const esp = easeInOutCubic(sp);
+              intro.character.position.x = CHAR_LOOK.x + stepX * esp;
+              intro.character.position.z = CHAR_LOOK.z + stepZ * esp;
+              intro.character.position.y = 0;
+            } else {
+              const jp = (p - 0.4) / 0.6;
+              intro.character.position.x = CHAR_LOOK.x + stepX;
+              intro.character.position.z = CHAR_LOOK.z + stepZ;
+              // Bell jump arc: 0 → 0.18 → 0 over the 60% of the beat.
+              intro.character.position.y = 0.18 * Math.sin(jp * Math.PI);
+            }
+          }
+          if (intro.charParts) {
+            if (p < 0.4) {
+              // Un-bow + release arm from barrel.
+              const sp = p / 0.4;
+              const unbow = 1 - easeInOutCubic(sp);
+              if (intro.charParts.torso)
+                intro.charParts.torso.rotation.x = -0.55 * unbow;
+              intro.charParts.head.rotation.x = 0.18 * unbow;
+              // armR returns from "on-barrel" pose to neutral.
+              intro.charParts.armR.rotation.x =
+                0.5 * unbow + -0.2 * (1 - unbow);
+              intro.charParts.armR.rotation.z = -1.1 * unbow;
+              intro.charParts.armL.rotation.x = 0.2;
+              intro.charParts.armL.rotation.z = 0;
+            } else {
+              // Arms shoot UP and out (the "oh!" pose).
+              const sp = (p - 0.4) / 0.6;
+              const esp = easeInOutCubic(Math.min(1, sp * 1.6));
+              if (intro.charParts.torso) intro.charParts.torso.rotation.x = 0;
+              // Head tilts UP to look at the sky.
+              intro.charParts.head.rotation.x = 0;
+              intro.charParts.head.rotation.z = -0.55 * esp;
+              // Both arms swing forward + spread out.
+              intro.charParts.armL.rotation.x = 0.2 - 1.6 * esp;
+              intro.charParts.armR.rotation.x = -0.2 - 1.6 * esp;
+              intro.charParts.armL.rotation.z = 0.55 * esp;
+              intro.charParts.armR.rotation.z = -0.55 * esp;
+              // Pom-pom does an extra bounce on the jump.
+              if (intro.charParts.pom)
+                intro.charParts.pom.position.y =
+                  1.1 + 0.06 * Math.sin(sp * Math.PI);
+            }
+          }
+        } else if (beat === "THROUGH") {
+          // Direct dolly from side-profile-close straight to the lens.
+          // The path travels in -Z (camera approaches the eyepiece from
+          // its +Z side) — passes alongside the barrel and lands at
+          // the eyepiece without crossing the bowed character on the
+          // -X side. FOV narrows hard for the "through the lens" feel.
+          camera.position.lerpVectors(
+            INTRO_CAM.SIDE_PROFILE_CLOSE,
+            INTRO_CAM.INTO_EYEPIECE,
+            ep,
+          );
+          // Look-at slides from "between head and eyepiece" to the
+          // eyepiece itself, so the framing settles on the lens as we
+          // commit to the dive.
+          _tmpVec3.lerpVectors(
+            _eyepieceWorld.clone().add(new THREE.Vector3(-0.18, 0.06, 0)),
+            _eyepieceWorld,
+            ep,
+          );
+          camera.lookAt(_tmpVec3);
+          camera.fov =
+            INTRO_FOV.LEAN_END +
+            (INTRO_FOV.THROUGH_END - INTRO_FOV.LEAN_END) * ep;
+          camera.updateProjectionMatrix();
+          // Hold the bow pose all the way through.
+          if (intro.charParts && intro.charParts.torso) {
+            intro.charParts.torso.rotation.x = -0.55;
+            intro.charParts.head.rotation.x = 0.18;
+            intro.charParts.armR.rotation.x = 0.5;
+            intro.charParts.armR.rotation.z = -1.1;
+          }
+        }
+
+        // Eyepiece glow light: dim during ESTABLISH, ramps up through
+        // APPROACH → LEAN_IN, holds bright through THROUGH so the
+        // character's face is lit by the cosmos through the lens.
+        if (intro.eyepieceGlowLight) {
+          let target = 0;
+          if (beat === "APPROACH") target = 0.35 * p;
+          else if (beat === "LEAN_IN") target = 0.35 + 0.65 * p;
+          else if (beat === "REACT")
+            target = 1.0; // hold during reaction
+          else if (beat === "THROUGH") target = 1.0;
+          intro.eyepieceGlowLight.intensity = target * 1.6;
+        }
+      }
+
+      function introEnd() {
+        intro.active = false;
+        intro.beat = "DONE";
+        introMarkSeen();
+        fadeOutIntroAudio();
+        // Camera handoff: copy the porthole camera's pose to the main
+        // camera. The intro overlay finished by showing the sim through
+        // the porthole camera's frustum; placing the main camera there
+        // makes the first sim-rendered frame visually continuous.
+        if (intro.portholeCam) {
+          camera.position.copy(intro.portholeCam.position);
+          camera.quaternion.copy(intro.portholeCam.quaternion);
+          camera.fov = intro.portholeCam.fov;
+        } else {
+          if (intro.savedCam) camera.position.copy(intro.savedCam);
+          if (intro.savedFov != null) camera.fov = intro.savedFov;
+        }
+        camera.updateProjectionMatrix();
+        if (intro.savedControlsEnabled != null)
+          controls.enabled = intro.savedControlsEnabled;
+        // Re-target OrbitControls at the sim center; otherwise the user's
+        // first interaction would orbit around the hillside origin.
+        controls.target.set(0, 0, 0);
+        controls.update();
+        const btn = document.getElementById("intro-skip");
+        if (btn) btn.classList.remove("show");
+        const prompt = document.getElementById("intro-prompt");
+        if (prompt) prompt.classList.remove("show");
+        // Free the porthole render target + overlay shader. Geometry
+        // for the hillside / character / telescope is also no longer
+        // needed; release it lazily so we don't stutter on the very
+        // last intro frame.
+        setTimeout(() => {
+          introDisposePortal();
+          if (intro.scene) {
+            intro.scene.traverse((o) => {
+              if (o.geometry) o.geometry.dispose();
+              if (o.material) {
+                if (Array.isArray(o.material)) {
+                  o.material.forEach((m) => m.dispose && m.dispose());
+                } else if (o.material.dispose) {
+                  o.material.dispose();
+                }
+              }
+            });
+            intro.scene = null;
+            intro.character = null;
+            intro.telescope = null;
+            intro.eyepiece = null;
+            intro.eyepieceGlow = null;
+            intro.eyepieceGlowMat = null;
+            intro.eyepieceGlowLight = null;
+            intro.lantern = null;
+            intro.starsMat = null;
+            intro.charParts = null;
+          }
+        }, 100);
+      }
+
+      // Per-frame intro tick. Advances the beat clock, fires audio cues
+      // on threshold crossings, and dispatches to tickIntroPose for the
+      // camera + character animation.
+      function tickIntro(realDt) {
+        if (!intro.active || intro.beat === "IDLE" || intro.beat === "DONE")
+          return;
+        const prevT = intro.t;
+        const prevBeat = intro.beat;
+        intro.t += realDt;
+        intro.T += realDt;
+
+        // Click during ESTABLISH skips ahead to APPROACH; click during
+        // APPROACH/LEAN_IN/THROUGH advances to the THROUGH-end crossfade
+        // (the metaphor — "you went through the lens" — is preserved).
+        if (intro.clickAdvance) {
+          intro.clickAdvance = false;
+          if (intro.beat === "ESTABLISH") {
+            intro.beat = "APPROACH";
+            intro.t = 0;
+          } else {
+            intro.skipToEnd = true;
+          }
+        }
+
+        // Hard skip from "skip →" or Esc — jump to THROUGH end.
+        if (intro.skipToEnd) {
+          intro.skipToEnd = false;
+          intro.beat = "THROUGH";
+          intro.t = intro.beatDur.THROUGH;
+        }
+
+        // Beat advancement.
+        const dur = intro.beatDur[intro.beat] || 0;
+        if (intro.t >= dur) {
+          if (intro.beat === "ESTABLISH") {
+            intro.beat = "APPROACH";
+            intro.t = 0;
+          } else if (intro.beat === "APPROACH") {
+            intro.beat = "LEAN_IN";
+            intro.t = 0;
+          } else if (intro.beat === "LEAN_IN") {
+            intro.beat = "REACT";
+            intro.t = 0;
+          } else if (intro.beat === "REACT") {
+            intro.beat = "THROUGH";
+            intro.t = 0;
+          } else if (intro.beat === "THROUGH") {
+            introEnd();
+          }
+        }
+
+        // ---- Audio cues on threshold crossings -----------------------
+        // Three soft footstep thuds, evenly spaced through APPROACH.
+        // Compare prev vs. current t inside APPROACH so each threshold
+        // fires exactly once.
+        if (intro.beat === "APPROACH" && prevBeat === "APPROACH") {
+          const thresholds = [0.45, 1.4, 2.35];
+          for (const th of thresholds) {
+            if (prevT < th && intro.t >= th) playFootstepThud();
+          }
+        }
+        // Pom-pom chime fires on entry into LEAN_IN (the bow beat).
+        if (prevBeat !== "LEAN_IN" && intro.beat === "LEAN_IN") {
+          playPomChime();
+        }
+        // Brighter "exclaim" chime on entry into REACT (step back + arms
+        // up) — the moment of "oh!"
+        if (prevBeat !== "REACT" && intro.beat === "REACT") {
+          playExclaimChime();
+        }
+        // Two more soft footsteps mid-REACT for the step-back action.
+        if (intro.beat === "REACT" && prevBeat === "REACT") {
+          if (prevT < 0.18 && intro.t >= 0.18) playFootstepThud();
+          if (prevT < 0.42 && intro.t >= 0.42) playFootstepThud();
+        }
+
+        // The prompt is only shown during ESTABLISH; once we're moving,
+        // the user has nothing to click for.
+        const prompt = document.getElementById("intro-prompt");
+        if (prompt) {
+          if (intro.beat !== "ESTABLISH") prompt.classList.remove("show");
+        }
+
+        // Per-frame ambient updates (run regardless of beat).
+        if (intro.starsMat) intro.starsMat.uniforms.uTime.value = intro.T;
+        // Eyepiece "click-here" glow — only during ESTABLISH, gentle pulse.
+        if (intro.eyepieceGlowMat) {
+          if (intro.beat === "ESTABLISH") {
+            const pulse = 0.32 + 0.22 * Math.sin(intro.T * 2.2);
+            intro.eyepieceGlowMat.opacity = pulse;
+          } else {
+            intro.eyepieceGlowMat.opacity = Math.max(
+              0,
+              intro.eyepieceGlowMat.opacity - realDt * 1.6,
+            );
+          }
+        }
+        // Idle breathing — body squashes ~3% over 3s sine. This runs for
+        // ESTABLISH only; APPROACH/LEAN_IN/THROUGH override the body
+        // pose via tickIntroPose, so we'd be fighting them otherwise.
+        if (
+          intro.beat === "ESTABLISH" &&
+          intro.charParts &&
+          intro.charParts.body
+        ) {
+          const br = 1.0 + 0.025 * Math.sin(intro.T * 2.1);
+          intro.charParts.body.scale.y = 0.95 * br;
+          if (intro.charParts.pom)
+            intro.charParts.pom.position.y =
+              1.1 + 0.018 * Math.sin(intro.T * 2.1);
+        }
+
+        // Camera + character pose for the current beat.
+        const beatDur = intro.beatDur[intro.beat] || 0;
+        tickIntroPose(intro.beat, intro.t, beatDur);
+      }
+
+      // Skip button + click-to-advance + Esc. Each input also unlocks
+      // the WebAudio context (browsers require a user gesture).
+      {
+        const btn = document.getElementById("intro-skip");
+        if (btn) {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (intro.active) {
+              ensureIntroAudio();
+              intro.skipToEnd = true;
+            }
+          });
+        }
+        // Click anywhere on the canvas during intro acts as "advance."
+        canvasEl.addEventListener(
+          "pointerdown",
+          (e) => {
+            if (intro.active) {
+              ensureIntroAudio();
+              intro.clickAdvance = true;
+            }
+          },
+          true,
+        );
+        addEventListener("keydown", (e) => {
+          if (!intro.active) return;
+          ensureIntroAudio();
+          if (e.key === "Escape") {
+            intro.skipToEnd = true;
+          }
+        });
+      }
 
       // ===============================================================
       // 3. STARFIELD (procedural, twinkling)
@@ -8491,6 +9935,16 @@
             pill.addEventListener("click", () => setCinematicFlavour(fk));
             flavRow.appendChild(pill);
           }
+          const rotatePill = el(
+            "button",
+            "pill" + (director.rotateMode ? " active" : ""),
+          );
+          rotatePill.textContent = "rotate";
+          rotatePill.title = "Cycle the four flavours every 30 minutes";
+          rotatePill.addEventListener("click", () =>
+            setRotateMode(!director.rotateMode),
+          );
+          flavRow.appendChild(rotatePill);
           motionSec.appendChild(flavRow);
 
           // --- Pace ---
@@ -11269,11 +12723,20 @@
         },
         oracle: {
           label: "oracle",
-          dwellS: [360, 600], // dwell long; accents do the talking
+          dwellS: [600, 900], // 10–15 min — give a single follow + trail
+          // observation room to breathe inside one scene.
           moveCooldown: [2, 4],
           moodCooldown: [60, 120],
           accentCooldown: [20, 45],
           accentFireChance: 0.7,
+          // Oracle-only follow timing: stay with one body for 3–5 min,
+          // then linger near the release point for 2–3 min so the trail
+          // it laid down gets time to be observed before the next move
+          // is picked. followLingerChance=1 means every follow is
+          // followed by a linger; lower it to mix in immediate cuts.
+          followDurationS: [180, 300],
+          followLingerS: [120, 180],
+          followLingerChance: 1.0,
           moves: [
             "orbit",
             "counter",
@@ -11389,10 +12852,18 @@
       }
       const ARC_AMP = 0.15; // depth of arc envelope on bloom + exposure
 
+      const ROTATE_PERIOD_MS = 30 * 60 * 1000; // 30 min per flavour in rotate mode
       const director = {
         enabled: false,
         pace: "normal",
         flavour: "drift",
+
+        // Rotate mode: when on, the director cycles drift → pulse →
+        // long-shadow → oracle → drift on a fixed 30-min clock,
+        // independent of any per-scene/dwell logic. Selecting a
+        // specific flavour by hand turns rotate off again.
+        rotateMode: false,
+        rotateAt: 0, // performance.now() ms — when to advance next
 
         state: "IDLE", // IDLE | DWELL | TRANSITION
         stateTimer: 0,
@@ -11486,6 +12957,7 @@
             v: 2,
             flavour: director.flavour,
             pace: director.pace,
+            rotateMode: director.rotateMode,
             recentScenes: director.recentScenes,
             recentPalettes: director.recentPalettes,
             recentChannels: director.recentChannels,
@@ -11508,6 +12980,13 @@
             director.flavour = p.flavour;
           if (typeof p.pace === "string" && PACE_MULT[p.pace] != null)
             director.pace = p.pace;
+          if (p.rotateMode === true) {
+            director.rotateMode = true;
+            // Reset the schedule on load — don't rotate immediately if
+            // the saved rotateAt was already in the past from a long
+            // tab-closed period.
+            director.rotateAt = performance.now() + ROTATE_PERIOD_MS;
+          }
           if (Array.isArray(p.recentScenes))
             director.recentScenes = p.recentScenes.filter(
               (s) => typeof s === "string",
@@ -11924,6 +13403,7 @@
         const userActive = idle < 8;
         applyBreathing(dt);
         arcDirectorTick(now);
+        tickFlavourRotate(now);
 
         // If the scene changed underneath us (user scrolled through the
         // browser, hit a number key, etc.), restart the dwell cycle.
@@ -12038,6 +13518,12 @@
           // would do this on the next frame, but pickNextScene may
           // run before that depending on dwell timing.
           setActiveArc(pickArc(null));
+          // Refresh the rotate clock — don't fire an immediate flavour
+          // change just because the user toggled cinematic on after a
+          // long pause.
+          if (director.rotateMode) {
+            director.rotateAt = performance.now() + ROTATE_PERIOD_MS;
+          }
           showToast("Cinematic", currentFlavour().label);
         } else {
           director.state = "IDLE";
@@ -12141,8 +13627,12 @@
         saveDirectorState();
         if (activePanel === "camera") buildPanel("camera");
       }
-      function setCinematicFlavour(name) {
+      function setCinematicFlavour(name, opts = {}) {
         if (!FLAVOURS[name]) return;
+        // Manual selection turns rotate mode off; the rotate ticker
+        // passes opts.fromRotate=true so it can advance without
+        // disabling itself.
+        if (!opts.fromRotate) director.rotateMode = false;
         director.flavour = name;
         // Reset in-flight timers so the new flavour takes hold next frame
         director.moveCooldown = 0;
@@ -12152,10 +13642,33 @@
           // Re-pick dwell duration against new flavour range
           director.dwellDuration = pickDwellSeconds();
         }
-        showToast("Flavour", currentFlavour().label);
+        const label = currentFlavour().label;
+        showToast("Flavour", opts.fromRotate ? `${label} (rotate)` : label);
         reflectCinematicOnHud();
         saveDirectorState();
         if (activePanel === "camera") buildPanel("camera");
+      }
+
+      function setRotateMode(on) {
+        director.rotateMode = !!on;
+        if (director.rotateMode) {
+          director.rotateAt = performance.now() + ROTATE_PERIOD_MS;
+          showToast("Cinematic", "rotate · 30 min/flavour");
+        } else {
+          showToast("Cinematic", "rotate off");
+        }
+        reflectCinematicOnHud();
+        saveDirectorState();
+        if (activePanel === "camera") buildPanel("camera");
+      }
+
+      function tickFlavourRotate(now) {
+        if (!director.rotateMode) return;
+        if (now < director.rotateAt) return;
+        const i = FLAVOUR_ORDER.indexOf(director.flavour);
+        const next = FLAVOUR_ORDER[(i + 1) % FLAVOUR_ORDER.length];
+        setCinematicFlavour(next, { fromRotate: true });
+        director.rotateAt = now + ROTATE_PERIOD_MS;
       }
       function cycleCinematicFlavour() {
         const i = FLAVOUR_ORDER.indexOf(director.flavour);
@@ -12437,9 +13950,15 @@
                 elapsed: 0,
               };
             }
+            // Flavour can override the default 14–24s follow with a
+            // longer "stay with one body" range — oracle uses 3–5 min.
+            const followRange = currentFlavour().followDurationS;
+            const followDur = followRange
+              ? rangeSample(followRange)
+              : 14 + Math.random() * 10;
             return {
               type: "follow",
-              duration: 14 + Math.random() * 10, // 14–24 s
+              duration: followDur,
               elapsed: 0,
               bodyIdx,
               attached: false,
@@ -12556,6 +14075,34 @@
             followCamRelease("director");
             director.followOwned = false;
             director.moveHistory.push("follow");
+            if (director.moveHistory.length > 4) director.moveHistory.shift();
+            // Flavour-driven post-follow linger: hold the camera near
+            // the release point for a while so the trail just laid
+            // down has time to be observed before the next move.
+            const flav = currentFlavour();
+            const lingerRange = flav.followLingerS;
+            const lingerChance = flav.followLingerChance ?? 0;
+            if (lingerRange && Math.random() < lingerChance) {
+              director.move = {
+                type: "follow-linger",
+                duration: rangeSample(lingerRange),
+                elapsed: 0,
+              };
+            } else {
+              director.move = null;
+              director.moveCooldown = rangeSample(flav.moveCooldown);
+            }
+          }
+          return;
+        }
+
+        // Linger after a follow: don't animate the camera, let the
+        // existing autoOrbit/drift slowly observe the trail. When the
+        // window expires, surrender to the normal move cooldown.
+        if (mv.type === "follow-linger") {
+          mv.elapsed += realDt;
+          if (mv.elapsed >= mv.duration) {
+            director.moveHistory.push("follow-linger");
             if (director.moveHistory.length > 4) director.moveHistory.shift();
             director.move = null;
             director.moveCooldown = rangeSample(currentFlavour().moveCooldown);
@@ -17067,6 +18614,11 @@
         camera.updateProjectionMatrix();
         renderer.setSize(innerWidth, innerHeight);
         composer.setSize(innerWidth, innerHeight);
+        if (intro.portholeCam) {
+          intro.portholeCam.aspect = innerWidth / innerHeight;
+          intro.portholeCam.updateProjectionMatrix();
+        }
+        introResizePortal();
       });
 
       // ===============================================================
@@ -17081,6 +18633,60 @@
         const now = performance.now();
         const realDt = (now - lastTime) / 1000;
         lastTime = now;
+
+        // Intro short-circuit: skip the sim's physics + post pipeline.
+        // From LEAN_IN onward we render the sim's scene (no post) into
+        // the porthole render target so the eyepiece sphere shows live
+        // cosmos. During THROUGH the porthole texture also fades in over
+        // the whole canvas so the handoff to the sim composer is clean.
+        if (intro.active) {
+          tickIntro(realDt);
+          // Advance the sim starfield + body shader uniforms a touch so
+          // the porthole isn't perfectly static when the user reaches it.
+          if (starfieldMat) starfieldMat.uniforms.uTime.value = intro.T * 0.6;
+          if (typeof simTime !== "undefined") {
+            // Don't actually step physics — just slowly drift simTime so
+            // any time-driven shaders animate gently.
+            // (Physics fully resumes after introEnd.)
+          }
+          // Start rendering the porthole midway through APPROACH so the
+          // eyepiece already shows the cosmos by the time the camera
+          // reframes on it during LEAN_IN.
+          // Render the porthole RT every intro frame: ESTABLISH needs
+          // it for the sky preview disc, and APPROACH onward needs it
+          // for the eyepiece sphere + the THROUGH overlay.
+          const wantSim = intro.beat !== "DONE" && intro.beat !== "IDLE";
+          if (wantSim && intro._portalReady) {
+            // Render the sim's main scene into the porthole RT. We use a
+            // dedicated camera so the intro's main camera (framing the
+            // hillside) isn't disturbed.
+            renderer.setRenderTarget(intro.portholeRT);
+            renderer.clear(true, true, true);
+            renderer.render(scene, intro.portholeCam);
+          }
+          // Now the intro hillside scene to canvas.
+          renderer.setRenderTarget(null);
+          renderer.clear(true, true, true);
+          if (intro.scene) renderer.render(intro.scene, camera);
+          // During THROUGH, fade the porthole texture in over the whole
+          // canvas. By beat end opacity hits 1; on the next frame the
+          // sim composer renders to canvas with the same content.
+          if (
+            intro.beat === "THROUGH" &&
+            intro._portalReady &&
+            intro.overlayMat
+          ) {
+            const ep = Math.min(1, intro.t / intro.beatDur.THROUGH);
+            // Hold near-zero for the first ~30% of THROUGH so the
+            // eyepiece-sphere visual carries the moment, then ramp.
+            const op = ep < 0.3 ? 0 : (ep - 0.3) / 0.7;
+            intro.overlayMat.uniforms.uOpacity.value = Math.min(1, op);
+            renderer.autoClear = false;
+            renderer.render(intro.overlayScene, intro.overlayCam);
+            renderer.autoClear = true;
+          }
+          return;
+        }
 
         handTrackerTick(now);
         updateHandWorld(camera, realDt);
@@ -17209,6 +18815,13 @@
         if (!director.enabled) toggleCinematic();
         // Fire-and-forget; gated on ?hands=1, silent on failure.
         initHandTracker();
+        // Stargazer intro — only on first visit unless ?intro= overrides.
+        // Gating must happen after the sim is built so the eyepiece
+        // porthole (step 4) has a composer to render through.
+        if (introShouldPlay()) {
+          intro.active = true;
+          introBegin();
+        }
         loop();
       })();
     </script>
