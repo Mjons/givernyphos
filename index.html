@@ -5846,6 +5846,11 @@
           shuffleOrder: [],
           shufflePos: 0,
           loadedOnce: false,
+          // Loop guarantee: tracks user intent so the watchdog (below)
+          // only resumes playback when the user *wants* music playing.
+          // External code that pauses music briefly (movie scrub) does
+          // not change userPaused — it pauses + resumes itself.
+          userPaused: false,
         };
         const savedVol = parseFloat(localStorage.getItem("universe-music-vol"));
         // Recover from the stuck-at-zero bug: a saved volume of exactly 0
@@ -5906,9 +5911,13 @@
         }
         function playPause() {
           if (audio.paused) {
+            state.userPaused = false;
             const p = audio.play();
             if (p && p.catch) p.catch(() => {});
-          } else audio.pause();
+          } else {
+            state.userPaused = true;
+            audio.pause();
+          }
         }
         function setVolume(v) {
           audio.volume = clamp(v, 0, 1);
@@ -5932,6 +5941,34 @@
         }
 
         audio.addEventListener("ended", () => next());
+
+        // Loop guarantee: skip tracks that fail to load/decode/play.
+        // Without these handlers a single 404 or codec issue would
+        // silently halt the whole playlist. Debounced so a chain of
+        // identical errors doesn't burn through every track at once.
+        let _skipTimer = null;
+        const skipBrokenTrack = () => {
+          if (_skipTimer) return;
+          _skipTimer = setTimeout(() => {
+            _skipTimer = null;
+            next();
+          }, 250);
+        };
+        audio.addEventListener("error", skipBrokenTrack);
+        audio.addEventListener("abort", skipBrokenTrack);
+
+        // Watchdog: every 7s, if audio is paused but the user did not
+        // pause it, attempt to resume. Catches unexpected pauses from
+        // browser focus events, stalled buffers, recovered errors, or
+        // any external code that pauses without setting userPaused.
+        // Movie scrub pauses + resumes synchronously inside the same
+        // ~16ms frame, so the watchdog won't stomp on it.
+        setInterval(() => {
+          if (audio.paused && !state.userPaused && audio.src && !audio.ended) {
+            const p = audio.play();
+            if (p && p.catch) p.catch(() => {});
+          }
+        }, 7000);
 
         // Reflect playback state on the rail button
         const reflectRail = () => {
