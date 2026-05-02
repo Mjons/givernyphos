@@ -5943,9 +5943,17 @@
         audio.addEventListener("ended", () => next());
 
         // Loop guarantee: skip tracks that fail to load/decode/play.
-        // Without these handlers a single 404 or codec issue would
-        // silently halt the whole playlist. Debounced so a chain of
-        // identical errors doesn't burn through every track at once.
+        // Without this a single 404 or codec issue would silently halt
+        // the whole playlist. Debounced so a chain of identical errors
+        // doesn't burn through every track at once.
+        //
+        // We DON'T listen to `abort` — it fires every time `audio.src`
+        // is replaced (i.e. on every load() call), so handling it
+        // self-triggers a runaway skip cascade where every load aborts
+        // the previous one and skips again ~250ms later. We also
+        // ignore MEDIA_ERR_ABORTED on the `error` event for the same
+        // reason: some browsers fire `error` with code 1 alongside the
+        // `abort` event during normal src changes.
         let _skipTimer = null;
         const skipBrokenTrack = () => {
           if (_skipTimer) return;
@@ -5954,8 +5962,10 @@
             next();
           }, 250);
         };
-        audio.addEventListener("error", skipBrokenTrack);
-        audio.addEventListener("abort", skipBrokenTrack);
+        audio.addEventListener("error", () => {
+          if (audio.error && audio.error.code === 1) return; // MEDIA_ERR_ABORTED
+          skipBrokenTrack();
+        });
 
         // Watchdog: every 7s, if audio is paused but the user did not
         // pause it, attempt to resume. Catches unexpected pauses from
