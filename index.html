@@ -1562,6 +1562,26 @@
       const MAX_AGE = 300.0;
       const NUM_KINDS = 8; // star, planet, BH, dust, halo, galaxyA, galaxyB, astrophage
 
+      // Astrophage (kind 7) shader constants — PETROVA_LINE.md §3. Single
+      // source of truth for the GLSL kernels, the WGSL kernels and the
+      // CPU pre-roll in scenePetrovaLine; interpolated into the shader
+      // strings as `${ASTRO_STEER.toFixed(3)}` so both languages see a
+      // float literal.
+      //
+      // ASTRO_LAUNCH — respawn speed as a multiple of the circular speed
+      //   at the spawn radius (1.6× circular ≈ 1.13× escape): bodies leave
+      //   the star, but only just, so star gravity bends the first third
+      //   of the path. ±25% spread + a cone jitter is applied on top.
+      // ASTRO_STEER — lateral-velocity damping (1/sim-second) folded into
+      //   the thrust. Pure thrust toward the planet conserves a body's
+      //   angular momentum about the planet, so anything launched with
+      //   lateral velocity misses the arrival radius and orbits the planet
+      //   forever (offline sweep: 0/120 arrivals at launch speed 8). With
+      //   steering every body converges; the launch arc survives because
+      //   its time constant (1/0.5 = 2 s) is ~40% of the transit.
+      const ASTRO_LAUNCH = 1.6;
+      const ASTRO_STEER = 0.5;
+
       // ===============================================================
       // 1b. WEBGPU CAPABILITY DETECTION  (PHASE1_WEBGPU.md, step 1)
       // ===============================================================
@@ -1989,12 +2009,94 @@
           handVz: f32,
           handRadius: f32,
           handPull: f32,
-          _pad2: f32,
+          theta2: f32,
           _pad3: f32,
           _pad4: f32,
           K: array<f32, 64>,
+          // Astrophage (PETROVA_LINE.md), float slots 92..105 — mirrors
+          // the GLSL uStarPos / uPlanetPos / uStarMass / uPlanetMass /
+          // uAstroThrust / uPlanetRadius / uSpawnOffset / uSpawnRadius.
+          // Written by writeWgpuParams; WGPU_PARAMS_BYTES covers them.
+          starX: f32,
+          starY: f32,
+          starZ: f32,
+          starMass: f32,
+          planetX: f32,
+          planetY: f32,
+          planetZ: f32,
+          planetMass: f32,
+          astroThrust: f32,
+          planetRadius: f32,
+          spawnX: f32,
+          spawnY: f32,
+          spawnZ: f32,
+          spawnRadius: f32,
         };
       `;
+      // SimParams byte size: 28 fixed floats (112 B) + K[64] (256 B) +
+      // 14 astrophage floats (56 B) = 424 B, rounded up to 432 (×16).
+      // Storage-buffer layout is plain — f32 = 4 B, no padding between
+      // scalars — so slot n lives at byte 4n. Used for the GPUBuffer,
+      // the CPU scratch and the writeBuffer size (CHANGELOG ledger:
+      // "Adding a new KIND_* requires updating WGSL + WebGPU buffer
+      // sizes" — same trap for any SimParams growth).
+      const WGPU_PARAMS_BYTES = 432;
+
+      // Shared by the brute vel kernel, the pos kernel and the BH force
+      // kernel. Mirror of the GLSL hash22 so the same (uv, sample,
+      // frame) seed gives the same pick on both backends.
+      const WGSL_HASH22 = /* wgsl */ `
+        fn hash22(q: vec2<f32>, seed: f32) -> vec2<f32> {
+          var p3 = fract(vec3<f32>(q.x, q.y, q.x) * vec3<f32>(0.1031, 0.1030, 0.0973) + seed * 0.173);
+          p3 = p3 + dot(p3, p3.yzx + 19.19);
+          return fract((p3.xx + p3.yz) * p3.zy);
+        }
+      `;
+      // Astrophage helpers (PETROVA_LINE.md §3.3 / §3.4) — mirrors of
+      // ASTRO_SPAWN_GLSL + astroLaunchVel in the GLSL kernels, same hash
+      // seeds. Must be spliced in after the `p: SimParams` binding and
+      // after hash22 in each kernel.
+      const WGSL_ASTRO_FNS = /* wgsl */ `
+        // GLSL's gl_FragCoord.xy / resolution.xy for body index i.
+        fn astroUv(i: u32) -> vec2<f32> {
+          let x = i % p.texSize;
+          let y = i / p.texSize;
+          return (vec2<f32>(f32(x), f32(y)) + 0.5) / f32(p.texSize);
+        }
+        fn astroSpawnPoint(uv: vec2<f32>, frame: f32) -> vec3<f32> {
+          let hA = hash22(uv, frame * 0.0007);
+          let hB = hash22(uv * 1.7, frame * 0.0011 + 0.31);
+          let az  = 6.2832 * hA.x;
+          let rho = p.spawnRadius * sqrt(hB.x);
+          let off = vec3<f32>(p.spawnX, p.spawnY, p.spawnZ);
+          let offLen = length(off);
+          var n = vec3<f32>(1.0, 0.0, 0.0);
+          if (offLen > 1e-6) { n = off / offLen; }
+          var helper = vec3<f32>(1.0, 0.0, 0.0);
+          if (abs(n.y) < 0.9) { helper = vec3<f32>(0.0, 1.0, 0.0); }
+          let t1 = normalize(cross(n, helper));
+          let t2 = cross(n, t1);
+          return vec3<f32>(p.starX, p.starY, p.starZ) + off
+               + rho * (cos(az) * t1 + sin(az) * t2);
+        }
+        fn astroLaunchVel(sp: vec3<f32>, uv: vec2<f32>, frame: f32) -> vec3<f32> {
+          let rad = sp - vec3<f32>(p.starX, p.starY, p.starZ);
+          let r = max(length(rad), 0.5);
+          var dir = rad / r;
+          let hC = hash22(uv * 2.9 + 0.17, frame * 0.0013 + 0.53);
+          let hD = hash22(uv * 4.3 + 0.61, frame * 0.0017 + 0.89);
+          let jit = vec3<f32>(hC.x, hC.y, hD.x) - 0.5;
+          dir = normalize(dir + 0.3 * jit);
+          let vCirc = sqrt(max(p.G * p.starMass, 0.0) / r);
+          let speed = ${ASTRO_LAUNCH.toFixed(3)} * vCirc * (0.75 + 0.5 * hD.y);
+          return dir * speed;
+        }
+      `;
+      // theta2 (was _pad2) is the Barnes-Hut opening angle squared —
+      // written every frame by writeWgpuParams (float slot 25). The
+      // brute-force kernels never read it, so the layout trap from the
+      // CHANGELOG NUM_KINDS ledger entry doesn't apply: same bytes,
+      // same PARAMS_BYTES.
       // Velocity step — gravity only for now. Stochastic flocking +
       // radiation pressure is a step-5 addition; current scenes that
       // don't use flock/radiation behave identically with this shader.
@@ -2011,15 +2113,10 @@
 
         var<workgroup> tilePos: array<vec4<f32>, TILE>;
         var<workgroup> tileVel: array<vec4<f32>, TILE>;
-
-        // Mirror of the GLSL hash22 in buildVelocityShader so the same
-        // (uvSelf, sample, frame) seed gives the same texel pick.
-        fn hash22(p: vec2<f32>, seed: f32) -> vec2<f32> {
-          var p3 = fract(vec3<f32>(p.x, p.y, p.x) * vec3<f32>(0.1031, 0.1030, 0.0973) + seed * 0.173);
-          p3 = p3 + dot(p3, p3.yzx + 19.19);
-          return fract((p3.xx + p3.yz) * p3.zy);
-        }
-
+        ` +
+        WGSL_HASH22 +
+        WGSL_ASTRO_FNS +
+        /* wgsl */ `
         @compute @workgroup_size(TILE)
         fn velStep(
           @builtin(global_invocation_id) gid: vec3<u32>,
@@ -2034,16 +2131,56 @@
 
           let kindFloat = floor(velA.w + 0.001);
           let ageNorm   = velA.w - kindFloat;
-          var kindA     = i32(kindFloat);
-          if (kindA > i32(NUM_KINDS) - 1) { kindA = i32(NUM_KINDS) - 1; }
-          if (kindA < 0)                  { kindA = 0; }
+          let kindA     = clamp(i32(kindFloat), 0, i32(NUM_KINDS) - 1);
 
-          // TODO(PETROVA_LINE.md step 1.5): mirror the WebGL kindA==7
-          // (astrophage) early-return here once SimParams gains uStarPos /
-          // uPlanetPos / uStarMass / uPlanetMass / uAstroThrust fields. Until
-          // then the petrova-line scene runs WebGL-only; on WebGPU astrophage
-          // would feel only the all-pairs gravity loop with K[7][b]=1 default
-          // and no thrust, which would not form a beam.
+          // Hoist kindA's interaction row and the scalar params out of
+          // the O(N) pair loop — an indexed storage-buffer read per pair
+          // costs far more than a function-scope array lookup.
+          var kRow: array<f32, NUM_KINDS>;
+          for (var k: u32 = 0u; k < NUM_KINDS; k = k + 1u) {
+            kRow[k] = p.K[u32(kindA) * NUM_KINDS + k];
+          }
+          let G    = p.G;
+          let eps2 = p.eps2;
+
+          // Astrophage (kind 7) — PETROVA_LINE.md §3.1, mirror of the GLSL
+          // kind-7 branch: star gravity + planet gravity + thrust with
+          // steering (ASTRO_STEER); no pair loop, flocking, spin or hand.
+          // Computed here and written at the end instead of returning
+          // early, because the tile loop's workgroupBarrier() must stay
+          // in uniform control flow. Flock/spin/hand blocks below may
+          // still run for kind 7 (their acc is discarded); flock is
+          // gated on p.flock and the others are trivial.
+          let isAstro = alive && kindA == 7;
+          var astroOut = velA;
+          if (isAstro) {
+            let starPos   = vec3<f32>(p.starX, p.starY, p.starZ);
+            let planetPos = vec3<f32>(p.planetX, p.planetY, p.planetZ);
+            let uvA = astroUv(i);
+            if (p.planetRadius > 0.0 && length(pA - planetPos) < p.planetRadius) {
+              // Arrival: the position kernel snaps this body to the same
+              // spawn point this step; hand it the launch velocity and
+              // reset age to 0 so pointVert ramps it in.
+              let sp = astroSpawnPoint(uvA, p.frame);
+              astroOut = vec4<f32>(astroLaunchVel(sp, uvA, p.frame), kindFloat);
+            } else {
+              let toStar   = starPos - pA;
+              let toPlanet = planetPos - pA;
+              let r2s = dot(toStar, toStar) + eps2;
+              let r2p = dot(toPlanet, toPlanet) + eps2;
+              let fStar   = G * p.starMass   * toStar   * inverseSqrt(r2s * r2s * r2s);
+              let fPlanet = G * p.planetMass * toPlanet * inverseSqrt(r2p * r2p * r2p);
+              let distP = max(length(toPlanet), 0.001);
+              let dirP  = toPlanet / distP;
+              let vA    = velA.xyz;
+              let vPerp = vA - dot(vA, dirP) * dirP;
+              let fThrust = dirP * p.astroThrust
+                          - vPerp * (${ASTRO_STEER.toFixed(3)} * p.sign);
+              let nv = vA + (fStar + fPlanet + fThrust) * p.dt * p.sign;
+              let dAgeA = p.dt * abs(p.sign) / p.maxAge;
+              astroOut = vec4<f32>(nv, kindFloat + clamp(ageNorm + dAgeA, 0.0, 0.9999));
+            }
+          }
 
           var acc = vec3<f32>(0.0);
           let numTiles = (p.N + TILE - 1u) / TILE;
@@ -3803,7 +3940,7 @@
             if (sb) sb.destroy();
         }
         const bodyBytes = N * 16; // vec4<f32>
-        const PARAMS_BYTES = 384; // SimParams: 28 floats (112B) + K[64] (256B) = 368B + 16 headroom
+        const PARAMS_BYTES = WGPU_PARAMS_BYTES; // SimParams: 28 floats + K[64] + 14 astro floats = 424B → 432
         const make = () =>
           device.createBuffer({
             size: bodyBytes,
@@ -3986,7 +4123,7 @@
       // ----- step 4a: writeWgpuParams + dispatch sanity test -------
       // Pack current sim uniforms into the WebGPU params storage
       // buffer. Layout matches the WGSL SimParams struct.
-      const _wgpuParamsScratch = new ArrayBuffer(384);
+      const _wgpuParamsScratch = new ArrayBuffer(WGPU_PARAMS_BYTES);
       const _wgpuParamsF32 = new Float32Array(_wgpuParamsScratch);
       const _wgpuParamsU32 = new Uint32Array(_wgpuParamsScratch);
       function writeWgpuParams(overrides) {
@@ -4025,19 +4162,41 @@
         _wgpuParamsF32[22] = hv ? hv.z : 0;
         _wgpuParamsF32[23] = u.uHandRadius ? u.uHandRadius.value : 1;
         _wgpuParamsF32[24] = u.uHandPull ? u.uHandPull.value : 0;
-        _wgpuParamsF32[25] = 0;
+        // Slot 25 = SimParams.theta2 (Barnes-Hut MAC, BARNES_HUT_PLAN.md).
+        // Harmless for the brute kernels, which never read it.
+        _wgpuParamsF32[25] = bhSim.theta * bhSim.theta;
         _wgpuParamsF32[26] = 0;
         _wgpuParamsF32[27] = 0;
         const K = u.uK.value;
         for (let i = 0; i < NUM_KINDS * NUM_KINDS; i++) {
           _wgpuParamsF32[28 + i] = K[i];
         }
+        // Astrophage slots 92..105 (SimParams.starX .. spawnRadius), in
+        // struct order. K occupies 28..91 (28 + 64 = 92).
+        const A0 = 28 + NUM_KINDS * NUM_KINDS;
+        const sp = u.uStarPos ? u.uStarPos.value : null;
+        const pp = u.uPlanetPos ? u.uPlanetPos.value : null;
+        const so = u.uSpawnOffset ? u.uSpawnOffset.value : null;
+        _wgpuParamsF32[A0 + 0] = sp ? sp.x : 0;
+        _wgpuParamsF32[A0 + 1] = sp ? sp.y : 0;
+        _wgpuParamsF32[A0 + 2] = sp ? sp.z : 0;
+        _wgpuParamsF32[A0 + 3] = u.uStarMass ? u.uStarMass.value : 0;
+        _wgpuParamsF32[A0 + 4] = pp ? pp.x : 0;
+        _wgpuParamsF32[A0 + 5] = pp ? pp.y : 0;
+        _wgpuParamsF32[A0 + 6] = pp ? pp.z : 0;
+        _wgpuParamsF32[A0 + 7] = u.uPlanetMass ? u.uPlanetMass.value : 0;
+        _wgpuParamsF32[A0 + 8] = u.uAstroThrust ? u.uAstroThrust.value : 0;
+        _wgpuParamsF32[A0 + 9] = u.uPlanetRadius ? u.uPlanetRadius.value : 0;
+        _wgpuParamsF32[A0 + 10] = so ? so.x : 0;
+        _wgpuParamsF32[A0 + 11] = so ? so.y : 0;
+        _wgpuParamsF32[A0 + 12] = so ? so.z : 0;
+        _wgpuParamsF32[A0 + 13] = u.uSpawnRadius ? u.uSpawnRadius.value : 0;
         wgpuSim.device.queue.writeBuffer(
           wgpuSim.buffers.params,
           0,
           _wgpuParamsScratch,
           0,
-          384,
+          WGPU_PARAMS_BYTES,
         );
         return true;
       }
@@ -7018,6 +7177,31 @@
       // ===============================================================
       // Velocity shader is built as a function so TEX_SIZE can be rebaked
       // when the user changes the density level (see rebuildPipeline).
+      // Shared by the velocity and position GPGPU shaders (PETROVA_LINE.md
+      // §3.3 / §3.4). Both call astroSpawnPoint with the same (uv, frame)
+      // and get the same point, which is how the position shader's snap
+      // and the velocity shader's launch velocity stay in sync without
+      // either reading the other's output. Requires hash22 + the astro
+      // uniforms to be declared above the insertion point.
+      const ASTRO_SPAWN_GLSL = /* glsl */ `
+        // Fresh spawn point on the launch cap: a disc of radius
+        // uSpawnRadius centred at uStarPos + uSpawnOffset and
+        // perpendicular to uSpawnOffset — a polar/limb cap when the
+        // offset points along the star's pole.
+        vec3 astroSpawnPoint(vec2 uv, float frame) {
+          vec2 hA = hash22(uv, frame * 0.0007);
+          vec2 hB = hash22(uv * 1.7, frame * 0.0011 + 0.31);
+          float az  = 6.2832 * hA.x;
+          float rho = uSpawnRadius * sqrt(hB.x);
+          float offLen = length(uSpawnOffset);
+          vec3 n = offLen > 1e-6 ? uSpawnOffset / offLen : vec3(1.0, 0.0, 0.0);
+          vec3 helper = abs(n.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+          vec3 t1 = normalize(cross(n, helper));
+          vec3 t2 = cross(n, t1);
+          return uStarPos + uSpawnOffset + rho * (cos(az) * t1 + sin(az) * t2);
+        }
+      `;
+
       const buildVelocityShader = (texSize) => /* glsl */ `
         uniform float uDt;
         uniform float uG;
@@ -7044,11 +7228,34 @@
         uniform float uPlanetMass;
         uniform float uAstroThrust;
         uniform float uPlanetRadius; // arrival trigger (0 disables respawn)
+        uniform vec3  uSpawnOffset;  // launch-cap centre relative to the star
+        uniform float uSpawnRadius;  // launch-cap disc radius
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
           p3 += dot(p3, p3.yzx + 19.19);
           return fract((p3.xx + p3.yz) * p3.zy);
+        }
+
+        ${ASTRO_SPAWN_GLSL}
+
+        // Launch velocity for a freshly respawned astrophage: radially
+        // outward through its spawn point at ASTRO_LAUNCH × the circular
+        // speed at that radius, ±25% speed spread, small cone jitter —
+        // the spread is what gives the beam inner variation instead of
+        // a uniform ribbon. Same (uv, frame) seeds as astroSpawnPoint so
+        // the direction matches the point the position shader picked.
+        vec3 astroLaunchVel(vec3 sp, vec2 uv, float frame) {
+          vec3 rad = sp - uStarPos;
+          float r = max(length(rad), 0.5);
+          vec3 dir = rad / r;
+          vec2 hC = hash22(uv * 2.9 + 0.17, frame * 0.0013 + 0.53);
+          vec2 hD = hash22(uv * 4.3 + 0.61, frame * 0.0017 + 0.89);
+          vec3 jit = vec3(hC.x, hC.y, hD.x) - 0.5;
+          dir = normalize(dir + 0.3 * jit);
+          float vCirc = sqrt(max(uG * uStarMass, 0.0) / r);
+          float speed = ${ASTRO_LAUNCH.toFixed(3)} * vCirc * (0.75 + 0.5 * hD.y);
+          return dir * speed;
         }
 
         void main() {
@@ -7073,15 +7280,17 @@
           // migration is a force of nature, not user-interactive. This keeps
           // the scene O(N) instead of O(N^2).
           if (kindA == 7) {
-            // Arrival check (mirror of position-shader respawn block).
-            // If this body is within uPlanetRadius of the planet, the
-            // position shader is snapping it back to a fresh spawn —
-            // we zero out velocity so it starts the migration at rest.
+            // Arrival (mirror of the position-shader respawn block; both
+            // test the OLD position, so they fire on the same step under
+            // either integrator). The position shader snaps this texel
+            // to a fresh spawn point; we hand it the matching launch
+            // velocity and reset age to 0 — pointVert ramps kind-7
+            // brightness in from age 0, which is what keeps the respawn
+            // from popping (PETROVA_LINE.md §8.2).
             if (uPlanetRadius > 0.0
                 && length(p - uPlanetPos) < uPlanetRadius) {
-              float dAge0 = uDt * abs(uSign) / uMaxAge;
-              float newAge0 = clamp(ageNorm + dAge0, 0.0, 0.9999);
-              gl_FragColor = vec4(0.0, 0.0, 0.0, kindAf + newAge0);
+              vec3 sp = astroSpawnPoint(uvSelf, uFrame);
+              gl_FragColor = vec4(astroLaunchVel(sp, uvSelf, uFrame), kindAf + 0.0);
               return;
             }
             vec3 toStar   = uStarPos   - p;
@@ -7091,7 +7300,14 @@
             vec3 fStar    = uG * uStarMass   * toStar   * inversesqrt(r2s * r2s * r2s);
             vec3 fPlanet  = uG * uPlanetMass * toPlanet * inversesqrt(r2p * r2p * r2p);
             float distP  = max(length(toPlanet), 0.001);
-            vec3 fThrust = (toPlanet / distP) * uAstroThrust;
+            vec3 dirP    = toPlanet / distP;
+            // Thrust + steering (see ASTRO_STEER): constant thrust toward
+            // the planet plus damping of the velocity component that is
+            // perpendicular to the planet direction. The extra uSign keeps
+            // it a damping term when time runs backwards.
+            vec3 vPerp   = v - dot(v, dirP) * dirP;
+            vec3 fThrust = dirP * uAstroThrust
+                         - vPerp * (${ASTRO_STEER.toFixed(3)} * uSign);
             vec3 newVelA = v + (fStar + fPlanet + fThrust) * uDt * uSign;
             float dAgeA = uDt * abs(uSign) / uMaxAge;
             float newAgeNormA = clamp(ageNorm + dAgeA, 0.0, 0.9999);
@@ -7206,12 +7422,16 @@
         uniform vec3  uStarPos;
         uniform vec3  uPlanetPos;
         uniform float uPlanetRadius;
+        uniform vec3  uSpawnOffset;
+        uniform float uSpawnRadius;
 
         vec2 hash22(vec2 p, float seed) {
           vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973) + seed * 0.173);
           p3 += dot(p3, p3.yzx + 19.19);
           return fract((p3.xx + p3.yz) * p3.zy);
         }
+
+        ${ASTRO_SPAWN_GLSL}
 
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
@@ -7220,26 +7440,16 @@
 
           // Astrophage respawn (PETROVA_LINE.md §3.4). When a kind-7
           // body arrives within uPlanetRadius of the planet, snap it
-          // back to a fresh hemispherical spawn near the star. The
-          // velocity shader runs the same arrival check and zeros out
-          // velocity, so position and velocity stay in sync.
+          // back to a fresh point on the launch cap. The velocity
+          // shader runs the same arrival check on the same old
+          // position and writes the matching launch velocity + age 0,
+          // so position and velocity stay in sync.
           float kindAf = floor(vel.w + 0.001);
           bool astroArrived = (kindAf > 6.5) && (uPlanetRadius > 0.0)
               && (length(pos.xyz - uPlanetPos) < uPlanetRadius);
 
           if (astroArrived) {
-            // Match scenePetrovaLine's launch disc: x = +4 from star,
-            // y/z uniform in disc of radius 2. Hardcoded for now;
-            // scene-controlled if we generalize later.
-            vec2 hA = hash22(uv, uFrame * 0.0007);
-            vec2 hB = hash22(uv * 1.7, uFrame * 0.0011 + 0.31);
-            float az = 6.2832 * hA.x;
-            float rho = 2.0 * sqrt(hB.x);
-            pos.xyz = uStarPos + vec3(
-              4.0,
-              rho * cos(az),
-              rho * sin(az)
-            );
+            pos.xyz = astroSpawnPoint(uv, uFrame);
           } else {
             pos.xyz += vel.xyz * uDt * uSign;
           }
@@ -7317,17 +7527,31 @@
         velVar.material.uniforms.uPlanetRadius = {
           value: preserve?.uPlanetRadius ?? 0.0,
         };
+        // Launch cap (PETROVA_LINE.md §3.3): centre offset from the star
+        // and disc radius. Zero offset = the shader falls back to a +X
+        // cap, but only kind-7 arrivals ever sample it.
+        velVar.material.uniforms.uSpawnOffset = {
+          value: preserve?.uSpawnOffset ?? new THREE.Vector3(0, 0, 0),
+        };
+        velVar.material.uniforms.uSpawnRadius = {
+          value: preserve?.uSpawnRadius ?? 0.0,
+        };
 
         // Position shader needs the same uStarPos / uPlanetPos /
-        // uPlanetRadius (for the §3.4 respawn block) plus uFrame for
-        // the hash seed. Share Vector3 refs so a single applyScenePhysics
-        // update reaches both shaders.
+        // uPlanetRadius / uSpawnOffset / uSpawnRadius (for the §3.4
+        // respawn block) plus uFrame for the hash seed. Share the
+        // uniform objects so a single applyAstroUniforms update reaches
+        // both shaders.
         posVar.material.uniforms.uFrame = velVar.material.uniforms.uFrame;
         posVar.material.uniforms.uStarPos = velVar.material.uniforms.uStarPos;
         posVar.material.uniforms.uPlanetPos =
           velVar.material.uniforms.uPlanetPos;
         posVar.material.uniforms.uPlanetRadius =
           velVar.material.uniforms.uPlanetRadius;
+        posVar.material.uniforms.uSpawnOffset =
+          velVar.material.uniforms.uSpawnOffset;
+        posVar.material.uniforms.uSpawnRadius =
+          velVar.material.uniforms.uSpawnRadius;
       }
 
       function createGPGPU(texSize, preserve) {
@@ -7489,6 +7713,21 @@
 
           // BH hot-highlight: scene can dim or kill this (Event Horizon goes black)
           if (kindI == 2) c = mix(c, vec3(1.6, 0.9, 0.35), 0.75 * uBHHighlight);
+
+          // Astrophage lifecycle fade (PETROVA_LINE.md §8.2), kind 7 only.
+          // Age is reset to 0 on respawn, so ramping 0→1 over the first
+          // sim-second of life hides the pop at the launch cap; dimming
+          // to 0.2 between 2.5× and 1× the arrival radius sinks bodies
+          // into the planet's glow instead of cutting them at a hard
+          // edge. Other kinds never enter this branch.
+          if (kindI == 7 && uPlanetRadius > 0.0) {
+            float lifeS = ageNorm * uMaxAge;
+            float ramp = smoothstep(0.0, 1.0, lifeS);
+            float dP = length(pos.xyz - uPlanetPos);
+            float fade = mix(0.2, 1.0,
+                             smoothstep(uPlanetRadius, uPlanetRadius * 2.5, dP));
+            c *= ramp * fade;
+          }
 
           // Relativistic-ish Doppler beaming: brighten bodies moving toward the
           // camera, dim those moving away.  Applied as (1 + strength·β)^3.
@@ -7667,6 +7906,158 @@
         ringMat.uniforms.uOpacity.value = cfg.opacity ?? 1.0;
         const span = 2 * (cfg.radius + (cfg.thickness ?? 1.5) * 5);
         photonRing.scale.set(span, span, 1);
+      }
+
+      // ---- Petrova Line decorations (scene-scoped; off by default) ----
+      // Star + planet as camera-facing glow discs so they read as bodies
+      // (PETROVA_LINE.md). Same lifecycle as the photon ring: applied by
+      // setPetrovaDeco(cfg) on scene apply, opacity faded through zero
+      // around swapT during transitions. One billboard material serves
+      // both — the planet additionally gets a lit hemisphere and an
+      // arrival-side glow lobe that faces `glowToward` (the star).
+      function makeGlowDisc() {
+        const mat = new THREE.ShaderMaterial({
+          uniforms: {
+            uSize: { value: 10.0 }, // quad half-size, world units
+            uDiscR: { value: 0.3 }, // disc radius / uSize
+            uLimb: { value: 0.3 }, // limb-glow width / uSize
+            uColor: { value: new THREE.Color(1, 1, 1) },
+            uLimbColor: { value: new THREE.Color(1, 0.7, 0.4) },
+            uLimbGain: { value: 0.6 },
+            uOpacity: { value: 0.0 },
+            uGlowToward: { value: new THREE.Vector3(1, 0, 0) },
+            uSideGlow: { value: 0.0 }, // arrival lobe strength
+            uSideColor: { value: new THREE.Color(1, 0.4, 0.2) },
+            uLit: { value: 0.0 }, // 1 = shade the disc as lit from uGlowToward
+          },
+          vertexShader: /* glsl */ `
+            uniform float uSize;
+            uniform vec3  uGlowToward;
+            varying vec2 vLocal;
+            varying vec2 vSide;
+            void main() {
+              vLocal = position.xy * 2.0; // PlaneGeometry(1,1): -1..1
+              vec4 mvC = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+              vec4 mvG = viewMatrix * vec4(uGlowToward, 1.0);
+              vec2 d = mvG.xy - mvC.xy;
+              float l = length(d);
+              vSide = l > 1e-4 ? d / l : vec2(1.0, 0.0);
+              vec4 mv = mvC + vec4(position.xy * (2.0 * uSize), 0.0, 0.0);
+              gl_Position = projectionMatrix * mv;
+            }
+          `,
+          fragmentShader: /* glsl */ `
+            uniform float uDiscR;
+            uniform float uLimb;
+            uniform vec3  uColor;
+            uniform vec3  uLimbColor;
+            uniform float uLimbGain;
+            uniform float uOpacity;
+            uniform float uSideGlow;
+            uniform vec3  uSideColor;
+            uniform float uLit;
+            varying vec2 vLocal;
+            varying vec2 vSide;
+            void main() {
+              float d = length(vLocal);
+              if (d > 1.0 || uOpacity <= 0.001) discard;
+              vec2 dir = vLocal / max(d, 1e-4);
+              float side = 0.5 + 0.5 * dot(dir, vSide);
+              // Body: soft-edged disc, limb-darkened; lit hemisphere
+              // toward uGlowToward when uLit is set.
+              float disc = 1.0 - smoothstep(uDiscR - 0.03, uDiscR + 0.03, d);
+              float shade = 1.0 - 0.35 * smoothstep(0.0, uDiscR, d);
+              shade *= mix(1.0, 0.2 + 0.8 * side, uLit);
+              // Limb glow: gaussian in the distance outside the disc.
+              float x = max(d - uDiscR, 0.0) / max(uLimb, 1e-3);
+              float limb = exp(-x * x) * uLimbGain * (1.0 - disc);
+              // Arrival-side lobe: the same glow weighted to one side.
+              float lobe = limb * side * side * uSideGlow;
+              // Fade to zero at the quad edge so nothing clips.
+              float edge = 1.0 - smoothstep(0.85, 1.0, d);
+              vec3 col = uColor * disc * shade
+                       + uLimbColor * limb
+                       + uSideColor * lobe;
+              float k = uOpacity * edge;
+              if (k < 0.002) discard;
+              // Alpha 1: with AdditiveBlending (SrcAlpha, One) the colour
+              // adds linearly; the fade lives in the colour itself.
+              gl_FragColor = vec4(col * k, 1.0);
+            }
+          `,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          depthTest: false,
+          side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+        mesh.frustumCulled = false;
+        mesh.visible = false;
+        scene.add(mesh);
+        return mesh;
+      }
+      const petrovaStarDeco = makeGlowDisc();
+      const petrovaPlanetDeco = makeGlowDisc();
+      // Configured opacity targets; petrovaDecoLevel(k) scales both so
+      // the transition fade is a single scalar like the ring's.
+      const petrovaDecoTarget = { star: 0, planet: 0 };
+
+      function applyGlowDisc(mesh, cfg, lit) {
+        const u = mesh.material.uniforms;
+        mesh.visible = true;
+        mesh.position.fromArray(cfg.pos || [0, 0, 0]);
+        const size = cfg.size ?? 10.0;
+        u.uSize.value = size;
+        u.uDiscR.value = (cfg.disc ?? 3.0) / size;
+        u.uLimb.value = (cfg.limb ?? 3.0) / size;
+        const c = cfg.color || [1, 1, 1];
+        u.uColor.value.setRGB(c[0], c[1], c[2]);
+        const lc = cfg.limbColor || c;
+        u.uLimbColor.value.setRGB(lc[0], lc[1], lc[2]);
+        u.uLimbGain.value = cfg.limbGain ?? 0.6;
+        const ac = cfg.arrivalColor || lc;
+        u.uSideColor.value.setRGB(ac[0], ac[1], ac[2]);
+        u.uSideGlow.value = cfg.arrivalGain ?? 0.0;
+        u.uGlowToward.value.fromArray(cfg.glowToward || [0, 0, 0]);
+        u.uLit.value = lit ? 1.0 : 0.0;
+      }
+      function setPetrovaDeco(cfg) {
+        if (!cfg) {
+          petrovaStarDeco.visible = false;
+          petrovaPlanetDeco.visible = false;
+          petrovaStarDeco.material.uniforms.uOpacity.value = 0.0;
+          petrovaPlanetDeco.material.uniforms.uOpacity.value = 0.0;
+          petrovaDecoTarget.star = 0;
+          petrovaDecoTarget.planet = 0;
+          return;
+        }
+        if (cfg.star) {
+          applyGlowDisc(petrovaStarDeco, cfg.star, false);
+          petrovaDecoTarget.star = cfg.star.opacity ?? 1.0;
+        } else {
+          petrovaStarDeco.visible = false;
+          petrovaDecoTarget.star = 0;
+        }
+        if (cfg.planet) {
+          applyGlowDisc(petrovaPlanetDeco, cfg.planet, true);
+          petrovaDecoTarget.planet = cfg.planet.opacity ?? 1.0;
+        } else {
+          petrovaPlanetDeco.visible = false;
+          petrovaDecoTarget.planet = 0;
+        }
+        petrovaDecoLevel(1.0);
+      }
+      // 0..1 multiplier over the configured targets (transition fades).
+      function petrovaDecoLevel(k) {
+        petrovaStarDeco.material.uniforms.uOpacity.value =
+          petrovaDecoTarget.star * k;
+        petrovaPlanetDeco.material.uniforms.uOpacity.value =
+          petrovaDecoTarget.planet * k;
+      }
+      // Arrival-side glow strength; driven from petrovaTick.
+      function petrovaDecoArrival(gain) {
+        petrovaPlanetDeco.material.uniforms.uSideGlow.value = gain;
       }
 
       // Static lens parameters (radii, center) — set on scene apply.  Strength
@@ -8577,6 +8968,16 @@
           0: { 0: 0.08, 3: 0.05 },
           3: { 0: 0.05, 3: 0.4 },
         }),
+        // petrova-line: the star (0) and planet (1) are anchors for the
+        // astrophage uniforms and must not move — zero their rows. Dust
+        // (3) feels only the star so the background neighbourhood keeps
+        // its slow orbits for as long as the dwell lasts. Astrophage (7)
+        // never enter the pair loop, so their row is irrelevant.
+        petrova: makeK({
+          0: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 },
+          1: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 },
+          3: { 0: 1, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 },
+        }),
       };
 
       function uploadK(kArr) {
@@ -8619,14 +9020,20 @@
       // multiply the base palette colour, so kind 7 (astrophage) reads
       // as red-on-red against the ember palette + speed channel:
       // bright red where the beam moves fast, deep crimson where slow.
-      const TINT_PETROVA = (() => {
+      // Parametrised per variant (PETROVA_VARIANTS.tint7): Sol reads
+      // IR-orange, Tau Ceti burnt orange, 40 Eridani crimson. Dust (kind
+      // 3, the background neighbourhood) is dimmed so it stays a hint.
+      function makePetrovaTint(tint7) {
         const t = TINT_NEUTRAL.slice();
-        // kind 7 — astrophage: deep red, kill green/blue.
-        t[7 * 3 + 0] = 1.6;
-        t[7 * 3 + 1] = 0.18;
-        t[7 * 3 + 2] = 0.1;
+        t[7 * 3 + 0] = tint7[0];
+        t[7 * 3 + 1] = tint7[1];
+        t[7 * 3 + 2] = tint7[2];
+        t[3 * 3 + 0] = 0.55;
+        t[3 * 3 + 1] = 0.5;
+        t[3 * 3 + 2] = 0.5;
         return t;
-      })();
+      }
+      const TINT_PETROVA = makePetrovaTint([1.6, 0.18, 0.1]);
 
       const TINT_MILKYWAY = (() => {
         const t = TINT_NEUTRAL.slice();
@@ -9438,118 +9845,1151 @@
         state.count = i;
       }
 
-      // PETROVA_LINE.md step 2 — minimal scene to verify the curved beam
-      // emerges from physics. Star at origin, planet at +30 along X, ~100
-      // astrophage clustered around the star with no initial velocity.
-      // The kindA==7 branch in the velocity shader applies star-grav +
-      // planet-grav + thrust-toward-planet; the curve arises from the
-      // tangential component of the net force as bodies fall outward
-      // against the star while being pulled toward the planet.
+      // ---- Petrova Line (PETROVA_LINE.md) ---------------------------
+      // A star, a planet, and a curved beam of astrophage (kind 7)
+      // migrating between them. The curve is not authored: each body
+      // feels star gravity, planet gravity and its own thrust (velocity
+      // shader kind-7 branch), leaves the star's polar cap a little
+      // faster than escape speed, and is bent back toward the planet by
+      // thrust + steering. Arrivals respawn on the cap (position shader
+      // §3.4) with age reset so pointVert can ramp them in.
       //
-      // Scene config provides star/planet positions + masses + thrust
-      // magnitude through the `astrophage` field, plumbed via
-      // applyScenePhysics into the velocity-shader uniforms.
+      // One scene key, three seeded variants (§4.4): the seed picks the
+      // system and the variant rewrites the mutable parts of the SCENES
+      // entry (palette / tint / astrophage config / decoration / camera /
+      // caption) before applyScene reads them — sc.make() runs first on
+      // both the immediate and the transition path, so applySceneLook,
+      // applyAstroUniforms, setPetrovaDeco and the HUD caption all see
+      // the variant. `?petrova=sol|tau-ceti|eridani` forces one.
       //
-      // v1 = 100 astrophage, no respawn. Step 3 adds the despawn-at-planet
-      // / respawn-at-star lifecycle; step 4 scales to ~50k.
+      // Physics per variant (offline sweep of the exact shader force law,
+      // dt 0.008, G 1, eps² 0.25, launch ASTRO_LAUNCH × circular at the
+      // cap, steering ASTRO_STEER):
+      //   Sol      M=100 T=4.0 planet (60,12): transit ≈5.0 sim-s, arc
+      //            sag ≈15 % of the chord, peak speed 22
+      //   Tau Ceti M=80  T=3.5 planet (68,14): transit ≈5.7 s, sag ≈13 %
+      //   Eridani  M=130 T=4.5 planet (54,10): transit ≈4.5 s, sag ≈18 %
+      // (real seconds ≈ 2.1× sim-seconds at 60 fps, substeps 1.) All
+      // three: 100 % arrivals, no loops, slowest/median transit ≈ 1.15
+      // so the beam stays coherent. Thrust 15 (the old value) gave a
+      // near-straight 3 s ribbon; below ~3 the star wins near the cap
+      // and stragglers loop.
+      const PETROVA_VARIANTS = [
+        {
+          key: "sol",
+          weight: 0.3,
+          caption: "Astrophage migration · Sol → Venus",
+          palette: "ember",
+          tint7: [1.5, 0.45, 0.15], // IR-orange beam
+          starMass: 100.0,
+          planetMass: 100.0,
+          thrust: 4.0,
+          planetPos: [60, 12, 0],
+          spawnOffset: [0.8, 3.9, 0], // polar cap, tilted 12° toward the planet
+          spawnRadius: 1.5,
+          planetRadius: 4.0,
+          star: {
+            disc: 3.4,
+            color: [1.0, 0.93, 0.78], // G-type yellow-white
+            limb: [1.0, 0.7, 0.38],
+            limbGain: 0.7,
+          },
+          planet: {
+            disc: 2.2,
+            color: [0.85, 0.55, 0.42], // Venus, dusk-red
+            limb: [0.9, 0.35, 0.22],
+            limbGain: 0.35,
+            arrival: [1.4, 0.4, 0.12],
+            arrivalGain: 1.1,
+          },
+        },
+        {
+          key: "tau-ceti",
+          weight: 0.5,
+          caption: "Astrophage migration · Tau Ceti → Adrian",
+          palette: "sunset",
+          tint7: [1.6, 0.32, 0.1], // burnt orange
+          starMass: 80.0,
+          planetMass: 100.0,
+          thrust: 3.5,
+          planetPos: [68, 14, 0],
+          spawnOffset: [0.8, 3.9, 0],
+          spawnRadius: 1.6,
+          planetRadius: 4.2,
+          star: {
+            disc: 3.0,
+            color: [1.0, 0.7, 0.34], // K-type deep amber
+            limb: [1.0, 0.48, 0.18],
+            limbGain: 0.75,
+          },
+          planet: {
+            disc: 2.6,
+            color: [0.5, 0.66, 0.56], // Adrian, green-grey
+            limb: [0.45, 0.7, 0.5],
+            limbGain: 0.3,
+            arrival: [1.3, 0.55, 0.18],
+            arrivalGain: 1.3,
+          },
+        },
+        {
+          key: "eridani",
+          weight: 0.2,
+          caption: "Astrophage migration · 40 Eridani → Erid",
+          palette: "nebula",
+          tint7: [1.6, 0.16, 0.2], // crimson
+          starMass: 130.0,
+          planetMass: 100.0,
+          thrust: 4.5,
+          planetPos: [54, 10, 0],
+          spawnOffset: [0.8, 3.9, 0],
+          spawnRadius: 1.4,
+          planetRadius: 3.8,
+          star: {
+            disc: 3.2,
+            color: [1.0, 0.62, 0.36], // orange dwarf
+            limb: [1.0, 0.42, 0.24],
+            limbGain: 0.7,
+          },
+          planet: {
+            disc: 1.9,
+            color: [0.4, 0.36, 0.46], // Erid, dark
+            limb: [0.5, 0.3, 0.45],
+            limbGain: 0.25,
+            arrival: [1.4, 0.22, 0.28],
+            arrivalGain: 0.9,
+          },
+        },
+      ];
+
+      // Scene-local state (PETROVA_LINE.md §5.1). `clock` is time-in-
+      // scene — it only advances while petrova-line is the current scene
+      // (the tick hook is per-scene) and resets on every scene init.
+      const petrova = {
+        variant: null,
+        clock: 0,
+        nextSighting: Infinity,
+        rehearseShips: false,
+        arrivalGain: 1.0,
+      };
+
+      function pickPetrovaVariant() {
+        let forced = null;
+        try {
+          forced = new URL(location.href).searchParams.get("petrova");
+        } catch (_) {}
+        if (forced) {
+          const hit = PETROVA_VARIANTS.find((v) => v.key === forced);
+          if (hit) return hit;
+        }
+        let total = 0;
+        for (const v of PETROVA_VARIANTS) total += v.weight;
+        let r = rng() * total;
+        for (const v of PETROVA_VARIANTS) {
+          r -= v.weight;
+          if (r <= 0) return v;
+        }
+        return PETROVA_VARIANTS[PETROVA_VARIANTS.length - 1];
+      }
+
+      // CPU twin of the shader's kind-7 force law for the cap-centre
+      // body with the mean launch speed. Used once per scene init to
+      // pre-distribute astrophage along the steady-state path (so the
+      // beam is there on the first frame instead of filling over ~10 s)
+      // and by the ship scheduler to pick beam-crossing points. Returns
+      // a flat [x,y,z,vx,vy,vz,...] array, one entry per dt.
+      function astroReferencePath(astro, G, eps2, dt) {
+        const [sx, sy, sz] = astro.starPos;
+        const [px, py, pz] = astro.planetPos;
+        const off = astro.spawnOffset;
+        const r0 = Math.max(Math.hypot(off[0], off[1], off[2]), 0.5);
+        const v0 = ASTRO_LAUNCH * Math.sqrt((G * astro.starMass) / r0);
+        let x = sx + off[0],
+          y = sy + off[1],
+          z = sz + off[2];
+        let vx = (off[0] / r0) * v0,
+          vy = (off[1] / r0) * v0,
+          vz = (off[2] / r0) * v0;
+        const M = astro.starMass,
+          m = astro.planetMass,
+          T = astro.thrust;
+        const pts = [];
+        for (let step = 0; step < 6000; step++) {
+          const tsx = sx - x,
+            tsy = sy - y,
+            tsz = sz - z;
+          const tpx = px - x,
+            tpy = py - y,
+            tpz = pz - z;
+          const d2p = tpx * tpx + tpy * tpy + tpz * tpz;
+          const distP = Math.max(Math.sqrt(d2p), 0.001);
+          if (distP < astro.planetRadius) break;
+          pts.push(x, y, z, vx, vy, vz);
+          const r2s = tsx * tsx + tsy * tsy + tsz * tsz + eps2;
+          const r2p = d2p + eps2;
+          const is = 1 / Math.sqrt(r2s * r2s * r2s);
+          const ip = 1 / Math.sqrt(r2p * r2p * r2p);
+          const dpx = tpx / distP,
+            dpy = tpy / distP,
+            dpz = tpz / distP;
+          const vAlong = vx * dpx + vy * dpy + vz * dpz;
+          const ax =
+            G * M * tsx * is +
+            G * m * tpx * ip +
+            dpx * T -
+            (vx - vAlong * dpx) * ASTRO_STEER;
+          const ay =
+            G * M * tsy * is +
+            G * m * tpy * ip +
+            dpy * T -
+            (vy - vAlong * dpy) * ASTRO_STEER;
+          const az =
+            G * M * tsz * is +
+            G * m * tpz * ip +
+            dpz * T -
+            (vz - vAlong * dpz) * ASTRO_STEER;
+          // Same-step Euler (position from the old velocity), matching
+          // the default GPGPU ordering.
+          x += vx * dt;
+          y += vy * dt;
+          z += vz * dt;
+          vx += ax * dt;
+          vy += ay * dt;
+          vz += az * dt;
+        }
+        return pts;
+      }
+
       function scenePetrovaLine() {
         zero();
+        const sc = SCENES["petrova-line"];
+        const v = pickPetrovaVariant();
+        petrova.variant = v;
+        petrova.clock = 0;
+        petrova.arrivalGain = v.planet.arrivalGain;
+        if (typeof petrovaScheduleReset === "function") petrovaScheduleReset();
+
+        // Push the variant into the scene entry (see header comment).
+        const astro = {
+          starPos: [0, 0, 0],
+          planetPos: v.planetPos.slice(),
+          starMass: v.starMass,
+          planetMass: v.planetMass,
+          thrust: v.thrust,
+          planetRadius: v.planetRadius,
+          spawnOffset: v.spawnOffset.slice(),
+          spawnRadius: v.spawnRadius,
+        };
+        sc.astrophage = astro;
+        sc.palette = v.palette;
+        sc.tint = makePetrovaTint(v.tint7);
+        sc.caption = v.caption;
+        const D = v.planetPos[0],
+          H = v.planetPos[1];
+        // 3/4 view: mostly along -Z so the arc (which lives in the XY
+        // plane, rising from the pole) shows its full curve, with enough
+        // X/Y offset that the dust neighbourhood gives parallax under
+        // the director's orbit moves. Scaled with the planet distance.
+        sc.camera = {
+          pos: [0.12 * D, 0.46 * D, 1.8 * D],
+          tgt: [0.5 * D, 0.5 * H + 4, 0],
+          fov: 46,
+        };
+        sc.petrovaDeco = {
+          star: {
+            pos: [0, 0, 0],
+            size: 12.0,
+            disc: v.star.disc,
+            limb: 3.6,
+            color: v.star.color,
+            limbColor: v.star.limb,
+            limbGain: v.star.limbGain,
+          },
+          planet: {
+            pos: v.planetPos.slice(),
+            size: 8.0,
+            disc: v.planet.disc,
+            limb: 3.2,
+            color: v.planet.color,
+            limbColor: v.planet.limb,
+            limbGain: v.planet.limbGain,
+            arrivalColor: v.planet.arrival,
+            arrivalGain: v.planet.arrivalGain,
+            glowToward: [0, 0, 0],
+          },
+        };
+
         let i = 0;
+        // Star anchor (kind 0). Its body mass only matters to the dust
+        // orbits (K row 3 feels kind 0) and to the mass channel; the
+        // astrophage feel `astro.starMass` through the uniform. The disc
+        // you see is the decoration sprite — at rest the body itself
+        // samples palette stop 0 (black) on the speed channel.
+        const STAR_BODY_MASS = 1250.0;
+        setBody(i++, 0, 0, 0, STAR_BODY_MASS, 0, 0, 0, 0.0);
+        // Planet anchor (kind 1). Static: its K row is zero.
+        setBody(i++, D, H, v.planetPos[2], 5.0, 0, 0, 0, 1.0);
 
-        // Star — gravitational anchor (kind 0). Heavy enough to dominate
-        // the inner trajectory of nearby astrophage.
-        setBody(i++, 0, 0, 0, 5000.0, 0, 0, 0, 0.0);
+        // Sparse neighbourhood (PETROVA_LINE.md §6.1): a few hundred
+        // kind-3 dust bodies in a wide shell on slow circular orbits
+        // about the star body, so the shell persists over a long dwell
+        // and the speed channel gives them a dim ember colour instead of
+        // black. They are in the pair loop, so the count stays small.
+        const N_DUST = Math.min(400, Math.floor(MAX_BODIES * 0.06));
+        const G0 = sc.physics.G;
+        for (let k = 0; k < N_DUST && i < MAX_BODIES - 8; k++) {
+          const r = 140 + 280 * Math.cbrt(rng());
+          const cth = 2 * rng() - 1;
+          const sth = Math.sqrt(1 - cth * cth);
+          const ph = 2 * Math.PI * rng();
+          const nx = sth * Math.cos(ph),
+            ny = cth,
+            nz = sth * Math.sin(ph);
+          // Tangent = n × random, for an isotropic orbital plane.
+          const hx = randn(),
+            hy = randn(),
+            hz = randn();
+          let tx = ny * hz - nz * hy,
+            ty = nz * hx - nx * hz,
+            tz = nx * hy - ny * hx;
+          const tl = Math.hypot(tx, ty, tz) || 1;
+          tx /= tl;
+          ty /= tl;
+          tz /= tl;
+          const vc = Math.sqrt((G0 * STAR_BODY_MASS) / r) * (0.9 + 0.2 * rng());
+          setBody(
+            i++,
+            r * nx,
+            r * ny,
+            r * nz,
+            0.001,
+            vc * tx,
+            vc * ty,
+            vc * tz,
+            3.0,
+          );
+        }
 
-        // Planet — astrophage destination (kind 1). Light enough that
-        // the star's gravity wins for most of the transit; planet's
-        // pull only matters in the last third (which is what gives the
-        // beam its curve at the end). Position must match
-        // SCENES["petrova-line"].astrophage.planetPos.
-        setBody(i++, 60, 12, 0, 100.0, 0, 0, 0, 1.0);
-
-        // Astrophage (kind 7) — spawn in a forward-facing hemispherical
-        // shell on the planet-facing (+X) side of the star, between
-        // r=SPAWN_R_MIN and r=SPAWN_R_MAX. Mass ~0 so they don't
-        // perturb anything. The shader accelerates them via star-grav
-        // (pulls back), planet-grav (small), and thrust toward planet
-        // (dominant). The off-axis spawn is what gives the trajectory
-        // a tangential component → the curve.
-        //
-        // Each particle gets a random initial velocity (0..V_INIT_MAX)
-        // pointed roughly toward the planet, so they're at varied
-        // stages of flight at any instant. Without respawn (step 3)
-        // this fakes the steady-state distribution of bodies along
-        // the beam.
-        // Tight launch disc just outside the star on the planet-facing
-        // side. All bodies start at roughly (4, ±2, ±2) with no initial
-        // velocity — physics drives them forward. Tight spawn keeps the
-        // trajectories similar so the steady-state flow reads as a beam.
-        // Position-shader §3.4 respawn samples the same disc.
-        //
-        // Astrophage skip the all-pairs gravity loop (kindA==7
-        // early-return), so per-body cost is O(1). We fill the entire
-        // density tier minus a small reserve for the star/planet — the
-        // user controls the beam density via the existing density
-        // slider. lush (~65k) hits the design-doc target.
-        const ASTROPHAGE_RESERVE = 16; // slots saved for non-astrophage
+        // Astrophage (kind 7) fill the rest of the tier, pre-distributed
+        // uniformly in time along the reference path (uniform-in-time is
+        // the steady state of a constant-flux stream: dense where slow,
+        // sparse where fast). Lateral scatter widens downstream to match
+        // what the shader's launch jitter produces, and age = time since
+        // launch so the pointVert ramp is consistent with a live respawn.
+        const eps2 = sc.physics.softening * sc.physics.softening;
+        const dtRef = sc.physics.dt;
+        const pts = astroReferencePath(astro, G0, eps2, dtRef);
+        petrova.path = pts;
+        const nPts = Math.max(1, pts.length / 6);
+        const ASTROPHAGE_RESERVE = 4;
         const N_ASTROPHAGE = Math.max(0, MAX_BODIES - ASTROPHAGE_RESERVE - i);
-        const SPAWN_X = 4.0;
-        const SPAWN_DISC_R = 2.0;
         for (let k = 0; k < N_ASTROPHAGE && i < MAX_BODIES; k++) {
-          const az = 2 * Math.PI * rng();
-          const rho = SPAWN_DISC_R * Math.sqrt(rng()); // uniform in disc
-          const x = SPAWN_X;
-          const y = rho * Math.cos(az);
-          const z = rho * Math.sin(az);
-          setBody(i++, x, y, z, 0.001, 0, 0, 0, 7.0);
+          const idx = Math.min(nPts - 1, Math.floor(rng() * nPts));
+          const frac = idx / nPts;
+          const o = idx * 6;
+          const vx = pts[o + 3],
+            vy = pts[o + 4],
+            vz = pts[o + 5];
+          const sp = Math.hypot(vx, vy, vz) || 1;
+          const ux = vx / sp,
+            uy = vy / sp,
+            uz = vz / sp;
+          // Two axes perpendicular to the path tangent.
+          const hy0 = Math.abs(uy) < 0.9 ? 1 : 0,
+            hx0 = 1 - hy0;
+          let b1x = uy * 0 - uz * hy0,
+            b1y = uz * hx0 - ux * 0,
+            b1z = ux * hy0 - uy * hx0;
+          const bl = Math.hypot(b1x, b1y, b1z) || 1;
+          b1x /= bl;
+          b1y /= bl;
+          b1z /= bl;
+          const b2x = uy * b1z - uz * b1y,
+            b2y = uz * b1x - ux * b1z,
+            b2z = ux * b1y - uy * b1x;
+          const sig = v.spawnRadius * (0.5 + 1.0 * frac);
+          const l1 = randn() * sig,
+            l2 = randn() * sig;
+          const x = pts[o] + l1 * b1x + l2 * b2x;
+          const y = pts[o + 1] + l1 * b1y + l2 * b2y;
+          const z = pts[o + 2] + l1 * b1z + l2 * b2z;
+          const vs = 1 + 0.1 * randn();
+          const lv = 0.35 * (1 - frac);
+          const w1 = randn() * lv,
+            w2 = randn() * lv;
+          const age = Math.min(0.9999, (idx * dtRef) / MAX_AGE);
+          setBody(
+            i++,
+            x,
+            y,
+            z,
+            0.001,
+            vx * vs + w1 * b1x + w2 * b2x,
+            vy * vs + w1 * b1y + w2 * b2y,
+            vz * vs + w1 * b1z + w2 * b2z,
+            7.0 + age,
+          );
         }
 
         state.count = i;
       }
 
-      // Ship-test scene (PASSING_SHIPS.md §5.1). Pure visualization of
-      // the Hail Mary as an interpretation-B constellation: 18 bodies
-      // in formation, no other content, no gravity. Lets us judge
-      // whether the silhouette reads as a ship before wiring up
-      // trajectory / centrifuge animation / spawn lifecycle. Pass
-      // ?scene=ship-test to view.
+      // Per-scene tick (main loop, after updateSolarSystem; only while
+      // petrova-line is the current scene and the intro is not active).
+      // Cheap and GPU-free: the arrival glow pulses on the scene clock —
+      // a proxy for the arrival rate, which is in fact steady in a
+      // respawn loop — and the ship scheduler advances.
+      function petrovaTick(realDt) {
+        const dt = Math.min(realDt, 0.1);
+        petrova.clock += dt;
+        const t = petrova.clock;
+        petrovaDecoArrival(
+          petrova.arrivalGain *
+            (0.78 + 0.17 * Math.sin(t * 0.85) + 0.05 * Math.sin(t * 6.7 + 1.3)),
+        );
+        if (typeof petrovaShipsTick === "function") petrovaShipsTick(dt);
+      }
+      // Cartwheel — ring galaxy. A compact intruder punches vertically
+      // through a cold rotating disc; the radial crossing pulls disc
+      // stars inward, then flings them back out in phase — an expanding
+      // ring density wave with radial spokes. Nothing here authors a
+      // ring; it emerges ~15–20 s in (impact ≈ 235/19 ≈ 12 sim-units).
+      //
+      // Fills the density tier like petrova-line does: more bodies =
+      // the ring resolves from noise into a crisp wave, which is the
+      // "structure needs N" argument from BARNES_HUT_PLAN.md made
+      // visible. Velocities are analytic (enclosed-mass circular +
+      // dispersion) — the milky-way style O(N²) JS force-sum pass
+      // would take minutes at 65k+, so it is deliberately absent.
+      function sceneCartwheel() {
+        zero();
+        const DISC_R = 150;
+        // Nucleus is kind 5, not kind 2 — the shader gives kind 2 a
+        // ×5 size bonus that reads as a crater (see sceneMilkyWay).
+        const NUC_M = 9000;
+        const DISC_M = 22000;
+        const BULGE_M = 4000;
+        const HALO_M = 1600;
+        // ~0.28× the target's total mass — the sweet spot where the
+        // ring reads clearly without shredding the whole disc.
+        const INTR_CORE_M = 6500;
+        const INTR_CLOUD_M = 3500;
+        const SOFT = 3.0; // must match SCENES.cartwheel.physics.softening
+        const EPS2 = SOFT * SOFT;
+        // Enclosed mass matching the disc sampling law below
+        // (r = R·u^0.7 → M(<r) ∝ (r/R)^(1/0.7)); softened point form
+        // keeps v finite through the core.
+        const vCirc = (r) => {
+          const frac = Math.pow(Math.min(r / DISC_R, 1), 1 / 0.7);
+          const mEnc = NUC_M + (DISC_M + BULGE_M) * frac;
+          const v2 = (mEnc * r * r) / Math.pow(r * r + EPS2, 1.5);
+          return Math.sqrt(Math.max(v2, 0));
+        };
+        let i = 0;
+        setBody(i++, 0, 0, 0, NUC_M, 0, 0, 0, 5.0);
+
+        const budget = MAX_BODIES - 1;
+        const nDisc = Math.floor(budget * 0.62);
+        const nBulge = Math.floor(budget * 0.12);
+        const nHalo = Math.floor(budget * 0.1);
+        const nIntr = Math.max(2, Math.floor(budget * 0.14));
+
+        // ----- target disc (kind 5 — cool side of TINT_GALAXY) -----
+        const mDisc = DISC_M / nDisc;
+        for (let k = 0; k < nDisc && i < MAX_BODIES; k++) {
+          const r = Math.max(6, DISC_R * Math.pow(rng(), 0.7));
+          const phi = rng() * 2 * Math.PI;
+          const x = r * Math.cos(phi);
+          const z = r * Math.sin(phi);
+          const y = randn() * 1.4;
+          const v = vCirc(r);
+          const disp = v * 0.08; // cold disc — the ring wants coherence
+          setBody(
+            i++,
+            x,
+            y,
+            z,
+            mDisc,
+            -Math.sin(phi) * v + randn() * disp,
+            randn() * disp * 0.25,
+            Math.cos(phi) * v + randn() * disp,
+            5.0,
+          );
+        }
+
+        // ----- bulge (kind 5) — pressure-supported inner sphere -----
+        const mBulge = BULGE_M / Math.max(nBulge, 1);
+        const sigmaB = vCirc(18) * 0.35;
+        for (let k = 0; k < nBulge && i < MAX_BODIES; k++) {
+          const theta = Math.acos(2 * rng() - 1);
+          const phi = rng() * 2 * Math.PI;
+          const r = 4 + Math.pow(rng(), 0.8) * 16;
+          setBody(
+            i++,
+            r * Math.sin(theta) * Math.cos(phi),
+            r * Math.cos(theta) * 0.6,
+            r * Math.sin(theta) * Math.sin(phi),
+            mBulge,
+            randn() * sigmaB,
+            randn() * sigmaB * 0.6,
+            randn() * sigmaB,
+            5.0,
+          );
+        }
+
+        // ----- stellar halo (kind 4) — faint context shell -----
+        const mHalo = HALO_M / Math.max(nHalo, 1);
+        for (let k = 0; k < nHalo && i < MAX_BODIES; k++) {
+          const theta = Math.acos(2 * rng() - 1);
+          const phi = rng() * 2 * Math.PI;
+          const r = 170 + Math.pow(rng(), 0.6) * 250;
+          const x = r * Math.sin(theta) * Math.cos(phi);
+          const y = r * Math.cos(theta);
+          const z = r * Math.sin(theta) * Math.sin(phi);
+          const v = vCirc(Math.min(r, DISC_R)) * 0.5;
+          // Tangential-ish: cross position with a random vector.
+          const rx = randn();
+          const ry = randn();
+          const rz = randn();
+          let tx = y * rz - z * ry;
+          let ty = z * rx - x * rz;
+          let tz = x * ry - y * rx;
+          const tl = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+          tx = (tx / tl) * v;
+          ty = (ty / tl) * v;
+          tz = (tz / tl) * v;
+          setBody(
+            i++,
+            x,
+            y,
+            z,
+            mHalo,
+            tx + randn() * v * 0.2,
+            ty + randn() * v * 0.2,
+            tz + randn() * v * 0.2,
+            4.0,
+          );
+        }
+
+        // ----- intruder (kind 6 — warm side) — inbound from above -----
+        // Slight +X offset makes the hit off-centre → asymmetric ring
+        // + spokes. Speed ≈ 1.15× escape from the combined mass at
+        // start height, so it punches through and keeps going.
+        const IX = 24;
+        const IY = 235;
+        const IVY = -19;
+        setBody(i++, IX, IY, 0, INTR_CORE_M, 0, IVY, 0, 6.0);
+        const nCloud = Math.max(1, nIntr - 1);
+        const mCloud = INTR_CLOUD_M / nCloud;
+        const sigmaI = Math.sqrt(INTR_CORE_M / 9) * 0.25;
+        for (let k = 0; k < nCloud && i < MAX_BODIES; k++) {
+          const theta = Math.acos(2 * rng() - 1);
+          const phi = rng() * 2 * Math.PI;
+          const r = 10 * Math.pow(rng(), 0.7);
+          setBody(
+            i++,
+            IX + r * Math.sin(theta) * Math.cos(phi),
+            IY + r * Math.cos(theta),
+            r * Math.sin(theta) * Math.sin(phi),
+            mCloud,
+            randn() * sigmaI,
+            IVY + randn() * sigmaI,
+            randn() * sigmaI,
+            6.0,
+          );
+        }
+
+        state.count = i;
+      }
+
+      // Whirlpool — M51-class grand-design spiral, grown live. The
+      // disc is seeded COLD and FEATURELESS (no authored arms, unlike
+      // sceneMilkyWay's logarithmic placement); a companion galaxy on
+      // a close prograde parabolic pass raises the two-armed tidal
+      // response, plus the bridge and tail. The spiral is the physics
+      // answering the flyby, not an initial condition.
+      //
+      // Timeline (dt 0.012, speed 1): approach 0–18 s, pericenter
+      // ≈ 18 s at r ≈ 145, arms wind up 30–70 s (disc rotation period
+      // at mid-radius ≈ 45 s), bridge + counter-tail after. Prograde
+      // passages resonate with the disc rotation — that's what makes
+      // two clean arms instead of a splash.
+      //
+      // Beauty knobs live in the registry entry: density channel (arm
+      // crests ARE density crests, so the palette traces the spiral),
+      // aurora palette, moderate trails, and a touch of doppler so
+      // the approaching side glows.
+      function sceneWhirlpool() {
+        zero();
+        const DISC_R = 130;
+        const NUC_M = 15000; // kind 5 anchor (kind 2 gets the ×5 size bonus)
+        const DISC_M = 9000; // nucleus-dominated → disc stays smooth until
+        const BULGE_M = 2500; // the companion perturbs it (clean grand design)
+        const HALO_M = 1200;
+        const COMP_CORE_M = 4000; // ~0.23× the main galaxy — M51-ish ratio;
+        const COMP_CLOUD_M = 2200; // strong tide without shredding the disc
+        const SOFT = 2.5; // must match SCENES.whirlpool.physics.softening
+        const EPS2 = SOFT * SOFT;
+        // Enclosed mass matching the disc sampling law below
+        // (r = R·u^0.75 → M(<r) ∝ (r/R)^(1/0.75)), softened point form.
+        const vCirc = (r) => {
+          const frac = Math.pow(Math.min(r / DISC_R, 1), 1 / 0.75);
+          const mEnc = NUC_M + (DISC_M + BULGE_M) * frac;
+          const v2 = (mEnc * r * r) / Math.pow(r * r + EPS2, 1.5);
+          return Math.sqrt(Math.max(v2, 0));
+        };
+        let i = 0;
+        setBody(i++, 0, 0, 0, NUC_M, 0, 0, 0, 5.0);
+
+        const budget = MAX_BODIES - 2;
+        const nDisc = Math.floor(budget * 0.64);
+        const nDust = Math.floor(budget * 0.06);
+        const nBulge = Math.floor(budget * 0.08);
+        const nHalo = Math.floor(budget * 0.08);
+        const nCloud = Math.max(1, Math.floor(budget * 0.14));
+
+        // ----- main disc (kind 5 — cool side of TINT_GALAXY) -----
+        // 5% dispersion: cold enough that the tidal wave stays coherent,
+        // warm enough not to fragment before the companion arrives.
+        const mDisc = DISC_M / nDisc;
+        for (let k = 0; k < nDisc && i < MAX_BODIES; k++) {
+          const r = Math.max(5, DISC_R * Math.pow(rng(), 0.75));
+          const phi = rng() * 2 * Math.PI;
+          const x = r * Math.cos(phi);
+          const z = r * Math.sin(phi);
+          const y = randn() * (1.2 + r * 0.006); // gentle outward flare
+          const v = vCirc(r);
+          const disp = v * 0.05;
+          setBody(
+            i++,
+            x,
+            y,
+            z,
+            mDisc,
+            -Math.sin(phi) * v + randn() * disp,
+            randn() * disp * 0.25,
+            Math.cos(phi) * v + randn() * disp,
+            5.0,
+          );
+        }
+
+        // ----- dust lane sprinkle (kind 3) — texture along the disc -----
+        const mDust = 0.15;
+        for (let k = 0; k < nDust && i < MAX_BODIES; k++) {
+          const r = Math.max(12, DISC_R * (0.25 + 0.75 * Math.pow(rng(), 0.6)));
+          const phi = rng() * 2 * Math.PI;
+          const v = vCirc(r);
+          setBody(
+            i++,
+            r * Math.cos(phi),
+            randn() * 0.8,
+            r * Math.sin(phi),
+            mDust,
+            -Math.sin(phi) * v + randn() * v * 0.03,
+            randn() * v * 0.01,
+            Math.cos(phi) * v + randn() * v * 0.03,
+            3.0,
+          );
+        }
+
+        // ----- bulge (kind 5) — warm-bright core glow -----
+        const mBulge = BULGE_M / Math.max(nBulge, 1);
+        const sigmaB = vCirc(16) * 0.35;
+        for (let k = 0; k < nBulge && i < MAX_BODIES; k++) {
+          const theta = Math.acos(2 * rng() - 1);
+          const phi = rng() * 2 * Math.PI;
+          const r = 3 + Math.pow(rng(), 0.8) * 14;
+          setBody(
+            i++,
+            r * Math.sin(theta) * Math.cos(phi),
+            r * Math.cos(theta) * 0.55,
+            r * Math.sin(theta) * Math.sin(phi),
+            mBulge,
+            randn() * sigmaB,
+            randn() * sigmaB * 0.6,
+            randn() * sigmaB,
+            5.0,
+          );
+        }
+
+        // ----- halo (kind 4) — sparse depth cue -----
+        const mHalo = HALO_M / Math.max(nHalo, 1);
+        for (let k = 0; k < nHalo && i < MAX_BODIES; k++) {
+          const theta = Math.acos(2 * rng() - 1);
+          const phi = rng() * 2 * Math.PI;
+          const r = 160 + Math.pow(rng(), 0.6) * 240;
+          const x = r * Math.sin(theta) * Math.cos(phi);
+          const y = r * Math.cos(theta);
+          const z = r * Math.sin(theta) * Math.sin(phi);
+          const v = vCirc(Math.min(r, DISC_R)) * 0.5;
+          const rx = randn();
+          const ry = randn();
+          const rz = randn();
+          let tx = y * rz - z * ry;
+          let ty = z * rx - x * rz;
+          let tz = x * ry - y * rx;
+          const tl = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+          setBody(
+            i++,
+            x,
+            y,
+            z,
+            mHalo,
+            (tx / tl) * v + randn() * v * 0.2,
+            (ty / tl) * v + randn() * v * 0.2,
+            (tz / tl) * v + randn() * v * 0.2,
+            4.0,
+          );
+        }
+
+        // ----- companion (kind 6 — warm) on a prograde parabolic pass --
+        // Parabolic speed at r=240 for M_main+M_comp ≈ 32 700; velocity
+        // split so |r×v| targets pericenter ≈ 145 (just outside the
+        // disc edge). Same angular-momentum sign as the disc = prograde.
+        // Starts 40 above the plane, drifting down — it threads the
+        // plane near pericenter, which gives the bridge its 3D sweep.
+        const CX = 240;
+        const CY = 40;
+        const CVX = -10.3;
+        const CVY = -0.8;
+        const CVZ = 12.8;
+        setBody(i++, CX, CY, 0, COMP_CORE_M, CVX, CVY, CVZ, 6.0);
+        const mCloud = COMP_CLOUD_M / nCloud;
+        const sigmaC = Math.sqrt(COMP_CORE_M / 13) * 0.3;
+        for (let k = 0; k < nCloud && i < MAX_BODIES; k++) {
+          const theta = Math.acos(2 * rng() - 1);
+          const phi = rng() * 2 * Math.PI;
+          const r = 13 * Math.pow(rng(), 0.7);
+          setBody(
+            i++,
+            CX + r * Math.sin(theta) * Math.cos(phi),
+            CY + r * Math.cos(theta),
+            r * Math.sin(theta) * Math.sin(phi),
+            mCloud,
+            CVX + randn() * sigmaC,
+            CVY + randn() * sigmaC,
+            CVZ + randn() * sigmaC,
+            6.0,
+          );
+        }
+
+        state.count = i;
+      }
+
+      // ---- Passing ships (PASSING_SHIPS.md, interpretation B) ----------
+      // The Hail Mary as an 18-node constellation rendered as its OWN
+      // THREE.Points — not sim bodies: no kind, no GPGPU texture writes,
+      // no density-tier slot. It is added to `scene`, so the Afterimage
+      // pass trails it like everything else and the point look is the
+      // same sprite as pointFrag. Node positions are computed on the CPU
+      // each tick from a cubic Bézier cruise (§4) with the three-node
+      // centrifuge rotating at 1 rev / 4 s (§5.1). Scheduling is owned
+      // by the Petrova Line scene (PETROVA_LINE.md §5); ship-test parks
+      // one at the origin so the silhouette can be judged in isolation.
+      //
+      // Local coords: +Z forward. [x, y, z, brightness, role]; role 0 =
+      // hull (off-white), 1 = spin drive (IR-red), 2 = prow light
+      // (pale-warm), 3 = centrifuge pod (hull colour, rotates about +Z).
+      const HAIL_MARY_NODES = [
+        [0, 0, 2.0, 2.0, 2], // nose / control deck
+        [0.7, 0.0, 1.0, 1.5, 3], // centrifuge ring, 120° apart, r 0.7
+        [-0.35, 0.606, 1.0, 1.5, 3],
+        [-0.35, -0.606, 1.0, 1.5, 3],
+        [0, 0, 0.4, 1.5, 0], // lab
+        [0, 0, -0.2, 1.5, 0], // dorm
+        [0, 0, -0.8, 1.5, 0], // storage
+        [0, 0, -1.4, 1.5, 0], // junction
+        [0, 0, -2.0, 2.5, 1], // spin drive cluster (engine glow)
+        [0.4, 0, -2.4, 2.0, 1],
+        [-0.4, 0, -2.4, 2.0, 1],
+        [0, 0.4, -2.4, 2.0, 1],
+        [0, -0.4, -2.4, 2.0, 1],
+        [0, 0, -2.8, 2.5, 1],
+        [0.6, 0.8, 1.2, 0.8, 0], // antennae / sensors
+        [-0.6, 0.8, 1.2, 0.8, 0],
+        [0.6, -0.8, 1.2, 0.8, 0],
+        [-0.6, -0.8, 1.2, 0.8, 0],
+      ];
+      const SHIP_ROLE_COLOR = [
+        [1.0, 0.95, 0.86], // hull: off-white / gunmetal
+        [1.5, 0.28, 0.14], // spin drive: IR-red
+        [1.3, 1.22, 1.0], // prow: single steady pale-warm light
+        [1.0, 0.95, 0.86], // centrifuge pods
+      ];
+      const SHIP_N = HAIL_MARY_NODES.length;
+      const SHIP_CENTRIFUGE_PERIOD = 4.0; // seconds per revolution
+
+      const shipGeom = new THREE.BufferGeometry();
+      shipGeom.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array(SHIP_N * 3), 3),
+      );
+      shipGeom.setAttribute(
+        "aBright",
+        new THREE.BufferAttribute(new Float32Array(SHIP_N), 1),
+      );
+      shipGeom.setAttribute(
+        "aColor",
+        new THREE.BufferAttribute(new Float32Array(SHIP_N * 3), 3),
+      );
+      {
+        const b = shipGeom.getAttribute("aBright").array;
+        const c = shipGeom.getAttribute("aColor").array;
+        for (let n = 0; n < SHIP_N; n++) {
+          const node = HAIL_MARY_NODES[n];
+          b[n] = node[3];
+          const col = SHIP_ROLE_COLOR[node[4]] || SHIP_ROLE_COLOR[0];
+          c[n * 3 + 0] = col[0];
+          c[n * 3 + 1] = col[1];
+          c[n * 3 + 2] = col[2];
+        }
+      }
+      const shipMat = new THREE.ShaderMaterial({
+        uniforms: {
+          uOpacity: { value: 0.0 },
+          uPointScale: { value: 2.0 },
+          uPointMax: { value: 96.0 * renderer.getPixelRatio() },
+        },
+        vertexShader: /* glsl */ `
+          uniform float uOpacity;
+          uniform float uPointScale;
+          uniform float uPointMax;
+          attribute float aBright;
+          attribute vec3 aColor;
+          varying vec3 vColor;
+          varying float vAlpha;
+          void main() {
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * mv;
+            float sz = uPointScale * (0.55 + aBright * 0.7) * (320.0 / max(-mv.z, 1.0));
+            gl_PointSize = min(sz, uPointMax);
+            vColor = aColor * (0.6 + 0.4 * aBright);
+            vAlpha = uOpacity;
+          }
+        `,
+        fragmentShader: pointFrag, // same sprite as the bodies
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const shipPoints = new THREE.Points(shipGeom, shipMat);
+      shipPoints.frustumCulled = false;
+      shipPoints.visible = false;
+      scene.add(shipPoints);
+
+      const ship = {
+        active: false,
+        parked: false,
+        t: 0,
+        dur: 14,
+        spin: 0, // centrifuge clock (s)
+        phase: 0, // centrifuge phase at spawn (rad)
+        scale: 1.3, // local units → world; ~7 world units long
+        fade: 1.5, // s of fade at each end of a cruise
+        P: [
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+        ],
+        lut: new Float32Array(65), // cumulative arc length at t = k/64
+        upRef: new THREE.Vector3(0, 1, 0),
+        seed: 0,
+      };
+      const _shipPos = new THREE.Vector3();
+      const _shipTan = new THREE.Vector3();
+      const _shipRight = new THREE.Vector3();
+      const _shipUp = new THREE.Vector3();
+      const _shipTmp = new THREE.Vector3();
+      const _shipTmp2 = new THREE.Vector3();
+
+      function shipBezier(out, t) {
+        const [p0, p1, p2, p3] = ship.P;
+        const mt = 1 - t;
+        const a = mt * mt * mt,
+          b = 3 * mt * mt * t,
+          c = 3 * mt * t * t,
+          d = t * t * t;
+        return out.set(
+          a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+          a * p0.y + b * p1.y + c * p2.y + d * p3.y,
+          a * p0.z + b * p1.z + c * p2.z + d * p3.z,
+        );
+      }
+      function shipBezierTangent(out, t) {
+        const [p0, p1, p2, p3] = ship.P;
+        const mt = 1 - t;
+        const a = 3 * mt * mt,
+          b = 6 * mt * t,
+          c = 3 * t * t;
+        return out.set(
+          a * (p1.x - p0.x) + b * (p2.x - p1.x) + c * (p3.x - p2.x),
+          a * (p1.y - p0.y) + b * (p2.y - p1.y) + c * (p3.y - p2.y),
+          a * (p1.z - p0.z) + b * (p2.z - p1.z) + c * (p3.z - p2.z),
+        );
+      }
+      // Constant arc-length parameterisation (§4.2): cumulative length
+      // table, then invert for a fraction of the total.
+      function shipBuildLut() {
+        const lut = ship.lut;
+        lut[0] = 0;
+        shipBezier(_shipTmp, 0);
+        for (let k = 1; k <= 64; k++) {
+          shipBezier(_shipTmp2, k / 64);
+          lut[k] = lut[k - 1] + _shipTmp2.distanceTo(_shipTmp);
+          _shipTmp.copy(_shipTmp2);
+        }
+      }
+      function shipLutT(u) {
+        const lut = ship.lut;
+        const target = clamp(u, 0, 1) * lut[64];
+        let lo = 0,
+          hi = 64;
+        while (hi - lo > 1) {
+          const mid = (lo + hi) >> 1;
+          if (lut[mid] < target) lo = mid;
+          else hi = mid;
+        }
+        const span = lut[hi] - lut[lo];
+        const f = span > 1e-6 ? (target - lut[lo]) / span : 0;
+        return (lo + f) / 64;
+      }
+
+      // Pose the constellation at world position `pos` heading along
+      // unit `fwd`; write all 18 vertices. Up = camera up projected
+      // perpendicular to forward (§4.4) so the centrifuge reads as a
+      // ring from wherever the camera is. Banking is not implemented.
+      function shipWritePose(pos, fwd) {
+        _shipUp.copy(ship.upRef);
+        _shipRight.crossVectors(fwd, _shipUp);
+        if (_shipRight.lengthSq() < 1e-6) {
+          _shipRight.crossVectors(fwd, new THREE.Vector3(1, 0, 0));
+        }
+        _shipRight.normalize();
+        _shipUp.crossVectors(_shipRight, fwd).normalize();
+        const arr = shipGeom.getAttribute("position").array;
+        const ang =
+          ship.phase + (2 * Math.PI * ship.spin) / SHIP_CENTRIFUGE_PERIOD;
+        const ca = Math.cos(ang),
+          sa = Math.sin(ang);
+        const s = ship.scale;
+        for (let n = 0; n < SHIP_N; n++) {
+          const node = HAIL_MARY_NODES[n];
+          let lx = node[0],
+            ly = node[1];
+          const lz = node[2];
+          if (node[4] === 3) {
+            // Centrifuge pods rotate about the local +Z spine.
+            const rx = lx * ca - ly * sa;
+            const ry = lx * sa + ly * ca;
+            lx = rx;
+            ly = ry;
+          }
+          arr[n * 3 + 0] =
+            pos.x + s * (_shipRight.x * lx + _shipUp.x * ly + fwd.x * lz);
+          arr[n * 3 + 1] =
+            pos.y + s * (_shipRight.y * lx + _shipUp.y * ly + fwd.y * lz);
+          arr[n * 3 + 2] =
+            pos.z + s * (_shipRight.z * lx + _shipUp.z * ly + fwd.z * lz);
+        }
+        shipGeom.getAttribute("position").needsUpdate = true;
+      }
+
+      function shipEnd() {
+        if (!ship.active) return;
+        ship.active = false;
+        ship.parked = false;
+        shipPoints.visible = false;
+        shipMat.uniforms.uOpacity.value = 0.0;
+      }
+
+      // Park a rotating ship at `pos` (ship-test legibility check).
+      function shipPark(pos, fwd) {
+        ship.active = true;
+        ship.parked = true;
+        ship.t = 0;
+        ship.spin = 0;
+        ship.phase = 0;
+        ship.P[0].fromArray(pos);
+        ship.P[3].fromArray(fwd);
+        ship.upRef.set(0, 1, 0);
+        shipPoints.visible = true;
+        shipMat.uniforms.uOpacity.value = 1.0;
+      }
+
+      // Spawn a cruise (§4): a Bézier through `through` (world), crossing
+      // the screen plane at an angle to `avoidDir` (the beam axis) so the
+      // ship cuts across the migration instead of riding it. Endpoints
+      // sit outside the frustum; two control points jittered ~10 %.
+      function shipSpawn(through, avoidDir) {
+        camera.updateMatrixWorld();
+        const right = new THREE.Vector3().setFromMatrixColumn(
+          camera.matrixWorld,
+          0,
+        );
+        const up = new THREE.Vector3().setFromMatrixColumn(
+          camera.matrixWorld,
+          1,
+        );
+        const fwdCam = new THREE.Vector3()
+          .setFromMatrixColumn(camera.matrixWorld, 2)
+          .negate();
+        // Frame extent at the crossing point's depth.
+        const depth = Math.max(
+          10,
+          _shipTmp.copy(through).sub(camera.position).dot(fwdCam),
+        );
+        const frameH = 2 * depth * Math.tan((camera.fov * Math.PI) / 360);
+        const frameW = frameH * camera.aspect;
+        // Cruise direction in the screen plane, 40°–140° off screen-right
+        // (either sign), rejecting anything within 35° of the beam axis.
+        let dir = new THREE.Vector3();
+        for (let tries = 0; tries < 8; tries++) {
+          const th =
+            ((40 + 100 * Math.random()) * Math.PI) / 180 +
+            (Math.random() < 0.5 ? Math.PI : 0);
+          dir
+            .copy(right)
+            .multiplyScalar(Math.cos(th))
+            .addScaledVector(up, Math.sin(th))
+            .normalize();
+          if (!avoidDir || Math.abs(dir.dot(avoidDir)) < Math.cos(Math.PI / 5))
+            break;
+        }
+        const L = 0.8 * Math.max(frameW, frameH);
+        ship.P[0].copy(through).addScaledVector(dir, -L);
+        ship.P[3].copy(through).addScaledVector(dir, L);
+        // Slight depth change along the cruise so it isn't perfectly flat.
+        const dz = (Math.random() - 0.5) * 0.3 * L;
+        ship.P[0].addScaledVector(fwdCam, -dz);
+        ship.P[3].addScaledVector(fwdCam, dz);
+        // Control points: thirds of the chord, jittered ±10 % of L
+        // perpendicular to the cruise direction.
+        const perp = new THREE.Vector3().crossVectors(dir, fwdCam).normalize();
+        const j1 = (Math.random() - 0.5) * 0.2 * L;
+        const j2 = (Math.random() - 0.5) * 0.2 * L;
+        ship.P[1]
+          .copy(ship.P[0])
+          .lerp(ship.P[3], 1 / 3)
+          .addScaledVector(perp, j1);
+        ship.P[2]
+          .copy(ship.P[0])
+          .lerp(ship.P[3], 2 / 3)
+          .addScaledVector(perp, j2);
+        shipBuildLut();
+        // Speed: about half a frame width per 5 s (§4.3), 10–20 s total.
+        const len = ship.lut[64];
+        ship.dur = clamp(len / (frameW / 10), 10, 20);
+        ship.t = 0;
+        ship.spin = 0;
+        ship.phase = Math.random() * Math.PI * 2;
+        ship.upRef.copy(up);
+        ship.seed = (Math.random() * 0xffffffff) >>> 0;
+        ship.active = true;
+        ship.parked = false;
+        shipPoints.visible = true;
+        shipMat.uniforms.uOpacity.value = 0.0;
+        shipMat.uniforms.uPointScale.value =
+          pointMat.uniforms.uPointScale.value;
+        shipTick(0);
+      }
+
+      function shipTick(realDt) {
+        if (!ship.active) return;
+        const dt = Math.min(realDt, 0.1);
+        ship.t += dt;
+        ship.spin += dt;
+        if (ship.parked) {
+          _shipTan.copy(ship.P[3]).normalize();
+          shipWritePose(ship.P[0], _shipTan);
+          return;
+        }
+        if (ship.t >= ship.dur) {
+          shipEnd();
+          return;
+        }
+        const bt = shipLutT(ship.t / ship.dur);
+        shipBezier(_shipPos, bt);
+        shipBezierTangent(_shipTan, bt).normalize();
+        shipWritePose(_shipPos, _shipTan);
+        const fin = clamp(ship.t / ship.fade, 0, 1);
+        const fout = clamp((ship.dur - ship.t) / ship.fade, 0, 1);
+        shipMat.uniforms.uOpacity.value = Math.min(fin, fout);
+      }
+
+      // ---- Petrova Line ship scheduler (PETROVA_LINE.md §5.1) ----------
+      // Scene-local, clocked on time-in-scene: hard floor of 4 min plus
+      // an exponential tail with mean 10 min. `?ship=hail-mary` forces a
+      // sighting shortly after scene init; `?rehearse=ships` fires one
+      // every 8 s (note: ?rehearse also puts the director in 10× rehearsal
+      // mode, so pair it with cinematic off for long tuning sessions).
+      function sampleSightingDelay() {
+        return 4 * 60 + -Math.log(1 - Math.random()) * 10 * 60;
+      }
+      function petrovaScheduleReset() {
+        shipEnd();
+        let qs = null;
+        try {
+          qs = new URLSearchParams(location.search);
+        } catch (_) {}
+        petrova.rehearseShips = !!qs && qs.get("rehearse") === "ships";
+        const forced = qs ? qs.get("ship") : null;
+        if (forced) petrova.nextSighting = 2.5;
+        else if (petrova.rehearseShips) petrova.nextSighting = 3.0;
+        else petrova.nextSighting = sampleSightingDelay();
+      }
+      function petrovaShipsTick(dt) {
+        shipTick(dt);
+        if (ship.active) return;
+        if (petrova.clock < petrova.nextSighting) return;
+        // Only while the director dwells (or is off) and no transition
+        // is in flight — otherwise re-check next frame.
+        if (director.enabled && director.state !== "DWELL") return;
+        if (transitionRaf) return;
+        // Cross the beam (§4.1): a point on the reference path between
+        // 30 % and 75 % of the transit.
+        const pts = petrova.path;
+        const through = new THREE.Vector3();
+        let beamDir = null;
+        if (pts && pts.length >= 12) {
+          const n = pts.length / 6;
+          const k = Math.floor(n * (0.3 + 0.45 * Math.random()));
+          through.set(pts[k * 6], pts[k * 6 + 1], pts[k * 6 + 2]);
+          beamDir = new THREE.Vector3(
+            pts[k * 6 + 3],
+            pts[k * 6 + 4],
+            pts[k * 6 + 5],
+          );
+          if (beamDir.lengthSq() > 1e-6) beamDir.normalize();
+          else beamDir = null;
+        }
+        shipSpawn(through, beamDir);
+        petrova.nextSighting =
+          petrova.clock + (petrova.rehearseShips ? 8 : sampleSightingDelay());
+        if (typeof dlog === "function") {
+          dlog("ship", {
+            archetype: "hail-mary",
+            seed: ship.seed,
+            variant: petrova.variant ? petrova.variant.key : null,
+            dur: +ship.dur.toFixed(1),
+          });
+        }
+      }
+
+      // Ship-test scene (PASSING_SHIPS.md §10 step 2): the static Hail
+      // Mary constellation as sim bodies on the left (mass channel, no
+      // gravity: physics.G = 0) and the live animated Points ship parked
+      // on the right with its centrifuge turning. Registered in SCENES
+      // for ?scene=ship-test but deliberately absent from SCENE_ORDER.
       function sceneShipTest() {
         zero();
         let i = 0;
-
-        const SHIP_SCALE = 4.0;
-        // Local coords: ship oriented along +Z forward.
-        // Ring at +Z is the centrifuge, spine along Z, spin drive at -Z.
-        const HAIL_MARY_NODES = [
-          // Nose (control deck) — single bright forward node
-          [0, 0, 2.0, 2.0],
-          // Centrifuge ring — 3 nodes at 120° around +Z, radius 0.7
-          [0.7, 0.0, 1.0, 1.5],
-          [-0.35, 0.606, 1.0, 1.5],
-          [-0.35, -0.606, 1.0, 1.5],
-          // Spine modules
-          [0, 0, 0.4, 1.5], // lab
-          [0, 0, -0.2, 1.5], // dorm
-          [0, 0, -0.8, 1.5], // storage
-          [0, 0, -1.4, 1.5], // junction
-          // Spin drive cluster at -Z (rear) — brighter for engine glow
-          [0, 0, -2.0, 2.5],
-          [0.4, 0, -2.4, 2.0],
-          [-0.4, 0, -2.4, 2.0],
-          [0, 0.4, -2.4, 2.0],
-          [0, -0.4, -2.4, 2.0],
-          [0, 0, -2.8, 2.5],
-          // Antennae / sensors — small forward off-axis nodes
-          [0.6, 0.8, 1.2, 0.8],
-          [-0.6, 0.8, 1.2, 0.8],
-          [0.6, -0.8, 1.2, 0.8],
-          [-0.6, -0.8, 1.2, 0.8],
-        ];
+        const SHIP_SCALE = 1.3;
         for (const [lx, ly, lz, m] of HAIL_MARY_NODES) {
           if (i >= MAX_BODIES) break;
           setBody(
             i++,
-            lx * SHIP_SCALE,
+            -9 + lx * SHIP_SCALE,
             ly * SHIP_SCALE,
             lz * SHIP_SCALE,
             m,
@@ -9559,10 +10999,12 @@
             0.0, // kind 0 — renders like a star
           );
         }
-
         state.count = i;
+        shipPark([9, 0, 0], [0, 0, 1]);
       }
-
+      function shipTestTick(realDt) {
+        shipTick(realDt);
+      }
       function sceneDustStorm() {
         zero();
         // ~8 heavy attractors scattered, ~95% dust
@@ -10576,12 +12018,17 @@
         },
         "petrova-line": {
           name: "Petrova Line",
-          caption: "Astrophage migration · Tau Ceti",
+          // caption / palette / tint / camera / astrophage / petrovaDeco
+          // are rewritten per variant by scenePetrovaLine() at init
+          // (PETROVA_VARIANTS); the values here are the Sol → Venus
+          // defaults so the entry is complete before the first make().
+          caption: "Astrophage migration · Sol → Venus",
           make: scenePetrovaLine,
-          // Camera: 3/4 view framing both the star (origin) and the
-          // off-axis planet (+60 X, +12 Y). Beam runs diagonally with
-          // a curve in the last third where planet gravity dominates.
-          camera: { pos: [30, 40, 95], tgt: [30, 6, 0], fov: 50 },
+          tick: petrovaTick,
+          // Director soft-block (PETROVA_LINE.md §5.3): while a ship is
+          // mid-cruise the director waits before leaving DWELL.
+          holdTransition: () => typeof ship !== "undefined" && ship.active,
+          camera: { pos: [7, 28, 108], tgt: [30, 10, 0], fov: 46 },
           palette: "ember",
           channel: "speed",
           post: {
@@ -10594,24 +12041,136 @@
             trail: 0.985, // long trails so the beam paints continuously
           },
           physics: { G: 1.0, softening: 0.5, dt: 0.008, speed: 1.0 },
-          K: "neutral",
+          K: "petrova", // star/planet anchored, dust orbits the star
           flock: 0.0,
           radiation: 0.0,
           tint: TINT_PETROVA, // kind 7 → red / deep red
           bhHighlight: 0.0,
-          // Astrophage forces — PETROVA_LINE.md §3.1. Planet is
-          // off-axis at (60, 12, 0): star gravity dominates the first
-          // 2/3 of flight (beam mostly straight along +X), then planet
-          // gravity dominates the last 1/3 (beam curves up to the
-          // planet). The curve is not authored — it falls out of the
-          // gravity-vs-thrust crossover.
+          // Beam speeds run 8 (launch) → 22 (arrival); 40 keeps the speed
+          // channel in the red/orange part of the palette instead of
+          // clipping the arrival end to the white top stop.
+          speedMax: 40.0,
+          // No moods: a channel swap to mass/age blacks out a 0.001-mass,
+          // 0-age beam. No KE quiesce gate: the respawn loop is a steady
+          // state by design, its kinetic energy never varies.
+          cinematic: { allowMoods: false, minInterestVar: 0 },
+          // Astrophage forces — PETROVA_LINE.md §3. Filled per variant.
           astrophage: {
             starPos: [0, 0, 0],
             planetPos: [60, 12, 0],
-            starMass: 200.0,
+            starMass: 100.0,
             planetMass: 100.0,
-            thrust: 15.0,
+            thrust: 4.0,
             planetRadius: 4.0,
+            spawnOffset: [0.8, 3.9, 0],
+            spawnRadius: 1.5,
+          },
+          petrovaDeco: null,
+        },
+        // Debug/legibility scene for the Hail Mary constellation
+        // (PASSING_SHIPS.md). ?scene=ship-test only — not in SCENE_ORDER,
+        // so the browser, hotkeys and director never see it.
+        "ship-test": {
+          name: "Ship Test",
+          caption: "Hail Mary · legibility check",
+          make: sceneShipTest,
+          tick: shipTestTick,
+          camera: { pos: [0, 8, 34], tgt: [0, 0, 0], fov: 45 },
+          palette: "bone",
+          channel: "mass",
+          post: {
+            bloom: 0.9,
+            bloomRadius: 0.5,
+            exposure: 1.1,
+            ca: 0.1,
+            vignette: 0.3,
+            grain: 0.03,
+            trail: 0.9,
+          },
+          // G = 0: the static constellation must not collapse on itself.
+          physics: { G: 0.0, softening: 0.5, dt: 0.008, speed: 1.0 },
+          K: "neutral",
+          flock: 0.0,
+          radiation: 0.0,
+          tint: TINT_NEUTRAL,
+          cinematic: {
+            allowAccents: false,
+            allowMoods: false,
+            minInterestVar: 0,
+          },
+        },
+        cartwheel: {
+          name: "Cartwheel",
+          caption: "Ring wave · bullseye",
+          make: sceneCartwheel,
+          // High 3/4 view: the ring plane stays readable while the
+          // intruder's vertical punch is visible against it.
+          camera: { pos: [265, 215, 265], tgt: [0, 0, 0], fov: 48 },
+          palette: "ice",
+          channel: "speed",
+          post: {
+            bloom: 1.25,
+            bloomRadius: 0.6,
+            exposure: 1.15,
+            ca: 0.2,
+            vignette: 0.35,
+            grain: 0.03,
+            trail: 0.3,
+          },
+          // Softening 3.0 protects against nucleus-passage slingshots
+          // (same reasoning as Collision). Must match sceneCartwheel's
+          // SOFT constant — the analytic v_circ bakes it in.
+          physics: { G: 1.0, softening: 3.0, dt: 0.012, speed: 1.0 },
+          K: "neutral",
+          flock: 0.0,
+          radiation: 0.02,
+          tint: TINT_GALAXY, // disc cool (kind 5) vs intruder warm (kind 6)
+          bhHighlight: 0.0,
+          speedMax: 45,
+        },
+        whirlpool: {
+          name: "Whirlpool",
+          caption: "Grand design · tidal duet",
+          make: sceneWhirlpool,
+          // 3/4 view with enough height that the arms read as a spiral
+          // and enough tilt that the companion's out-of-plane approach
+          // has depth. The disc is ~130 across.
+          camera: { pos: [205, 155, 205], tgt: [0, 0, 0], fov: 50 },
+          // Density channel: tidal arms ARE density crests, so the
+          // palette literally traces the spiral as it forms. Aurora
+          // keeps the crests iridescent instead of clipping to white.
+          palette: "aurora",
+          channel: "density",
+          post: {
+            bloom: 1.35,
+            bloomRadius: 0.6,
+            exposure: 1.12,
+            ca: 0.22,
+            vignette: 0.4,
+            grain: 0.035,
+            // Moderate trails: rotation paints arcs along the arms
+            // without smearing the crest structure.
+            trail: 0.55,
+          },
+          // Rotation made visible: approaching side brightens, receding
+          // side dims — subtle, but it makes the disc feel like it spins.
+          doppler: 0.25,
+          // Softening 2.5 (matches sceneWhirlpool's SOFT): protects the
+          // nucleus–companion pericenter from slingshot kicks.
+          physics: { G: 1.0, softening: 2.5, dt: 0.012, speed: 1.0 },
+          K: "neutral",
+          flock: 0.0,
+          // Faint radiation pressure: arm crests breathe outward a touch
+          // — reads as the arms "glowing".
+          radiation: 0.04,
+          tint: TINT_GALAXY, // main disc cool, companion warm
+          bhHighlight: 0.0,
+          speedMax: 50,
+          framing: {
+            rRange: [190, 460],
+            thetaRange: [0.5, 1.15],
+            fovRange: [42, 60],
+            focalBias: "density",
           },
         },
         "dust-storm": {
@@ -11193,25 +12752,34 @@
         params.spin = sc.physics.spin || 0;
         velVar.material.uniforms.uSpin.value = params.spin;
 
-        // Astrophage forces (PETROVA_LINE.md §3.1). Defaults to zeros so
-        // non-petrova scenes leave the kindA==7 shader branch as a no-op
-        // (no kind-7 bodies + zero forces = nothing to integrate).
+        applyAstroUniforms(sc);
+      }
+
+      // Astrophage forces (PETROVA_LINE.md §3.1). Defaults to zeros so
+      // non-petrova scenes leave the kindA==7 shader branch as a no-op
+      // (no kind-7 bodies + zero forces = nothing to integrate). Split
+      // out of applyScenePhysics so the transition path can also apply
+      // it at the body swap — otherwise freshly swapped-in astrophage sit
+      // motionless until the transition's final applyScenePhysics.
+      function applyAstroUniforms(sc) {
         const astro = sc.astrophage || {};
         const sPos = astro.starPos || [0, 0, 0];
         const pPos = astro.planetPos || [0, 0, 0];
-        velVar.material.uniforms.uStarPos.value.set(sPos[0], sPos[1], sPos[2]);
-        velVar.material.uniforms.uPlanetPos.value.set(
-          pPos[0],
-          pPos[1],
-          pPos[2],
-        );
-        velVar.material.uniforms.uStarMass.value = astro.starMass || 0.0;
-        velVar.material.uniforms.uPlanetMass.value = astro.planetMass || 0.0;
-        velVar.material.uniforms.uAstroThrust.value = astro.thrust || 0.0;
+        const sOff = astro.spawnOffset || [0, 0, 0];
+        const u = velVar.material.uniforms;
+        u.uStarPos.value.set(sPos[0], sPos[1], sPos[2]);
+        u.uPlanetPos.value.set(pPos[0], pPos[1], pPos[2]);
+        u.uStarMass.value = astro.starMass || 0.0;
+        u.uPlanetMass.value = astro.planetMass || 0.0;
+        u.uAstroThrust.value = astro.thrust || 0.0;
         // planetRadius = 0 disables the §3.4 respawn lifecycle. Scenes
-        // that want continuous flow set this to ~1.5–3.0.
-        velVar.material.uniforms.uPlanetRadius.value =
-          astro.planetRadius || 0.0;
+        // that want continuous flow set this to ~1.5–4.0.
+        u.uPlanetRadius.value = astro.planetRadius || 0.0;
+        u.uSpawnOffset.value.set(sOff[0], sOff[1], sOff[2]);
+        u.uSpawnRadius.value = astro.spawnRadius || 0.0;
+        // Point sprites fade kind-7 bodies into the planet (pointVert).
+        pointMat.uniforms.uPlanetPos.value.set(pPos[0], pPos[1], pPos[2]);
+        pointMat.uniforms.uPlanetRadius.value = astro.planetRadius || 0.0;
       }
 
       // Mass-weighted barycenter, refreshed on a slow cadence and only
@@ -11297,6 +12865,8 @@
         }
         if (typeof clearTrail === "function") clearTrail();
         if (typeof disposeSolarSystem === "function") disposeSolarSystem();
+        // A passing ship belongs to the scene it was spawned in.
+        if (typeof shipEnd === "function") shipEnd();
 
         // Seed the PRNG before body construction so shared seeds reproduce
         // identical initial bodies. Caller-supplied seed wins; otherwise a
@@ -11329,6 +12899,7 @@
           pointMat.uniforms.uDoppler.value =
             sc.doppler !== undefined ? sc.doppler : 0.0;
           setPhotonRing(sc.photonRing || null);
+          setPetrovaDeco(sc.petrovaDeco || null);
           setLensStatic(sc.lens || null);
           lensPass.uniforms.uStrength.value = lensState.targetStrength;
           params.bloomStrength = sc.post.bloom;
@@ -11394,6 +12965,13 @@
         const endRingCfg = sc.photonRing || null;
         const endRingOpacity = endRingCfg ? (endRingCfg.opacity ?? 1.0) : 0.0;
         let ringSwapped = false;
+        // Petrova decorations follow the ring: fade to 0 before swapT,
+        // swap config at swapT, fade in after.
+        const startDecoLevel =
+          petrovaDecoTarget.star > 0 || petrovaDecoTarget.planet > 0
+            ? 1.0
+            : 0.0;
+        const endDecoCfg = sc.petrovaDeco || null;
         const startLensStrength = lensPass.uniforms.uStrength.value;
         const endLensCfg = sc.lens || null;
         const endLensStrength = endLensCfg ? (endLensCfg.strength ?? 1.0) : 0.0;
@@ -11483,11 +13061,21 @@
             setTimeout(() => flash.classList.remove("active"), flashMs);
             uploadStateToGPU();
             clearTrails();
+            // Astrophage uniforms must land with the bodies, not at the
+            // end of the transition, or a swapped-in beam sits still.
+            applyAstroUniforms(sc);
           }
           if (!ringSwapped && t >= swapT) {
             ringSwapped = true;
             setPhotonRing(endRingCfg);
             ringMat.uniforms.uOpacity.value = 0.0;
+            setPetrovaDeco(endDecoCfg);
+            petrovaDecoLevel(0.0);
+          }
+          if (t < swapT) {
+            petrovaDecoLevel(lerp(startDecoLevel, 0.0, t / swapT));
+          } else {
+            petrovaDecoLevel(clamp((t - swapT) / (1 - swapT), 0, 1));
           }
 
           // Gravitational lens: fade through zero at swapT, then swap static params
@@ -13896,6 +15484,8 @@
           uPlanetMass: velVar.material.uniforms.uPlanetMass.value,
           uAstroThrust: velVar.material.uniforms.uAstroThrust.value,
           uPlanetRadius: velVar.material.uniforms.uPlanetRadius.value,
+          uSpawnOffset: velVar.material.uniforms.uSpawnOffset.value.clone(),
+          uSpawnRadius: velVar.material.uniforms.uSpawnRadius.value,
         };
 
         // Flash to cover the pop.
@@ -13951,7 +15541,10 @@
         // Re-run the current scene so the new buffers are populated, then
         // restore camera framing (the scene's default pose would otherwise
         // yank us around).
-        applyScene(savedSceneKey, { immediate: true });
+        // Same seed → same layout (and, for seeded-variant scenes like
+        // petrova-line, the same variant) at the new body count. Without
+        // it a density change silently re-rolled the whole scene.
+        applyScene(savedSceneKey, { immediate: true, seed: currentSeed() });
         camera.position.fromArray(savedCamPos);
         controls.target.fromArray(savedCamTgt);
         camera.fov = savedCamFov;
@@ -15643,8 +17236,11 @@
           return;
         }
         if (!qs.has("rehearse")) return;
-        director.rehearse = true;
         const fk = qs.get("rehearse");
+        // ?rehearse=ships is the Petrova ship-sighting rehearsal
+        // (petrovaShipsTick), not a director rehearsal — leave pacing alone.
+        if (fk === "ships") return;
+        director.rehearse = true;
         if (fk && FLAVOURS[fk]) director.flavour = fk;
         // Auto-enable the director after the rest of the scene boots.
         setTimeout(() => {
@@ -15703,6 +17299,22 @@
       // Defaults are permissive; scenes can opt out via SCENES[x].cinematic.
       function sceneCineCfg() {
         return (SCENES[currentSceneKey] || {}).cinematic || {};
+      }
+      // Soft-block (PETROVA_LINE.md §5.3): a scene can ask the director
+      // to defer leaving DWELL — the Petrova Line does so while a ship
+      // is mid-cruise. Checked only at the DWELL exit sites; user input
+      // and the transition watchdog are unaffected.
+      function sceneHoldsTransition() {
+        // Token mode: one scene, forever. The director keeps its moves,
+        // moods and pulses but never leaves DWELL.
+        if (TOKEN.active) return true;
+        const sc = SCENES[currentSceneKey];
+        if (!sc || typeof sc.holdTransition !== "function") return false;
+        try {
+          return !!sc.holdTransition();
+        } catch (_) {
+          return false;
+        }
       }
       const easeInOutQuint = (t) =>
         t < 0.5 ? 16 * t * t * t * t * t : 1 - Math.pow(-2 * t + 2, 5) / 2;
@@ -15816,6 +17428,14 @@
           flavour: "pushin",
           durationMul: 1.0,
         },
+        // PETROVA_LINE.md §6.4 — out of the black hole's throat and into
+        // a star system being drained of light; and back out again.
+        "event-horizon→petrova-line": { flavour: "pushin", durationMul: 1.2 },
+        "petrova-line→stephans-quintet": {
+          flavour: "dissolve",
+          durationMul: 1.0,
+        },
+        "petrova-line→event-horizon": { flavour: "pullback", durationMul: 1.5 },
       };
       function pickTransitionFlavour(fromKey, toKey) {
         // Bespoke pair wins outright if the current flavour allows that
@@ -16076,7 +17696,7 @@
               const stddev = Math.sqrt(sq / s.length);
               const cv = mean > 0 ? stddev / mean : 0;
               const thresh = sceneCineCfg().minInterestVar ?? 0.02;
-              if (cv < thresh) {
+              if (cv < thresh && !sceneHoldsTransition()) {
                 console.info(
                   `[director] scene-energy gate fired on ${currentSceneKey}: cv=${cv.toFixed(4)} < ${thresh}; cutting to transition`,
                 );
@@ -16089,7 +17709,10 @@
                 break;
               }
             }
-            if (director.stateTimer >= director.dwellDuration) {
+            if (
+              director.stateTimer >= director.dwellDuration &&
+              !sceneHoldsTransition()
+            ) {
               cineBeginTransition();
             }
             break;
@@ -19151,6 +20774,7 @@
         pointMat.uniforms.uDoppler.value =
           sc.doppler !== undefined ? sc.doppler : 0.0;
         setPhotonRing(sc.photonRing || null);
+        setPetrovaDeco(sc.petrovaDeco || null);
         setLensStatic(sc.lens || null);
         lensPass.uniforms.uStrength.value = lensState.targetStrength;
         currentSceneKey = nextKey;
