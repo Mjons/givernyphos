@@ -24,6 +24,12 @@ If `wgpuFrameStep` dominates, go to Step 2. If `composer.render` dominates, jump
 
 ### Step 2: Add WebGPU timestamp queries (one-time, ~30 lines)
 
+> **DONE (2026-07-01).** `timestamp-query` is requested at device
+> creation, velStep/posStep are wrapped with timestampWrites, and the
+> results land in `wgpuSim.timing` (velMs/posMs per substep, plus
+> readMs for the readback wall time). The debug overlay shows them on
+> a `wgpu` line. The snippet below is kept for reference.
+
 Right now there is **zero GPU-side timing** in the codebase ([index.html:16588-16612](index.html#L16588-L16612) only has a CPU FPS counter). Without timestamps you cannot tell whether `velStep` or `posStep` is the slow shader, or whether the readback is stalling. Add this once:
 
 ```js
@@ -126,7 +132,7 @@ Based on code inspection. Numbers come after Part 1, but priors below:
 ### #5 — Three.js Points draw with WebGPU-sourced DataTextures ([index.html:16640-16641](index.html#L16640-L16641))
 
 **Why suspect:** Medium. The current bridge uploads CPU-mirror DataTextures back to the GPU as Three.js textures every frame — that's a CPU→GPU upload of the same 3.2 MB the readback just brought down. **Round-tripping the same data through CPU.**
-**Fix:** Plumb the WebGPU buffer directly into Three.js as a vertex buffer or shared texture. This is the largest architectural win available; it eliminates suspects #2 and #5 simultaneously. PHASE1_WEBGPU.md probably already plans this — worth checking.
+**Fix:** ~~Plumb the WebGPU buffer directly into Three.js as a vertex buffer or shared texture.~~ **Not implementable** — browsers expose no WebGPU↔WebGL interop; a WebGPU buffer cannot reach the WebGL renderer without the CPU round-trip. The real fixes are (a) shrink the traffic (pos/vel cadence split, shipped 2026-07-01) and (b) render points from the WebGPU side — see [BARNES_HUT_PLAN.md](BARNES_HUT_PLAN.md) §5/M9.
 
 ---
 

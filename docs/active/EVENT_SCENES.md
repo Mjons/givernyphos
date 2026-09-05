@@ -172,65 +172,13 @@ None of these break the init-only contract. They all extend the _vocabulary of i
 
 ---
 
-## Decisions
-
-Three early calls that shape how event scenes integrate with the rest of the engine. None require new engine primitives — each is a tag on the scene metadata plus a small handler somewhere in the director or UI.
-
-### Attribution mode — yes
-
-Each event scene carries an attribution string with more detail than the caption: full event name, date or epoch, specific moment if applicable. On scene-init, a transient overlay surfaces the attribution for ~6–8 seconds, then fades. The caption stays for the duration; the attribution is the one-time-on-arrival weight that says _this is a specific moment, here is its provenance_.
-
-```js
-// addition to scene metadata
-attribution: {
-  text: "Comet Shoemaker-Levy 9, fragment R impact · 21 July 1994 · 07:32 UT",
-  source: null,        // null for real events; book/film/author for fictional
-}
-```
-
-For fictional events, the source field carries the citation:
-
-```js
-attribution: {
-  text: "Petrova Line · astrophage migration · Tau Ceti system",
-  source: "Project Hail Mary, Andy Weir, 2021",
-}
-```
-
-Parity is the right principle. Real and fictional events both get attribution; the difference is what fills the source line. This avoids the awkwardness of "real events deserve more weight" — they don't, the design just acknowledges that fiction is also worth citing.
-
-The overlay sits below the existing caption strip, smaller font, dimmer, fades on a 1.5s ramp after its dwell. ~40 LoC of UI work.
-
-### Filterable in the scene browser — yes
-
-Each event scene tags itself with a `provenance` field:
-
-```js
-provenance: "real" | "fictional";
-```
-
-Non-event scenes (the existing 16 archetypes) leave it unset. The scene browser gains a three-state toggle — `Real / Fictional / Both` — that filters event scenes by provenance. Non-event scenes always show, so the toggle never hides the engine's existing surface.
-
-The same field can drive a director playlist filter: a "Real Events" flavour and a "Fictional Events" flavour, surfacing only the matching subset. ~30 LoC for the browser toggle, ~10 LoC for each new flavour.
-
-### Director treats events differently — yes
-
-Three rules, applied to any scene tagged `composition: "event"`:
-
-1. **Longer dwells.** 1.5× the flavour's baseline dwell, with a floor of 4 minutes. The viewer needs time to read the attribution, settle, and watch the geometry play out.
-2. **Calm follow-on.** The transition out of an event prefers a low-energy scene (`quiet-drift`, `lattice`, `dust`) over another high-energy one. No event-into-collision; no event-into-event. The post-event silence carries weight.
-3. **Anti-repeat between events.** No two event scenes within 30 minutes of each other. They are by definition the engine's most narratively-loaded surface; spacing them out preserves their gravity.
-
-Implementation: existing `recentScenes` window plus a `composition` field check in the next-scene picker. ~25 LoC.
-
-The Andromeda Merger scene already embodies these rules — see [ANDROMEDA_MERGER.md §5](ANDROMEDA_MERGER.md). Once the rules are generalized, every future event scene gets them by tagging itself.
-
----
-
 ## Open questions
 
-- **Where's the line between "event" and "place"?** Sgr A\* is a place (the Event Horizon scene). The kilonova GW170817 is an event. The Petrova Line is somewhere in between (a recurring phenomenon, not a one-off). Worth a taxonomy pass before authoring scenes 3 or 4 — the `provenance` and `composition` tags above carry the system that the taxonomy will eventually formalize, so getting the categories right early is cheap, and getting them wrong is also cheap to migrate. Resolve before the first event scene that _isn't_ clearly one or the other ships.
-- **Consent and tone for tragic events.** Tunguska, K-Pg impact, Tycho's supernova — these were either devastating or witnessed by humans as omens. The engine's "indifferent universe" tone may not be the right register for _every_ real event. Pick events that read as awe, not mourning. **TBD.** The candidates currently on the [shortlist](#shortlist-if-we-pick-this-up) (Andromeda, Voyager, Crab, Petrova) all lean toward awe; revisit before adding any event from the "wrong side."
+- **Do real events need an attribution mode?** A subtle UI surface that names the event ("Comet Shoemaker-Levy 9, fragment R impact, 21 July 1994 07:32 UT") on first display. Caption fills part of this, but real events deserve more weight than fictional ones — or maybe they don't, and parity is the point.
+- **Should events be filterable?** A toggle in the scene browser: _"Real / Fictional / Both."_ Quick win if event scenes become a coherent set.
+- **Does the director treat them differently?** Probably yes — events should command longer dwells (the viewer needs to read the caption, register the moment), and the post-event silence should be longer than for an ambient scene.
+- **Where's the line between "event" and "place"?** Sgr A\* is a place (the Event Horizon scene). The kilonova GW170817 is an event. The Petrova Line is somewhere in between (a recurring phenomenon, not a one-off). Worth a taxonomy pass before authoring more than 2–3.
+- **Consent and tone for tragic events.** Tunguska, K-Pg impact, Tycho's supernova — these were either devastating or witnessed by humans as omens. The engine's "indifferent universe" tone may not be the right register for _every_ real event. Pick events that read as awe, not mourning.
 
 ---
 

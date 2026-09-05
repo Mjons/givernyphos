@@ -1584,6 +1584,13 @@
         pipelines: null, // { vel, pos }
         buffers: null, // { posA, posB, velA, velB, params, staging: [a, b] }
         capacity: 0, // body count the buffers are sized for
+        // GPU-side timing (timestamp-query feature). velMs/posMs are the
+        // last sampled per-substep compute-pass times; readMs is the wall
+        // time of the last readback (submit → mapAsync resolved). NaN
+        // until first sample or when the feature is unavailable.
+        hasTimestamps: false,
+        tsQuery: null, // { set, resolve, read, busy, tick }
+        timing: { velMs: NaN, posMs: NaN, readMs: NaN, buildMs: NaN },
         // Step 6 ping-pong: 0 means posA/velA hold current state and we
         // write into posB/velB; 1 swaps them. Flipped after each wgpuStep.
         which: 0,
@@ -2151,7 +2158,9 @@
           // Dead bodies preserve velA unchanged — matches the GLSL
           // early-return at index.html:1666 so age doesn't tick on
           // empty texels and we don't drift away from the WebGL2 path.
-          if (alive) {
+          if (isAstro) {
+            outVel[i] = astroOut;
+          } else if (alive) {
             outVel[i] = vec4<f32>(newVel, kindFloat + newAge);
           } else if (i < p.N) {
             outVel[i] = velA;
@@ -2165,16 +2174,1538 @@
         @group(0) @binding(1) var<storage, read>       velocities: array<vec4<f32>>;
         @group(0) @binding(2) var<storage, read_write> outPos:     array<vec4<f32>>;
         @group(0) @binding(3) var<storage, read>       p:          SimParams;
-
+        ` +
+        WGSL_HASH22 +
+        WGSL_ASTRO_FNS +
+        /* wgsl */ `
         @compute @workgroup_size(256)
         fn posStep(@builtin(global_invocation_id) gid: vec3<u32>) {
           let i = gid.x;
           if (i >= p.N) { return; }
           let pos = positions[i];
           let vel = velocities[i];
-          outPos[i] = vec4<f32>(pos.xyz + vel.xyz * p.dt * p.sign, pos.w);
+          // Astrophage respawn (PETROVA_LINE.md §3.4) — mirror of the
+          // GLSL positionShader block: an arrived kind-7 body snaps to a
+          // fresh launch-cap point. The velocity kernel tests the same
+          // OLD position and writes the matching launch velocity.
+          let kindF = floor(vel.w + 0.001);
+          let planetPos = vec3<f32>(p.planetX, p.planetY, p.planetZ);
+          if (kindF > 6.5 && p.planetRadius > 0.0
+              && length(pos.xyz - planetPos) < p.planetRadius) {
+            outPos[i] = vec4<f32>(astroSpawnPoint(astroUv(i), p.frame), pos.w);
+          } else {
+            outPos[i] = vec4<f32>(pos.xyz + vel.xyz * p.dt * p.sign, pos.w);
+          }
         }
       `;
+
+      // ===============================================================
+      // 1c. BARNES-HUT LBVH PIPELINE  (BARNES_HUT_PLAN.md, M1–M5)
+      // ===============================================================
+      // O(N log N) gravity replacing the O(N²) tile loop, behind ?bh=1
+      // (or __bhToggle(true)). Per substep:
+      //   prep → AABB reduce → Morton keys → radix sort → Karras LBVH
+      //   per kind segment → leaf init → ropes → bottom-up aggregate →
+      //   convergence check → force walk (θ-MAC, stackless via ropes).
+      //
+      // The K interaction matrix stays EXACT via per-kind segmented
+      // trees (plan §1d): the sort key is [kind:3 | morton:27], so each
+      // kind's bodies are a contiguous run of the sorted array with its
+      // own LBVH; a body walks ≤8 trees, each scaled by K[kindA][b].
+      // Dead bodies get key 0xFFFFFFFF and sort past every segment.
+      //
+      // Aggregation runs as BH_AGG_ITERS ping-pong dispatches (a node
+      // computes once both children finished a PRIOR dispatch) instead
+      // of the classic single-pass atomic-counter trick — WGSL atomics
+      // are relaxed, so cross-workgroup data visibility inside one
+      // dispatch is not guaranteed; dispatch boundaries are. 56 covers
+      // the worst radix-tree depth (30 key bits + index tie-break).
+      // Verify gates: __bhTree() (M1–M4), __bhCompare() (M5/M6),
+      // __bhBench() (perf). See docs/active/BH_TESTING.md.
+      const BH_AGG_ITERS = 56;
+      const bhSim = {
+        wanted: false,
+        theta: 0.5, // MAC opening angle; force reads theta² from SimParams
+        // Aggregate wavefront dispatches per substep. Must exceed the
+        // deepest tree (≈ 27 Morton-chain levels + log2(largest kind
+        // segment) for the index-tiebreak subtrees). __bhTree() reports
+        // the measured depth; lower this from the console to shave
+        // build time once you know your scenes' worst case.
+        aggIters: BH_AGG_ITERS,
+        failed: null, // string reason once init fails; latches off
+        pipelines: null,
+        initPromise: null,
+        buffers: null,
+        groups: null,
+        capacity: 0,
+        epoch: -1, // wgpuSim.epoch the bind groups were built against
+      };
+      try {
+        const _u = new URL(location.href);
+        const _bh = (_u.searchParams.get("bh") || "").toLowerCase();
+        if (_bh === "1" || _bh === "true" || _bh === "on") bhSim.wanted = true;
+        const _th = parseFloat(_u.searchParams.get("theta"));
+        if (isFinite(_th) && _th >= 0.1 && _th <= 2.0) bhSim.theta = _th;
+      } catch (_) {}
+
+      const BH_WGSL_COMMON = /* wgsl */ `
+        const BH_INVALID: u32 = 0xffffffffu;
+      `;
+
+      // -- prep: zero flags, reset topology + control words ----------
+      const BH_WGSL_PREP =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read_write> flagsA: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> flagsB: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> topo: array<vec4<u32>>;
+        @group(0) @binding(3) var<storage, read_write> ctl: array<u32>;
+        @group(0) @binding(4) var<storage, read> p: SimParams;
+        @compute @workgroup_size(256)
+        fn bhPrep(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let n = gid.x;
+          if (n < 32u) { ctl[n] = 0u; }
+          if (n >= 2u * p.N) { return; }
+          flagsA[n] = 0u;
+          flagsB[n] = 0u;
+          topo[n] = vec4<u32>(BH_INVALID);
+        }
+      `;
+
+      // -- AABB reduce, two levels (no float atomics in WGSL) --------
+      const BH_WGSL_AABB_A =
+        WGSL_SIM_PARAMS +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read_write> partials: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read> p: SimParams;
+        var<workgroup> smn: array<vec3<f32>, 256>;
+        var<workgroup> smx: array<vec3<f32>, 256>;
+        @compute @workgroup_size(256)
+        fn bhAabbA(
+          @builtin(global_invocation_id) gid: vec3<u32>,
+          @builtin(local_invocation_id) lid: vec3<u32>,
+          @builtin(workgroup_id) wid: vec3<u32>,
+        ) {
+          var mn = vec3<f32>(1e30);
+          var mx = vec3<f32>(-1e30);
+          let i = gid.x;
+          if (i < p.N) {
+            let pw = positions[i];
+            if (pw.w > 0.0) { mn = pw.xyz; mx = pw.xyz; }
+          }
+          smn[lid.x] = mn;
+          smx[lid.x] = mx;
+          workgroupBarrier();
+          for (var ofs: u32 = 128u; ofs > 0u; ofs = ofs >> 1u) {
+            if (lid.x < ofs) {
+              smn[lid.x] = min(smn[lid.x], smn[lid.x + ofs]);
+              smx[lid.x] = max(smx[lid.x], smx[lid.x + ofs]);
+            }
+            workgroupBarrier();
+          }
+          if (lid.x == 0u) {
+            partials[2u * wid.x] = vec4<f32>(smn[0], 0.0);
+            partials[2u * wid.x + 1u] = vec4<f32>(smx[0], 0.0);
+          }
+        }
+      `;
+      const BH_WGSL_AABB_B = /* wgsl */ `
+        struct RadixPass { shift: u32, numBlocks: u32, spanLen: u32, total: u32 }
+        @group(0) @binding(0) var<storage, read> partials: array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read_write> aabbBox: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read> pp: RadixPass;
+        var<workgroup> smn: array<vec3<f32>, 256>;
+        var<workgroup> smx: array<vec3<f32>, 256>;
+        @compute @workgroup_size(256)
+        fn bhAabbB(@builtin(local_invocation_id) lid: vec3<u32>) {
+          var mn = vec3<f32>(1e30);
+          var mx = vec3<f32>(-1e30);
+          var j = lid.x;
+          loop {
+            if (j >= pp.numBlocks) { break; }
+            mn = min(mn, partials[2u * j].xyz);
+            mx = max(mx, partials[2u * j + 1u].xyz);
+            j = j + 256u;
+          }
+          smn[lid.x] = mn;
+          smx[lid.x] = mx;
+          workgroupBarrier();
+          for (var ofs: u32 = 128u; ofs > 0u; ofs = ofs >> 1u) {
+            if (lid.x < ofs) {
+              smn[lid.x] = min(smn[lid.x], smn[lid.x + ofs]);
+              smx[lid.x] = max(smx[lid.x], smx[lid.x + ofs]);
+            }
+            workgroupBarrier();
+          }
+          if (lid.x == 0u) {
+            // Tiny pad so max-corner bodies don't quantize to 512.
+            let pad = (smx[0] - smn[0]) * 0.001 + vec3<f32>(1e-4);
+            aabbBox[0] = vec4<f32>(smn[0] - pad, 0.0);
+            aabbBox[1] = vec4<f32>(smx[0] + pad, 0.0);
+          }
+        }
+      `;
+
+      // -- Morton keys: [kind:3 | morton9x9x9:27], dead = all-ones ---
+      const BH_WGSL_MORTON =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read> velocities: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read_write> keysOut: array<u32>;
+        @group(0) @binding(3) var<storage, read_write> idxOut: array<u32>;
+        @group(0) @binding(4) var<storage, read> aabbBox: array<vec4<f32>>;
+        @group(0) @binding(5) var<storage, read_write> ctlA: array<atomic<u32>>;
+        @group(0) @binding(6) var<storage, read> p: SimParams;
+        fn bhExpand(v0: u32) -> u32 {
+          var v = v0 & 0x3ffu;
+          v = (v | (v << 16u)) & 0x030000FFu;
+          v = (v | (v << 8u)) & 0x0300F00Fu;
+          v = (v | (v << 4u)) & 0x030C30C3u;
+          v = (v | (v << 2u)) & 0x09249249u;
+          return v;
+        }
+        @compute @workgroup_size(256)
+        fn bhMorton(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x;
+          if (i >= p.N) { return; }
+          let pos = positions[i];
+          var key = BH_INVALID;
+          if (pos.w > 0.0) {
+            let kind = u32(clamp(i32(floor(velocities[i].w + 0.001)), 0, 7));
+            atomicAdd(&ctlA[kind], 1u);
+            let mn = aabbBox[0].xyz;
+            let span = max(aabbBox[1].xyz - mn, vec3<f32>(1e-5));
+            let q = clamp(
+              (pos.xyz - mn) / span * 511.0,
+              vec3<f32>(0.0),
+              vec3<f32>(511.0),
+            );
+            let qi = vec3<u32>(q);
+            key = (kind << 27u) |
+              (bhExpand(qi.x) << 2u) | (bhExpand(qi.y) << 1u) | bhExpand(qi.z);
+          }
+          keysOut[i] = key;
+          idxOut[i] = i;
+        }
+      `;
+
+      // -- segment setup: prefix alive counts → starts + roots -------
+      const BH_WGSL_SEGSETUP =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read_write> ctl: array<u32>;
+        @group(0) @binding(1) var<storage, read> p: SimParams;
+        @compute @workgroup_size(1)
+        fn bhSegSetup() {
+          var off: u32 = 0u;
+          for (var k: u32 = 0u; k < 8u; k = k + 1u) {
+            let c = ctl[k];
+            ctl[8u + k] = off;
+            if (c == 0u) {
+              ctl[16u + k] = BH_INVALID;
+            } else if (c == 1u) {
+              ctl[16u + k] = off; // singleton segment: root IS the leaf
+            } else {
+              ctl[16u + k] = p.N + off; // internal node 0 of the segment
+            }
+            off = off + c;
+          }
+          ctl[24] = off; // totalAlive
+        }
+      `;
+
+      // -- radix sort: histogram / 3-stage scan / stable scatter -----
+      // LSD, 4-bit digits × 8 passes over the full 32-bit key. Stable,
+      // so kind-major order falls straight out of the key layout.
+      const BH_WGSL_HIST =
+        WGSL_SIM_PARAMS +
+        /* wgsl */ `
+        struct RadixPass { shift: u32, numBlocks: u32, spanLen: u32, total: u32 }
+        @group(0) @binding(0) var<storage, read> keysIn: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> hist: array<u32>;
+        @group(0) @binding(2) var<storage, read> pp: RadixPass;
+        @group(0) @binding(3) var<storage, read> p: SimParams;
+        var<workgroup> wh: array<atomic<u32>, 16>;
+        @compute @workgroup_size(256)
+        fn bhHist(
+          @builtin(global_invocation_id) gid: vec3<u32>,
+          @builtin(local_invocation_id) lid: vec3<u32>,
+          @builtin(workgroup_id) wid: vec3<u32>,
+        ) {
+          if (lid.x < 16u) { atomicStore(&wh[lid.x], 0u); }
+          workgroupBarrier();
+          if (gid.x < p.N) {
+            let d = (keysIn[gid.x] >> pp.shift) & 15u;
+            atomicAdd(&wh[d], 1u);
+          }
+          workgroupBarrier();
+          if (lid.x < 16u) {
+            hist[lid.x * pp.numBlocks + wid.x] = atomicLoad(&wh[lid.x]);
+          }
+        }
+      `;
+      // Scan of hist (digit-major) in three barrier-free-loop stages:
+      // per-thread span sums → 256-wide exclusive scan → span replay.
+      // Single-dispatch exclusive scan of hist (digit-major). One
+      // workgroup: serial span sums (no barriers in the data-dependent
+      // loops) → fixed-256 Hillis-Steele (constant bounds, barriers
+      // legal) → serial replay. Was three dispatches; fusing them cut
+      // 16 dispatches per substep off the sort (bench 2026-07-01
+      // showed dispatch overhead dominating at 65k).
+      const BH_WGSL_SCAN = /* wgsl */ `
+        struct RadixPass { shift: u32, numBlocks: u32, spanLen: u32, total: u32 }
+        @group(0) @binding(0) var<storage, read_write> hist: array<u32>;
+        @group(0) @binding(1) var<storage, read> pp: RadixPass;
+        var<workgroup> tmp: array<u32, 256>;
+        @compute @workgroup_size(256)
+        fn bhScan(@builtin(local_invocation_id) lid: vec3<u32>) {
+          let j0 = lid.x * pp.spanLen;
+          var sum: u32 = 0u;
+          var j: u32 = 0u;
+          loop {
+            if (j >= pp.spanLen) { break; }
+            let g = j0 + j;
+            if (g < pp.total) { sum = sum + hist[g]; }
+            j = j + 1u;
+          }
+          let orig = sum;
+          tmp[lid.x] = sum;
+          workgroupBarrier();
+          for (var ofs: u32 = 1u; ofs < 256u; ofs = ofs << 1u) {
+            var v = tmp[lid.x];
+            if (lid.x >= ofs) { v = v + tmp[lid.x - ofs]; }
+            workgroupBarrier();
+            tmp[lid.x] = v;
+            workgroupBarrier();
+          }
+          var run = tmp[lid.x] - orig; // exclusive base for my span
+          j = 0u;
+          loop {
+            if (j >= pp.spanLen) { break; }
+            let g = j0 + j;
+            if (g < pp.total) {
+              let h = hist[g];
+              hist[g] = run;
+              run = run + h;
+            }
+            j = j + 1u;
+          }
+        }
+      `;
+      const BH_WGSL_SCATTER =
+        WGSL_SIM_PARAMS +
+        /* wgsl */ `
+        struct RadixPass { shift: u32, numBlocks: u32, spanLen: u32, total: u32 }
+        @group(0) @binding(0) var<storage, read> keysIn: array<u32>;
+        @group(0) @binding(1) var<storage, read> idxIn: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> keysOut: array<u32>;
+        @group(0) @binding(3) var<storage, read_write> idxOut: array<u32>;
+        @group(0) @binding(4) var<storage, read> hist: array<u32>;
+        @group(0) @binding(5) var<storage, read> pp: RadixPass;
+        @group(0) @binding(6) var<storage, read> p: SimParams;
+        var<workgroup> sdig: array<u32, 256>;
+        @compute @workgroup_size(256)
+        fn bhScatter(
+          @builtin(global_invocation_id) gid: vec3<u32>,
+          @builtin(local_invocation_id) lid: vec3<u32>,
+          @builtin(workgroup_id) wid: vec3<u32>,
+        ) {
+          let g = gid.x;
+          var dig: u32 = 0xffu;
+          var key: u32 = 0u;
+          var pay: u32 = 0u;
+          if (g < p.N) {
+            key = keysIn[g];
+            pay = idxIn[g];
+            dig = (key >> pp.shift) & 15u;
+          }
+          sdig[lid.x] = dig;
+          workgroupBarrier();
+          if (g < p.N) {
+            // Stable rank of this element among same-digit lanes before
+            // it in the block. O(256) per thread; correctness-first.
+            var rank: u32 = 0u;
+            for (var j: u32 = 0u; j < 256u; j = j + 1u) {
+              if (j >= lid.x) { break; }
+              if (sdig[j] == dig) { rank = rank + 1u; }
+            }
+            let dst = hist[dig * pp.numBlocks + wid.x] + rank;
+            keysOut[dst] = key;
+            idxOut[dst] = pay;
+          }
+        }
+      `;
+
+      // -- Karras 2012 binary radix tree, per kind segment -----------
+      const BH_WGSL_BUILD =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read> keys: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> topo: array<vec4<u32>>;
+        @group(0) @binding(2) var<storage, read> ctlR: array<u32>;
+        @group(0) @binding(3) var<storage, read> p: SimParams;
+        // Common-prefix length between sorted slots i and j of segment
+        // [s, s+M). Equal keys tie-break on global slot index, which
+        // makes conceptual keys unique (Karras §4).
+        fn bhDelta(s: u32, M: u32, i: i32, j: i32) -> i32 {
+          if (j < 0 || j >= i32(M)) { return -1; }
+          let gi = s + u32(i);
+          let gj = s + u32(j);
+          let ka = keys[gi];
+          let kb = keys[gj];
+          if (ka == kb) { return 32 + i32(countLeadingZeros(gi ^ gj)); }
+          return i32(countLeadingZeros(ka ^ kb));
+        }
+        @compute @workgroup_size(256)
+        fn bhBuild(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let jGlobal = gid.x;
+          if (jGlobal >= ctlR[24]) { return; }
+          // Locate this slot's kind segment.
+          var seg: u32 = 0u;
+          var s: u32 = 0u;
+          var M: u32 = 0u;
+          for (var k: u32 = 0u; k < 8u; k = k + 1u) {
+            let st = ctlR[8u + k];
+            let c = ctlR[k];
+            if (jGlobal >= st && jGlobal < st + c) { seg = k; s = st; M = c; }
+          }
+          let i = i32(jGlobal - s);
+          if (M < 2u || i >= i32(M) - 1) { return; } // M-1 internal nodes
+          var d: i32 = 1;
+          if (bhDelta(s, M, i, i - 1) > bhDelta(s, M, i, i + 1)) { d = -1; }
+          let dmin = bhDelta(s, M, i, i - d);
+          var lmax: i32 = 2;
+          loop {
+            if (bhDelta(s, M, i, i + lmax * d) <= dmin) { break; }
+            lmax = lmax << 1;
+          }
+          var l: i32 = 0;
+          var t: i32 = lmax >> 1;
+          loop {
+            if (t < 1) { break; }
+            if (bhDelta(s, M, i, i + (l + t) * d) > dmin) { l = l + t; }
+            t = t >> 1;
+          }
+          let j = i + l * d;
+          let dnode = bhDelta(s, M, i, j);
+          var spl: i32 = 0;
+          var t2: i32 = l;
+          loop {
+            t2 = (t2 + 1) / 2;
+            if (bhDelta(s, M, i, i + (spl + t2) * d) > dnode) {
+              spl = spl + t2;
+            }
+            if (t2 <= 1) { break; }
+          }
+          var gamma: i32 = i + spl * d;
+          if (d < 0) { gamma = gamma - 1; }
+          let iMin = min(i, j);
+          let iMax = max(i, j);
+          var leftId: u32;
+          var rightId: u32;
+          if (iMin == gamma) {
+            leftId = s + u32(gamma); // leaf
+          } else {
+            leftId = p.N + s + u32(gamma); // internal
+          }
+          if (iMax == gamma + 1) {
+            rightId = s + u32(gamma + 1);
+          } else {
+            rightId = p.N + s + u32(gamma + 1);
+          }
+          let nodeId = p.N + s + u32(i);
+          topo[nodeId].x = leftId;
+          topo[nodeId].y = rightId;
+          topo[leftId].z = nodeId;
+          topo[rightId].z = nodeId;
+          if (i == 0) { topo[nodeId].z = BH_INVALID; } // segment root
+        }
+      `;
+
+      // -- leaves: COM/mass/AABB from sorted bodies, mark done -------
+      const BH_WGSL_LEAFINIT =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read> idxSorted: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> comMass: array<vec4<f32>>;
+        @group(0) @binding(3) var<storage, read_write> aabbN: array<vec4<f32>>;
+        @group(0) @binding(4) var<storage, read_write> ext2: array<f32>;
+        @group(0) @binding(5) var<storage, read_write> flagsA: array<u32>;
+        // NB: no SimParams binding — the guard uses ctl's totalAlive.
+        // With layout:"auto", a declared-but-unused binding would be
+        // dropped from the layout and the bind group would fail.
+        @group(0) @binding(6) var<storage, read> ctlR: array<u32>;
+        @group(0) @binding(7) var<storage, read_write> flagsB: array<u32>;
+        @compute @workgroup_size(256)
+        fn bhLeafInit(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let j = gid.x;
+          if (j >= ctlR[24]) { return; }
+          let b = idxSorted[j];
+          let pw = positions[b];
+          comMass[j] = vec4<f32>(pw.xyz, max(pw.w, 0.0));
+          aabbN[2u * j] = vec4<f32>(pw.xyz, 0.0);
+          aabbN[2u * j + 1u] = vec4<f32>(pw.xyz, 0.0);
+          ext2[j] = 0.0;
+          // Leaves are done in BOTH ping-pong arrays so the aggregate
+          // dispatches can cover internal nodes only (half the threads).
+          flagsA[j] = 1u;
+          flagsB[j] = 1u;
+        }
+      `;
+
+      // -- ropes: skip pointer = right sibling of nearest left-child
+      //    ancestor. Preorder traversal needs no stack with these. ----
+      const BH_WGSL_ROPES =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read_write> topo: array<vec4<u32>>;
+        @group(0) @binding(1) var<storage, read> ctlR: array<u32>;
+        @group(0) @binding(2) var<storage, read> p: SimParams;
+        @compute @workgroup_size(256)
+        fn bhRopes(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let n = gid.x;
+          if (n >= 2u * p.N) { return; }
+          var inUse = false;
+          if (n < p.N) {
+            inUse = n < ctlR[24];
+          } else {
+            inUse = topo[n].x != BH_INVALID;
+          }
+          if (!inUse) { return; } // prep left rope = INVALID
+          var q = n;
+          var rope = BH_INVALID;
+          var guard: u32 = 0u;
+          loop {
+            if (guard >= 64u) { break; }
+            guard = guard + 1u;
+            let par = topo[q].z;
+            if (par == BH_INVALID) { break; }
+            if (topo[par].x == q) {
+              rope = topo[par].y;
+              break;
+            }
+            q = par;
+          }
+          topo[n].w = rope;
+        }
+      `;
+
+      // -- bottom-up aggregate, one wavefront per dispatch -----------
+      const BH_WGSL_AGG =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read> topo: array<vec4<u32>>;
+        @group(0) @binding(1) var<storage, read_write> comMass: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read_write> aabbN: array<vec4<f32>>;
+        @group(0) @binding(3) var<storage, read_write> ext2: array<f32>;
+        @group(0) @binding(4) var<storage, read> flagsIn: array<u32>;
+        @group(0) @binding(5) var<storage, read_write> flagsOut: array<u32>;
+        @group(0) @binding(6) var<storage, read> p: SimParams;
+        @compute @workgroup_size(256)
+        fn bhAggregate(@builtin(global_invocation_id) gid: vec3<u32>) {
+          // Internal nodes only — leaves are pre-marked done in BOTH
+          // flag arrays by bhLeafInit, so they never need copying.
+          let t = gid.x;
+          if (t >= p.N) { return; }
+          let n = p.N + t;
+          let left = topo[n].x;
+          if (left == BH_INVALID) { // unused internal slot
+            flagsOut[n] = 0u;
+            return;
+          }
+          if (flagsIn[n] == 1u) {
+            flagsOut[n] = 1u;
+            return;
+          }
+          let right = topo[n].y;
+          if (flagsIn[left] == 1u && flagsIn[right] == 1u) {
+            let cmL = comMass[left];
+            let cmR = comMass[right];
+            let m = cmL.w + cmR.w;
+            var com = vec3<f32>(0.0);
+            if (m > 0.0) { com = (cmL.xyz * cmL.w + cmR.xyz * cmR.w) / m; }
+            comMass[n] = vec4<f32>(com, m);
+            let mn = min(aabbN[2u * left].xyz, aabbN[2u * right].xyz);
+            let mx = max(aabbN[2u * left + 1u].xyz, aabbN[2u * right + 1u].xyz);
+            aabbN[2u * n] = vec4<f32>(mn, 0.0);
+            aabbN[2u * n + 1u] = vec4<f32>(mx, 0.0);
+            let e = mx - mn;
+            let s = max(e.x, max(e.y, e.z));
+            ext2[n] = s * s;
+            flagsOut[n] = 1u;
+          } else {
+            flagsOut[n] = 0u;
+          }
+        }
+      `;
+      const BH_WGSL_CHECK =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        @group(0) @binding(0) var<storage, read> topo: array<vec4<u32>>;
+        @group(0) @binding(1) var<storage, read> flagsA: array<u32>;
+        @group(0) @binding(2) var<storage, read_write> ctlA: array<atomic<u32>>;
+        @group(0) @binding(3) var<storage, read> p: SimParams;
+        @compute @workgroup_size(256)
+        fn bhCheck(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let t = gid.x;
+          if (t >= p.N) { return; }
+          let node = p.N + t;
+          if (topo[node].x == BH_INVALID) { return; }
+          if (flagsA[node] == 0u) { atomicAdd(&ctlA[25], 1u); }
+        }
+      `;
+
+      // -- force: brute velStep with the tile loop swapped for
+      //    per-segment stackless θ-MAC walks ---------------------------
+      const BH_WGSL_FORCE =
+        WGSL_SIM_PARAMS +
+        BH_WGSL_COMMON +
+        /* wgsl */ `
+        const NUM_KINDS: u32 = 8u;
+        @group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read> velocities: array<vec4<f32>>;
+        @group(0) @binding(2) var<storage, read_write> outVel: array<vec4<f32>>;
+        @group(0) @binding(3) var<storage, read> p: SimParams;
+        @group(0) @binding(4) var<storage, read> comMass: array<vec4<f32>>;
+        @group(0) @binding(5) var<storage, read> ext2: array<f32>;
+        @group(0) @binding(6) var<storage, read> topo: array<vec4<u32>>;
+        @group(0) @binding(7) var<storage, read> ctlR: array<u32>;
+        fn hash22(p2: vec2<f32>, seed: f32) -> vec2<f32> {
+          var p3 = fract(vec3<f32>(p2.x, p2.y, p2.x) * vec3<f32>(0.1031, 0.1030, 0.0973) + seed * 0.173);
+          p3 = p3 + dot(p3, p3.yzx + 19.19);
+          return fract((p3.xx + p3.yz) * p3.zy);
+        }
+        ${WGSL_ASTRO_FNS}
+        @compute @workgroup_size(256)
+        fn bhForce(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x;
+          if (i >= p.N) { return; }
+          let alive = positions[i].w > 0.0;
+          let posA = positions[i];
+          let velA = velocities[i];
+          let pA = posA.xyz;
+          let kindFloat = floor(velA.w + 0.001);
+          let ageNorm = velA.w - kindFloat;
+          let kindA = clamp(i32(kindFloat), 0, i32(NUM_KINDS) - 1);
+          var kRow: array<f32, NUM_KINDS>;
+          for (var k: u32 = 0u; k < NUM_KINDS; k = k + 1u) {
+            kRow[k] = p.K[u32(kindA) * NUM_KINDS + k];
+          }
+          let G = p.G;
+          let eps2 = p.eps2;
+
+          // Astrophage (kind 7) — PETROVA_LINE.md §3.1, same force law as
+          // the brute kernel's kind-7 branch (star + planet gravity +
+          // thrust with ASTRO_STEER steering; no tree walk, flocking,
+          // spin or hand). This kernel has no barriers, so early return.
+          if (alive && kindA == 7) {
+            let starPos   = vec3<f32>(p.starX, p.starY, p.starZ);
+            let planetPos = vec3<f32>(p.planetX, p.planetY, p.planetZ);
+            let uvA = astroUv(i);
+            if (p.planetRadius > 0.0 && length(pA - planetPos) < p.planetRadius) {
+              let sp = astroSpawnPoint(uvA, p.frame);
+              outVel[i] = vec4<f32>(astroLaunchVel(sp, uvA, p.frame), kindFloat);
+              return;
+            }
+            let toStar   = starPos - pA;
+            let toPlanet = planetPos - pA;
+            let r2s = dot(toStar, toStar) + eps2;
+            let r2p = dot(toPlanet, toPlanet) + eps2;
+            let fStar   = G * p.starMass   * toStar   * inverseSqrt(r2s * r2s * r2s);
+            let fPlanet = G * p.planetMass * toPlanet * inverseSqrt(r2p * r2p * r2p);
+            let distP = max(length(toPlanet), 0.001);
+            let dirP  = toPlanet / distP;
+            let vA    = velA.xyz;
+            let vPerp = vA - dot(vA, dirP) * dirP;
+            let fThrust = dirP * p.astroThrust
+                        - vPerp * (${ASTRO_STEER.toFixed(3)} * p.sign);
+            let nv = vA + (fStar + fPlanet + fThrust) * p.dt * p.sign;
+            let dAgeA = p.dt * abs(p.sign) / p.maxAge;
+            outVel[i] = vec4<f32>(nv, kindFloat + clamp(ageNorm + dAgeA, 0.0, 0.9999));
+            return;
+          }
+
+          var acc = vec3<f32>(0.0);
+          if (alive) {
+            let th2 = p.theta2;
+            let cap = 4u * p.N + 64u;
+            for (var b: u32 = 0u; b < NUM_KINDS; b = b + 1u) {
+              let kw = kRow[b];
+              let root = ctlR[16u + b];
+              if (kw == 0.0 || root == BH_INVALID) { continue; }
+              var node = root;
+              var segAcc = vec3<f32>(0.0);
+              var guard: u32 = 0u;
+              loop {
+                if (node == BH_INVALID || guard >= cap) { break; }
+                guard = guard + 1u;
+                let cm = comMass[node];
+                let dvec = cm.xyz - pA;
+                let d2 = dot(dvec, dvec);
+                var take = node < p.N; // leaf: direct softened pair
+                if (!take) {
+                  take = ext2[node] < th2 * d2; // θ-MAC on tight AABB
+                }
+                if (take) {
+                  let r2 = d2 + eps2;
+                  let invR3 = inverseSqrt(r2 * r2 * r2);
+                  segAcc = segAcc + cm.w * dvec * invR3;
+                  node = topo[node].w; // rope
+                } else {
+                  node = topo[node].x; // descend left
+                }
+              }
+              acc = acc + G * kw * segAcc;
+            }
+          }
+
+          // ── stochastic neighborhood (flocking + radiation) — same
+          // block as the brute kernel, verbatim. ──
+          if (alive && (p.flock > 0.001 || p.radiation > 0.001)) {
+            let xSelf = i % p.texSize;
+            let ySelf = i / p.texSize;
+            let uvSelf = (vec2<f32>(f32(xSelf), f32(ySelf)) + 0.5) / f32(p.texSize);
+            var alignV = vec3<f32>(0.0);
+            var cohC = vec3<f32>(0.0);
+            var sepF = vec3<f32>(0.0);
+            var brightDir = vec3<f32>(0.0);
+            var wSum: f32 = 0.0;
+            for (var s: u32 = 0u; s < 8u; s = s + 1u) {
+              let rnd = hash22(uvSelf * 47.0 + f32(s) * 11.3, p.frame * 0.001 + 0.7);
+              let rx = u32(floor(rnd.x * f32(p.texSize)));
+              let ry = u32(floor(rnd.y * f32(p.texSize)));
+              let cx = min(rx, p.texSize - 1u);
+              let cy = min(ry, p.texSize - 1u);
+              let randIdx = cy * p.texSize + cx;
+              let posS = positions[randIdx];
+              if (posS.w <= 0.0) { continue; }
+              let velS = velocities[randIdx];
+              let dS = posS.xyz - pA;
+              let rS = length(dS) + 0.001;
+              let w = 1.0 / (1.0 + rS * 0.02);
+              alignV = alignV + velS.xyz * w;
+              cohC = cohC + posS.xyz * w;
+              sepF = sepF - dS / (rS * rS * rS + 0.001);
+              let b2 = length(velS.xyz) * posS.w * w;
+              brightDir = brightDir + (dS / rS) * b2;
+              wSum = wSum + w;
+            }
+            if (wSum > 0.001) {
+              alignV = alignV / wSum;
+              cohC = cohC / wSum;
+              var flockK: f32 = 0.0;
+              if (kindA == 3) {
+                flockK = 1.0;
+              } else if (kindA == 0 || kindA == 5 || kindA == 6) {
+                flockK = 0.12;
+              }
+              let fA = (alignV - velA.xyz) * 0.22;
+              let fC = (cohC - pA) * 0.004;
+              let fS = sepF * 0.04;
+              acc = acc + (fA + fC + fS) * p.flock * flockK;
+              if (p.radiation > 0.001) {
+                brightDir = brightDir / wSum;
+                acc = acc - brightDir * p.radiation * 0.00004;
+              }
+            }
+          }
+
+          if (alive && p.spin != 0.0) {
+            let r = pA - vec3<f32>(p.comX, p.comY, p.comZ);
+            acc = acc + cross(vec3<f32>(0.0, p.spin, 0.0), r);
+          }
+
+          if (alive && (p.handStrength > 0.0 || p.handPull > 0.0)) {
+            let handPos = vec3<f32>(p.handX, p.handY, p.handZ);
+            let toHand = pA - handPos;
+            let r2h = dot(toHand, toHand);
+            let sigma2 = max(p.handRadius * p.handRadius, 1e-3);
+            let w = exp(-r2h / sigma2);
+            acc = acc + p.handStrength * w * vec3<f32>(p.handVx, p.handVy, p.handVz);
+            acc = acc - p.handPull * w * toHand;
+          }
+
+          let newVel = velA.xyz + acc * p.dt * p.sign;
+          let dAge = p.dt * abs(p.sign) / p.maxAge;
+          let newAge = clamp(ageNorm + dAge, 0.0, 0.9999);
+          if (alive) {
+            outVel[i] = vec4<f32>(newVel, kindFloat + newAge);
+          } else {
+            outVel[i] = velA;
+          }
+        }
+      `;
+
+      // ----- JS orchestration ---------------------------------------
+      async function bhInitPipelines() {
+        if (bhSim.pipelines || bhSim.failed) return;
+        if (bhSim.initPromise) return bhSim.initPromise;
+        bhSim.initPromise = (async () => {
+          const device = wgpuSim.device;
+          try {
+            const mk = (code, entry) =>
+              device.createComputePipelineAsync({
+                layout: "auto",
+                compute: {
+                  module: device.createShaderModule({
+                    code,
+                    label: "bh:" + entry,
+                  }),
+                  entryPoint: entry,
+                },
+              });
+            const [
+              prep,
+              aabbA,
+              aabbB,
+              morton,
+              segsetup,
+              hist,
+              scan,
+              scatter,
+              build,
+              leafInit,
+              ropes,
+              agg,
+              check,
+              force,
+            ] = await Promise.all([
+              mk(BH_WGSL_PREP, "bhPrep"),
+              mk(BH_WGSL_AABB_A, "bhAabbA"),
+              mk(BH_WGSL_AABB_B, "bhAabbB"),
+              mk(BH_WGSL_MORTON, "bhMorton"),
+              mk(BH_WGSL_SEGSETUP, "bhSegSetup"),
+              mk(BH_WGSL_HIST, "bhHist"),
+              mk(BH_WGSL_SCAN, "bhScan"),
+              mk(BH_WGSL_SCATTER, "bhScatter"),
+              mk(BH_WGSL_BUILD, "bhBuild"),
+              mk(BH_WGSL_LEAFINIT, "bhLeafInit"),
+              mk(BH_WGSL_ROPES, "bhRopes"),
+              mk(BH_WGSL_AGG, "bhAggregate"),
+              mk(BH_WGSL_CHECK, "bhCheck"),
+              mk(BH_WGSL_FORCE, "bhForce"),
+            ]);
+            bhSim.pipelines = {
+              prep,
+              aabbA,
+              aabbB,
+              morton,
+              segsetup,
+              hist,
+              scan,
+              scatter,
+              build,
+              leafInit,
+              ropes,
+              agg,
+              check,
+              force,
+            };
+            console.info("[bh] pipelines compiled");
+          } catch (e) {
+            bhSim.failed = "pipeline compile: " + ((e && e.message) || e);
+            console.warn("[bh]", bhSim.failed);
+          }
+        })();
+        return bhSim.initPromise;
+      }
+
+      function bhAllocateBuffers(N) {
+        const device = wgpuSim.device;
+        if (bhSim.buffers) {
+          for (const k of Object.keys(bhSim.buffers)) {
+            const b = bhSim.buffers[k];
+            if (Array.isArray(b)) for (const x of b) x && x.destroy();
+            else if (b) b.destroy();
+          }
+        }
+        const numBlocks = Math.ceil(N / 256);
+        const total = 16 * numBlocks;
+        const spanLen = Math.ceil(total / 256);
+        const S = GPUBufferUsage.STORAGE;
+        const SC = S | GPUBufferUsage.COPY_SRC;
+        const mkBuf = (size, usage) =>
+          device.createBuffer({ size: Math.max(size, 16), usage });
+        const pp = [];
+        for (let p8 = 0; p8 < 8; p8++) {
+          const b = mkBuf(16, S | GPUBufferUsage.COPY_DST);
+          device.queue.writeBuffer(
+            b,
+            0,
+            new Uint32Array([p8 * 4, numBlocks, spanLen, total]),
+          );
+          pp.push(b);
+        }
+        bhSim.buffers = {
+          keysA: mkBuf(N * 4, SC),
+          keysB: mkBuf(N * 4, SC),
+          idxA: mkBuf(N * 4, SC),
+          idxB: mkBuf(N * 4, SC),
+          hist: mkBuf(total * 4, S),
+          partials: mkBuf(numBlocks * 2 * 16, S),
+          aabbBox: mkBuf(2 * 16, SC),
+          topo: mkBuf(2 * N * 16, SC),
+          comMass: mkBuf(2 * N * 16, SC),
+          aabbN: mkBuf(4 * N * 16, S),
+          ext2: mkBuf(2 * N * 4, SC),
+          flagsA: mkBuf(2 * N * 4, SC),
+          flagsB: mkBuf(2 * N * 4, S),
+          ctl: mkBuf(128, SC),
+          pp,
+        };
+        bhSim.capacity = N;
+        bhBuildBindGroups();
+        const mb = (
+          (N * (4 * 4 + 16 * 2 + 16 * 2 + 64 + 8 + 8)) /
+          1048576
+        ).toFixed(1);
+        console.info(`[bh] buffers allocated for N=${N} (~${mb} MB)`);
+      }
+
+      function bhBuildBindGroups() {
+        const device = wgpuSim.device;
+        const P = bhSim.pipelines;
+        const B = bhSim.buffers;
+        const W = wgpuSim.buffers;
+        const g = (pipe, bufs) =>
+          device.createBindGroup({
+            layout: pipe.getBindGroupLayout(0),
+            entries: bufs.map((buf, i) => ({
+              binding: i,
+              resource: { buffer: buf },
+            })),
+          });
+        // Radix ping-pong: even pass reads A writes B, odd reads B writes A.
+        const keysIn = (p8) => (p8 % 2 === 0 ? B.keysA : B.keysB);
+        const keysOut = (p8) => (p8 % 2 === 0 ? B.keysB : B.keysA);
+        const idxIn = (p8) => (p8 % 2 === 0 ? B.idxA : B.idxB);
+        const idxOut = (p8) => (p8 % 2 === 0 ? B.idxB : B.idxA);
+        bhSim.groups = {
+          prep: g(P.prep, [B.flagsA, B.flagsB, B.topo, B.ctl, W.params]),
+          aabbA: [
+            g(P.aabbA, [W.posA, B.partials, W.params]),
+            g(P.aabbA, [W.posB, B.partials, W.params]),
+          ],
+          aabbB: g(P.aabbB, [B.partials, B.aabbBox, B.pp[0]]),
+          morton: [
+            g(P.morton, [
+              W.posA,
+              W.velA,
+              B.keysA,
+              B.idxA,
+              B.aabbBox,
+              B.ctl,
+              W.params,
+            ]),
+            g(P.morton, [
+              W.posB,
+              W.velB,
+              B.keysA,
+              B.idxA,
+              B.aabbBox,
+              B.ctl,
+              W.params,
+            ]),
+          ],
+          segsetup: g(P.segsetup, [B.ctl, W.params]),
+          hist: Array.from({ length: 8 }, (_, p8) =>
+            g(P.hist, [keysIn(p8), B.hist, B.pp[p8], W.params]),
+          ),
+          scan: g(P.scan, [B.hist, B.pp[0]]),
+          scatter: Array.from({ length: 8 }, (_, p8) =>
+            g(P.scatter, [
+              keysIn(p8),
+              idxIn(p8),
+              keysOut(p8),
+              idxOut(p8),
+              B.hist,
+              B.pp[p8],
+              W.params,
+            ]),
+          ),
+          build: g(P.build, [B.keysA, B.topo, B.ctl, W.params]),
+          leafInit: [
+            g(P.leafInit, [
+              W.posA,
+              B.idxA,
+              B.comMass,
+              B.aabbN,
+              B.ext2,
+              B.flagsA,
+              B.ctl,
+              B.flagsB,
+            ]),
+            g(P.leafInit, [
+              W.posB,
+              B.idxA,
+              B.comMass,
+              B.aabbN,
+              B.ext2,
+              B.flagsA,
+              B.ctl,
+              B.flagsB,
+            ]),
+          ],
+          ropes: g(P.ropes, [B.topo, B.ctl, W.params]),
+          aggAB: g(P.agg, [
+            B.topo,
+            B.comMass,
+            B.aabbN,
+            B.ext2,
+            B.flagsA,
+            B.flagsB,
+            W.params,
+          ]),
+          aggBA: g(P.agg, [
+            B.topo,
+            B.comMass,
+            B.aabbN,
+            B.ext2,
+            B.flagsB,
+            B.flagsA,
+            W.params,
+          ]),
+          check: g(P.check, [B.topo, B.flagsA, B.ctl, W.params]),
+          force: [
+            g(P.force, [
+              W.posA,
+              W.velA,
+              W.velB,
+              W.params,
+              B.comMass,
+              B.ext2,
+              B.topo,
+              B.ctl,
+            ]),
+            g(P.force, [
+              W.posB,
+              W.velB,
+              W.velA,
+              W.params,
+              B.comMass,
+              B.ext2,
+              B.topo,
+              B.ctl,
+            ]),
+          ],
+        };
+        bhSim.epoch = wgpuSim.epoch | 0;
+      }
+
+      // Encode the full tree build into an existing command encoder.
+      // ts (optional) = wgpuSim.tsQuery when this substep is sampled:
+      // slot 4 = build begin (prep pass), slot 5 = build end (check).
+      function bhEncodeBuild(enc, which, ts) {
+        const P = bhSim.pipelines;
+        const Gp = bhSim.groups;
+        const N = bhSim.capacity;
+        const nb = Math.ceil(N / 256);
+        const n2 = Math.ceil((2 * N) / 256);
+        const pass = (pipe, group, wgs, desc) => {
+          const cp = enc.beginComputePass(desc || {});
+          cp.setPipeline(pipe);
+          cp.setBindGroup(0, group);
+          cp.dispatchWorkgroups(wgs);
+          cp.end();
+        };
+        pass(
+          P.prep,
+          Gp.prep,
+          n2,
+          ts
+            ? {
+                timestampWrites: {
+                  querySet: ts.set,
+                  beginningOfPassWriteIndex: 4,
+                },
+              }
+            : {},
+        );
+        pass(P.aabbA, Gp.aabbA[which], nb);
+        pass(P.aabbB, Gp.aabbB, 1);
+        pass(P.morton, Gp.morton[which], nb);
+        pass(P.segsetup, Gp.segsetup, 1);
+        for (let p8 = 0; p8 < 8; p8++) {
+          pass(P.hist, Gp.hist[p8], nb);
+          pass(P.scan, Gp.scan, 1);
+          pass(P.scatter, Gp.scatter[p8], nb);
+        }
+        pass(P.build, Gp.build, nb);
+        pass(P.leafInit, Gp.leafInit[which], nb);
+        pass(P.ropes, Gp.ropes, n2);
+        // Even iteration count keeps the final flags in flagsA (check
+        // and the next frame's leafInit both assume that parity).
+        // Tunable at runtime: bhSim.aggIters — must exceed the deepest
+        // tree; __bhTree() reports the measured depth per scene.
+        let iters = Math.max(8, bhSim.aggIters | 0);
+        if (iters % 2 === 1) iters++;
+        for (let t = 0; t < iters; t++) {
+          pass(P.agg, t % 2 === 0 ? Gp.aggAB : Gp.aggBA, nb);
+        }
+        pass(
+          P.check,
+          Gp.check,
+          nb,
+          ts
+            ? { timestampWrites: { querySet: ts.set, endOfPassWriteIndex: 5 } }
+            : {},
+        );
+      }
+
+      // True when BH can run THIS substep; kicks async init otherwise.
+      function bhReadyForStep() {
+        if (!wgpuSim.available || !wgpuSim.buffers || bhSim.failed)
+          return false;
+        if (!bhSim.pipelines) {
+          bhInitPipelines();
+          return false;
+        }
+        if (
+          bhSim.capacity !== wgpuSim.capacity ||
+          (bhSim.epoch | 0) !== (wgpuSim.epoch | 0)
+        ) {
+          bhAllocateBuffers(wgpuSim.capacity);
+        }
+        return !!bhSim.buffers;
+      }
+
+      async function bhEnsureReady() {
+        if (!wgpuSim.available || !wgpuSim.buffers) return false;
+        if (!bhSim.pipelines && !bhSim.failed) await bhInitPipelines();
+        if (bhSim.failed) return false;
+        if (
+          bhSim.capacity !== wgpuSim.capacity ||
+          (bhSim.epoch | 0) !== (wgpuSim.epoch | 0)
+        ) {
+          bhAllocateBuffers(wgpuSim.capacity);
+        }
+        return !!bhSim.buffers;
+      }
+
+      // ----- verify harness (BH_TESTING.md) -------------------------
+      async function bhReadback(list) {
+        // list: [buffer, bytes][] → one staging buffer, one map.
+        const device = wgpuSim.device;
+        const totalBytes = list.reduce((a, x) => a + x[1], 0);
+        const stage = device.createBuffer({
+          size: totalBytes,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        const enc = device.createCommandEncoder();
+        let off = 0;
+        for (const [buf, bytes] of list) {
+          enc.copyBufferToBuffer(buf, 0, stage, off, bytes);
+          off += bytes;
+        }
+        device.queue.submit([enc.finish()]);
+        await stage.mapAsync(GPUMapMode.READ);
+        const ab = stage.getMappedRange().slice(0);
+        stage.unmap();
+        stage.destroy();
+        return ab;
+      }
+
+      // M1–M4 gate: build a tree from the live state and structurally
+      // validate it on the CPU. Run at ≤99k for speed (works anywhere).
+      async function bhVerifyTree() {
+        if (!(await bhEnsureReady())) {
+          console.warn("[bh] tree verify: not ready", bhSim.failed || "");
+          return null;
+        }
+        if (!wgpuSim.active) wgpuUploadState();
+        if (!writeWgpuParams()) return null;
+        const device = wgpuSim.device;
+        const N = bhSim.capacity;
+        if (N > 262144) {
+          console.warn(
+            "[bh] tree verify at N=" + N + " — readback is large; prefer ≤99k",
+          );
+        }
+        const which = wgpuSim.which | 0;
+        const B = bhSim.buffers;
+        const W = wgpuSim.buffers;
+        const posBuf = which === 0 ? W.posA : W.posB;
+        const velBuf = which === 0 ? W.velA : W.velB;
+        const enc = device.createCommandEncoder();
+        bhEncodeBuild(enc, which, null);
+        device.queue.submit([enc.finish()]);
+        const ab = await bhReadback([
+          [posBuf, N * 16],
+          [velBuf, N * 16],
+          [B.keysA, N * 4],
+          [B.idxA, N * 4],
+          [B.topo, 2 * N * 16],
+          [B.comMass, 2 * N * 16],
+          [B.ext2, 2 * N * 4],
+          [B.ctl, 128],
+        ]);
+        let off = 0;
+        const take = (Ctor, count) => {
+          const v = new Ctor(ab, off, count);
+          off += count * Ctor.BYTES_PER_ELEMENT;
+          return v;
+        };
+        const pos = take(Float32Array, N * 4);
+        const vel = take(Float32Array, N * 4);
+        const keys = take(Uint32Array, N);
+        const idx = take(Uint32Array, N);
+        const topo = take(Uint32Array, 2 * N * 4);
+        const com = take(Float32Array, 2 * N * 4);
+        take(Float32Array, 2 * N); // ext2 — presence only
+        const ctl = take(Uint32Array, 32);
+        const INV = 0xffffffff;
+        const errs = [];
+        // (a) alive counts per kind
+        const jsCount = new Array(8).fill(0);
+        const jsMass = new Array(8).fill(0);
+        const jsCom = Array.from({ length: 8 }, () => [0, 0, 0]);
+        for (let i = 0; i < N; i++) {
+          const m = pos[i * 4 + 3];
+          if (m <= 0) continue;
+          const k = Math.min(
+            7,
+            Math.max(0, Math.floor(vel[i * 4 + 3] + 0.001)),
+          );
+          jsCount[k]++;
+          jsMass[k] += m;
+          jsCom[k][0] += pos[i * 4] * m;
+          jsCom[k][1] += pos[i * 4 + 1] * m;
+          jsCom[k][2] += pos[i * 4 + 2] * m;
+        }
+        for (let k = 0; k < 8; k++) {
+          if (ctl[k] !== jsCount[k]) {
+            errs.push(`aliveCount[${k}]=${ctl[k]} js=${jsCount[k]}`);
+          }
+        }
+        const totalAlive = ctl[24];
+        if (totalAlive !== jsCount.reduce((a, b) => a + b, 0)) {
+          errs.push(
+            `totalAlive=${totalAlive} js=${jsCount.reduce((a, b) => a + b, 0)}`,
+          );
+        }
+        // (b) sorted keys, kind-contiguous
+        for (let j = 1; j < totalAlive; j++) {
+          if (keys[j] < keys[j - 1]) {
+            errs.push(`keys unsorted at ${j}`);
+            break;
+          }
+        }
+        for (let j = 0; j < totalAlive; j++) {
+          const kindBits = keys[j] >>> 27;
+          const b = idx[j];
+          const kJs = Math.min(
+            7,
+            Math.max(0, Math.floor(vel[b * 4 + 3] + 0.001)),
+          );
+          if (kindBits !== kJs) {
+            errs.push(
+              `key kind bits ${kindBits} != body kind ${kJs} at slot ${j}`,
+            );
+            break;
+          }
+        }
+        // (c) not-converged counter
+        if (ctl[25] !== 0) errs.push(`aggregate notConverged=${ctl[25]}`);
+        // (d) per-segment structure: stack walk + rope walk + mass/COM
+        const visited = new Uint8Array(2 * N);
+        let maxDepth = 0;
+        const segs = [];
+        for (let k = 0; k < 8; k++) {
+          const M = ctl[k];
+          const s = ctl[8 + k];
+          const root = ctl[16 + k];
+          segs.push({ kind: k, count: M, start: s, root });
+          if (M === 0) {
+            if (root !== INV) errs.push(`empty seg ${k} has root`);
+            continue;
+          }
+          // stack walk over left/right; depth tracked because the
+          // aggregate wavefront count (bhSim.aggIters) must exceed the
+          // deepest tree — maxDepth in the report is the tuning input.
+          let leaves = 0;
+          let pops = 0;
+          const stack = [root];
+          const dstack = [0];
+          while (stack.length && pops < 4 * N + 64) {
+            const n = stack.pop();
+            const dep = dstack.pop();
+            pops++;
+            if (n === INV || n >= 2 * N) {
+              errs.push(`seg ${k}: bad node ${n}`);
+              break;
+            }
+            if (visited[n]) {
+              errs.push(`seg ${k}: node ${n} visited twice`);
+              break;
+            }
+            visited[n] = 1;
+            if (dep > maxDepth) maxDepth = dep;
+            if (n < N) {
+              leaves++;
+              if (n < s || n >= s + M) {
+                errs.push(`seg ${k}: leaf ${n} outside [${s},${s + M})`);
+                break;
+              }
+            } else {
+              stack.push(topo[n * 4], topo[n * 4 + 1]);
+              dstack.push(dep + 1, dep + 1);
+            }
+          }
+          if (leaves !== M)
+            errs.push(`seg ${k}: stack walk saw ${leaves}/${M} leaves`);
+          // rope walk (the force kernel's traversal, always descending)
+          let ropeLeaves = 0;
+          let node = root;
+          let guard = 0;
+          while (node !== INV && guard < 4 * N + 64) {
+            guard++;
+            if (node < N) {
+              ropeLeaves++;
+              node = topo[node * 4 + 3];
+            } else {
+              node = topo[node * 4];
+            }
+          }
+          if (ropeLeaves !== M)
+            errs.push(`seg ${k}: rope walk saw ${ropeLeaves}/${M} leaves`);
+          // root mass + COM vs JS
+          const rm = com[root * 4 + 3];
+          if (
+            Math.abs(rm - jsMass[k]) >
+            Math.max(1e-4 * Math.abs(jsMass[k]), 1e-4)
+          ) {
+            errs.push(`seg ${k}: root mass ${rm} js ${jsMass[k]}`);
+          }
+          if (jsMass[k] > 0) {
+            for (let c = 0; c < 3; c++) {
+              const want = jsCom[k][c] / jsMass[k];
+              const got = com[root * 4 + c];
+              if (
+                Math.abs(got - want) > Math.max(1e-3 * Math.abs(want), 1e-2)
+              ) {
+                errs.push(
+                  `seg ${k}: root COM[${c}] ${got.toFixed(4)} js ${want.toFixed(4)}`,
+                );
+                break;
+              }
+            }
+          }
+        }
+        const pass = errs.length === 0;
+        console[pass ? "info" : "warn"](
+          `[bh] tree verify (${pass ? "OK" : "FAIL"}): N=${N} alive=${totalAlive} ` +
+            `maxDepth=${maxDepth} (aggIters=${bhSim.aggIters}) segs=` +
+            segs
+              .filter((x) => x.count > 0)
+              .map((x) => `${x.kind}:${x.count}`)
+              .join(" "),
+          pass ? "" : errs.slice(0, 12),
+        );
+        if (pass && maxDepth + 6 < bhSim.aggIters) {
+          console.info(
+            `[bh] depth headroom: this scene converges in ~${maxDepth} wavefronts; ` +
+              `try bhSim.aggIters = ${maxDepth + 6} (then re-run __bhTree to confirm notConverged=0)`,
+          );
+        }
+        return { pass, errs, segs, totalAlive, N, maxDepth };
+      }
+
+      // M5/M6 gate: identical input → BH accel vs brute accel.
+      // RMS relative error < 1% at θ=0.5 is the ship gate.
+      async function bhVerifyForce() {
+        if (!(await bhEnsureReady())) {
+          console.warn("[bh] force verify: not ready", bhSim.failed || "");
+          return null;
+        }
+        if (!wgpuSim.active) wgpuUploadState();
+        if (!writeWgpuParams()) return null;
+        const device = wgpuSim.device;
+        const N = bhSim.capacity;
+        const bytes = N * 16;
+        const which = wgpuSim.which | 0;
+        const B = bhSim.buffers;
+        const W = wgpuSim.buffers;
+        const posBuf = which === 0 ? W.posA : W.posB;
+        const velBuf = which === 0 ? W.velA : W.velB;
+        const outBrute = device.createBuffer({
+          size: bytes,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        const outBH = device.createBuffer({
+          size: bytes,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        const bruteGroup = device.createBindGroup({
+          layout: wgpuSim.bindLayout,
+          entries: [
+            { binding: 0, resource: { buffer: posBuf } },
+            { binding: 1, resource: { buffer: velBuf } },
+            { binding: 2, resource: { buffer: outBrute } },
+            { binding: 3, resource: { buffer: W.params } },
+          ],
+        });
+        const bhGroup = device.createBindGroup({
+          layout: bhSim.pipelines.force.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: posBuf } },
+            { binding: 1, resource: { buffer: velBuf } },
+            { binding: 2, resource: { buffer: outBH } },
+            { binding: 3, resource: { buffer: W.params } },
+            { binding: 4, resource: { buffer: B.comMass } },
+            { binding: 5, resource: { buffer: B.ext2 } },
+            { binding: 6, resource: { buffer: B.topo } },
+            { binding: 7, resource: { buffer: B.ctl } },
+          ],
+        });
+        const nb = Math.ceil(N / 256);
+        const enc = device.createCommandEncoder();
+        bhEncodeBuild(enc, which, null);
+        let cp = enc.beginComputePass();
+        cp.setPipeline(bhSim.pipelines.force);
+        cp.setBindGroup(0, bhGroup);
+        cp.dispatchWorkgroups(nb);
+        cp.end();
+        cp = enc.beginComputePass();
+        cp.setPipeline(wgpuSim.pipelines.vel);
+        cp.setBindGroup(0, bruteGroup);
+        cp.dispatchWorkgroups(nb);
+        cp.end();
+        device.queue.submit([enc.finish()]);
+        const ab = await bhReadback([
+          [posBuf, bytes],
+          [velBuf, bytes],
+          [outBrute, bytes],
+          [outBH, bytes],
+        ]);
+        outBrute.destroy();
+        outBH.destroy();
+        const pos = new Float32Array(ab, 0, N * 4);
+        const vin = new Float32Array(ab, bytes, N * 4);
+        const vbr = new Float32Array(ab, bytes * 2, N * 4);
+        const vbh = new Float32Array(ab, bytes * 3, N * 4);
+        let refSum = 0;
+        let alive = 0;
+        for (let i = 0; i < N; i++) {
+          if (pos[i * 4 + 3] <= 0) continue;
+          const dx = vbr[i * 4] - vin[i * 4];
+          const dy = vbr[i * 4 + 1] - vin[i * 4 + 1];
+          const dz = vbr[i * 4 + 2] - vin[i * 4 + 2];
+          refSum += Math.sqrt(dx * dx + dy * dy + dz * dz);
+          alive++;
+        }
+        const refMean = alive ? refSum / alive : 0;
+        const rel = new Float32Array(alive);
+        let ri = 0;
+        let sumSq = 0;
+        let maxRel = 0;
+        for (let i = 0; i < N; i++) {
+          if (pos[i * 4 + 3] <= 0) continue;
+          const bx = vbr[i * 4] - vin[i * 4];
+          const by = vbr[i * 4 + 1] - vin[i * 4 + 1];
+          const bz = vbr[i * 4 + 2] - vin[i * 4 + 2];
+          const hx = vbh[i * 4] - vin[i * 4];
+          const hy = vbh[i * 4 + 1] - vin[i * 4 + 1];
+          const hz = vbh[i * 4 + 2] - vin[i * 4 + 2];
+          const dref = Math.sqrt(bx * bx + by * by + bz * bz);
+          const derr = Math.sqrt(
+            (hx - bx) * (hx - bx) +
+              (hy - by) * (hy - by) +
+              (hz - bz) * (hz - bz),
+          );
+          const r = derr / (dref + 1e-3 * refMean + 1e-12);
+          rel[ri++] = r;
+          sumSq += r * r;
+          if (r > maxRel) maxRel = r;
+        }
+        rel.sort();
+        const rms = alive ? Math.sqrt(sumSq / alive) : 0;
+        const p99 = alive
+          ? rel[Math.min(alive - 1, Math.floor(alive * 0.99))]
+          : 0;
+        const pass = rms < 0.01 && p99 < 0.05;
+        console[pass ? "info" : "warn"](
+          `[bh] force verify (${pass ? "OK" : "FAIL"}): θ=${bhSim.theta} N=${N} alive=${alive} ` +
+            `rmsRel=${(rms * 100).toFixed(3)}% p99=${(p99 * 100).toFixed(2)}% max=${(maxRel * 100).toFixed(2)}%`,
+        );
+        return { pass, rms, p99, maxRel, alive, theta: bhSim.theta };
+      }
+
+      // Wall-clock per-substep cost, brute vs BH, on the live state.
+      // NOTE: advances the sim by 2n substeps (it is a live painting).
+      async function bhBench(n) {
+        const steps = Math.max(10, n | 0 || 60);
+        if (!(await bhEnsureReady())) {
+          console.warn("[bh] bench: not ready", bhSim.failed || "");
+          return null;
+        }
+        if (!wgpuSim.active) {
+          console.warn("[bh] bench: activate the WebGPU backend first");
+          return null;
+        }
+        const device = wgpuSim.device;
+        const run = async (mode) => {
+          await device.queue.onSubmittedWorkDone();
+          const t0 = performance.now();
+          for (let k = 0; k < steps; k++) wgpuStep(mode);
+          await device.queue.onSubmittedWorkDone();
+          return (performance.now() - t0) / steps;
+        };
+        const bruteMs = await run("brute");
+        const bhMs = await run("bh");
+        console.info(
+          `[bh] bench N=${bhSim.capacity}: brute=${bruteMs.toFixed(2)}ms/substep ` +
+            `bh=${bhMs.toFixed(2)}ms/substep (${(bruteMs / bhMs).toFixed(2)}×)`,
+        );
+        return { bruteMs, bhMs, speedup: bruteMs / bhMs, steps };
+      }
+
+      if (typeof window !== "undefined") {
+        window.__bhTree = () =>
+          bhVerifyTree().catch((e) => {
+            console.warn("[bh] tree verify threw:", e);
+            return null;
+          });
+        window.__bhCompare = () =>
+          bhVerifyForce().catch((e) => {
+            console.warn("[bh] force verify threw:", e);
+            return null;
+          });
+        window.__bhBench = (n) =>
+          bhBench(n).catch((e) => {
+            console.warn("[bh] bench threw:", e);
+            return null;
+          });
+        window.__bhToggle = (on) => {
+          bhSim.wanted = on !== false;
+          if (bhSim.wanted) bhEnsureReady();
+          if (typeof showToast === "function") {
+            showToast(
+              "Barnes-Hut",
+              bhSim.wanted ? `on θ=${bhSim.theta}` : "off",
+            );
+          }
+          return bhSim.wanted;
+        };
+        window.__bhStatus = () => ({
+          wanted: bhSim.wanted,
+          ready: !!(bhSim.pipelines && bhSim.buffers && !bhSim.failed),
+          failed: bhSim.failed,
+          theta: bhSim.theta,
+          capacity: bhSim.capacity,
+          timing: { ...wgpuSim.timing },
+        });
+      }
 
       async function wgpuInitPipelines() {
         if (!wgpuSim.available || wgpuSim.pipelines) return;
@@ -2226,6 +3757,25 @@
         }
         wgpuSim.bindLayout = bindLayout;
         wgpuSim.pipelines = { vel: velPipeline, pos: posPipeline };
+        // Timestamp plumbing — N-independent, so it lives here rather
+        // than in wgpuAllocateBuffers (which tears down on tier change).
+        // Slots: 0/1 = velStep (or BH force) begin/end, 2/3 = posStep
+        // begin/end, 4/5 = BH build phase (prep → check), 6/7 spare.
+        if (wgpuSim.hasTimestamps && !wgpuSim.tsQuery) {
+          wgpuSim.tsQuery = {
+            set: device.createQuerySet({ type: "timestamp", count: 8 }),
+            resolve: device.createBuffer({
+              size: 64,
+              usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+            }),
+            read: device.createBuffer({
+              size: 64,
+              usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            }),
+            busy: false,
+            tick: 0,
+          };
+        }
         console.info("[wgpu] pipelines compiled");
       }
 
@@ -2832,7 +4382,9 @@
       // buffers (current side) — matches GPGPU's parallel-pass
       // semantics: position integrates against the OLD velocity, not
       // the just-computed new one.
-      function wgpuStep() {
+      // forceMode (optional): "bh" | "brute" pins the gravity kernel for
+      // this substep (used by __bhBench); default follows bhSim.wanted.
+      function wgpuStep(forceMode) {
         if (!wgpuSim.available || !wgpuSim.pipelines || !wgpuSim.buffers) {
           return false;
         }
@@ -2845,40 +4397,135 @@
         const posOut = which === 0 ? buf.posB : buf.posA;
         const velIn = which === 0 ? buf.velA : buf.velB;
         const velOut = which === 0 ? buf.velB : buf.velA;
-        const velBindGroup = device.createBindGroup({
-          layout: wgpuSim.bindLayout,
-          entries: [
-            { binding: 0, resource: { buffer: posIn } },
-            { binding: 1, resource: { buffer: velIn } },
-            { binding: 2, resource: { buffer: velOut } },
-            { binding: 3, resource: { buffer: buf.params } },
-          ],
-        });
-        // Position step reads OLD vel (velIn), not the just-written new
-        // velocity — GPGPU runs both passes against the same input
-        // textures, and so do we.
-        const posBindGroup = device.createBindGroup({
-          layout: wgpuSim.bindLayout,
-          entries: [
-            { binding: 0, resource: { buffer: posIn } },
-            { binding: 1, resource: { buffer: velIn } },
-            { binding: 2, resource: { buffer: posOut } },
-            { binding: 3, resource: { buffer: buf.params } },
-          ],
-        });
+        // Barnes-Hut path (BARNES_HUT_PLAN.md): when live, the velocity
+        // pass runs bhForce against the freshly built tree instead of
+        // the O(N²) tile kernel. Falls back to brute until pipelines
+        // and buffers are ready (bhReadyForStep kicks async init).
+        const useBH = forceMode
+          ? forceMode === "bh" && bhReadyForStep()
+          : bhSim.wanted && bhReadyForStep();
+        // Bind groups are immutable (layout, buffers) tuples — cache one
+        // per ping-pong side and rebuild only when the buffers change
+        // (wgpuSim.epoch) or the integrator flips the position pass's
+        // velocity source (OPTIMIZATION_PLAN.md F12).
+        let bgc = wgpuSim._bgCache;
+        if (
+          !bgc ||
+          bgc.epoch !== (wgpuSim.epoch | 0) ||
+          bgc.integrator !== params.integrator
+        ) {
+          bgc = wgpuSim._bgCache = {
+            epoch: wgpuSim.epoch | 0,
+            integrator: params.integrator,
+            vel: [null, null],
+            pos: [null, null],
+          };
+        }
+        if (!bgc.vel[which]) {
+          bgc.vel[which] = device.createBindGroup({
+            layout: wgpuSim.bindLayout,
+            entries: [
+              { binding: 0, resource: { buffer: posIn } },
+              { binding: 1, resource: { buffer: velIn } },
+              { binding: 2, resource: { buffer: velOut } },
+              { binding: 3, resource: { buffer: buf.params } },
+            ],
+          });
+        }
+        // Position step: forward Euler reads the OLD velocity (velIn) —
+        // what GPGPU does natively; symplectic Euler reads the velocity
+        // the pass above just wrote (velOut). See gpuComputeStep /
+        // params.integrator (OPTIMIZATION_PLAN.md F5). Both passes sit in
+        // one encoder, so the vel→pos dependency is ordered.
+        if (!bgc.pos[which]) {
+          const posVelSrc = params.integrator === "symplectic" ? velOut : velIn;
+          bgc.pos[which] = device.createBindGroup({
+            layout: wgpuSim.bindLayout,
+            entries: [
+              { binding: 0, resource: { buffer: posIn } },
+              { binding: 1, resource: { buffer: posVelSrc } },
+              { binding: 2, resource: { buffer: posOut } },
+              { binding: 3, resource: { buffer: buf.params } },
+            ],
+          });
+        }
+        const velBindGroup = useBH ? null : bgc.vel[which];
+        const posBindGroup = bgc.pos[which];
+        // Sample GPU pass times on ~every 30th substep. One in-flight
+        // resolve at a time; results land in wgpuSim.timing async.
+        let ts = null;
+        if (wgpuSim.tsQuery && !wgpuSim.tsQuery.busy) {
+          wgpuSim.tsQuery.tick = (wgpuSim.tsQuery.tick | 0) + 1;
+          if (wgpuSim.tsQuery.tick >= 30) {
+            wgpuSim.tsQuery.tick = 0;
+            ts = wgpuSim.tsQuery;
+          }
+        }
         const enc = device.createCommandEncoder();
         const groups = Math.ceil(N / 256);
-        const vp = enc.beginComputePass();
-        vp.setPipeline(wgpuSim.pipelines.vel);
-        vp.setBindGroup(0, velBindGroup);
+        if (useBH) bhEncodeBuild(enc, which, ts);
+        const vp = enc.beginComputePass(
+          ts
+            ? {
+                timestampWrites: {
+                  querySet: ts.set,
+                  beginningOfPassWriteIndex: 0,
+                  endOfPassWriteIndex: 1,
+                },
+              }
+            : {},
+        );
+        vp.setPipeline(useBH ? bhSim.pipelines.force : wgpuSim.pipelines.vel);
+        vp.setBindGroup(0, useBH ? bhSim.groups.force[which] : velBindGroup);
         vp.dispatchWorkgroups(groups);
         vp.end();
-        const pp = enc.beginComputePass();
+        const pp = enc.beginComputePass(
+          ts
+            ? {
+                timestampWrites: {
+                  querySet: ts.set,
+                  beginningOfPassWriteIndex: 2,
+                  endOfPassWriteIndex: 3,
+                },
+              }
+            : {},
+        );
         pp.setPipeline(wgpuSim.pipelines.pos);
         pp.setBindGroup(0, posBindGroup);
         pp.dispatchWorkgroups(groups);
         pp.end();
+        if (ts) {
+          enc.resolveQuerySet(ts.set, 0, 8, ts.resolve, 0);
+          enc.copyBufferToBuffer(ts.resolve, 0, ts.read, 0, 64);
+        }
         device.queue.submit([enc.finish()]);
+        if (ts) {
+          ts.busy = true;
+          const sampledBH = useBH;
+          ts.read
+            .mapAsync(GPUMapMode.READ)
+            .then(() => {
+              const t = new BigInt64Array(ts.read.getMappedRange());
+              const velMs = Number(t[1] - t[0]) / 1e6;
+              const posMs = Number(t[3] - t[2]) / 1e6;
+              const buildMs = Number(t[5] - t[4]) / 1e6;
+              ts.read.unmap();
+              // Timestamps can legally come back 0/negative around device
+              // resets — only keep sane samples.
+              if (velMs >= 0 && velMs < 1e4) wgpuSim.timing.velMs = velMs;
+              if (posMs >= 0 && posMs < 1e4) wgpuSim.timing.posMs = posMs;
+              if (sampledBH && buildMs >= 0 && buildMs < 1e4) {
+                wgpuSim.timing.buildMs = buildMs;
+              }
+              ts.busy = false;
+            })
+            .catch(() => {
+              try {
+                ts.read.unmap();
+              } catch (_) {}
+              ts.busy = false;
+            });
+        }
         wgpuSim.which = 1 - which;
         return true;
       }
@@ -3255,6 +4902,19 @@
         const stride = currentReadbackStride();
         if (stride > 1 && wgpuSim.frameTick % stride !== 0) return;
         if (wgpuSim.readbackBusy) return;
+        // Velocity cadence: positions must be fresh every readback (they
+        // ARE the motion), but velocities only feed slow-changing render
+        // inputs (kind/age in .w, doppler tint, speed channel). Reading
+        // them back every velStrideMul-th readback cuts bridge traffic
+        // without visible lag. forceVelRead (set by wgpuUploadState)
+        // punches through so scene rewrites recolor immediately.
+        const velMul = currentVelStrideMul();
+        wgpuSim.readTick = ((wgpuSim.readTick | 0) + 1) | 0;
+        const wantVel =
+          velMul <= 1 ||
+          wgpuSim.readTick % velMul === 0 ||
+          !!wgpuSim.forceVelRead;
+        wgpuSim.forceVelRead = false;
         wgpuSim.readbackBusy = true;
         const device = wgpuSim.device;
         const N = wgpuSim.capacity;
@@ -3270,14 +4930,14 @@
         // we discard the result rather than writing into DataTextures
         // that have been resized out from under us.
         const myEpoch = wgpuSim.epoch | 0;
+        const t0 = performance.now();
         const enc = device.createCommandEncoder();
         enc.copyBufferToBuffer(posBuf, 0, fs[0], 0, bytes);
-        enc.copyBufferToBuffer(velBuf, 0, fs[1], 0, bytes);
+        if (wantVel) enc.copyBufferToBuffer(velBuf, 0, fs[1], 0, bytes);
         device.queue.submit([enc.finish()]);
-        Promise.all([
-          fs[0].mapAsync(GPUMapMode.READ),
-          fs[1].mapAsync(GPUMapMode.READ),
-        ])
+        const maps = [fs[0].mapAsync(GPUMapMode.READ)];
+        if (wantVel) maps.push(fs[1].mapAsync(GPUMapMode.READ));
+        Promise.all(maps)
           .then(() => {
             if ((wgpuSim.epoch | 0) !== myEpoch) {
               // Buffers were swapped — drop this readback. fs[0]/fs[1]
@@ -3286,13 +4946,16 @@
               return;
             }
             const posSrc = new Float32Array(fs[0].getMappedRange());
-            const velSrc = new Float32Array(fs[1].getMappedRange());
             wgpuSim.posTex.image.data.set(posSrc);
-            wgpuSim.velTex.image.data.set(velSrc);
             fs[0].unmap();
-            fs[1].unmap();
             wgpuSim.posTex.needsUpdate = true;
-            wgpuSim.velTex.needsUpdate = true;
+            if (wantVel) {
+              const velSrc = new Float32Array(fs[1].getMappedRange());
+              wgpuSim.velTex.image.data.set(velSrc);
+              fs[1].unmap();
+              wgpuSim.velTex.needsUpdate = true;
+            }
+            wgpuSim.timing.readMs = performance.now() - t0;
             wgpuSim.readbackBusy = false;
           })
           .catch((e) => {
@@ -3534,11 +5197,19 @@
             wgpuSim.reason = "no adapter";
             return;
           }
-          const device = await adapter.requestDevice();
+          // timestamp-query gives ground-truth per-pass GPU ms (velStep /
+          // posStep) for the debug overlay. Optional — devices without it
+          // just leave wgpuSim.timing.velMs/posMs as NaN.
+          const wantTs =
+            adapter.features && adapter.features.has("timestamp-query");
+          const device = await adapter.requestDevice(
+            wantTs ? { requiredFeatures: ["timestamp-query"] } : {},
+          );
           if (!device) {
             wgpuSim.reason = "no device";
             return;
           }
+          wgpuSim.hasTimestamps = !!wantTs;
           wgpuSim.adapter = adapter;
           wgpuSim.device = device;
           wgpuSim.queue = device.queue;
@@ -8833,6 +10504,9 @@
         "event-horizon",
         "petrova-line",
         "dust-storm",
+        // Position 9+ — hotkeys 1–8 keep their existing scenes.
+        "cartwheel",
+        "whirlpool",
         "orrery",
         "lattice",
         "antennae",
@@ -11788,12 +13462,18 @@
       // skipping it on alternate frames is the cheapest way to find out
       // whether compute is winning under option A.b's CPU bounce or
       // whether bandwidth is the wall.
+      // velStrideMul: velocities ride the same readback loop but only
+      // every Nth readback — pos carries the motion, vel only feeds
+      // slow-changing color inputs (kind/age/doppler). 2 halves the vel
+      // half of the bounce; scene rewrites force an immediate vel read
+      // via wgpuSim.forceVelRead so recolors don't lag.
       const DENSITY_PERF_PRESETS = {
         titanic: {
           bloomCap: 0.6,
           trailCap: 0.7,
           lensCap: 0.5,
           readbackStride: 1,
+          velStrideMul: 2,
         },
         colossal: {
           bloomCap: 0.3,
@@ -11801,6 +13481,7 @@
           lensCap: 0.2,
           caCap: 0.012,
           readbackStride: 2,
+          velStrideMul: 2,
         },
         abyssal: {
           bloomCap: 0.0,
@@ -11809,6 +13490,7 @@
           caCap: 0.005,
           grainCap: 0.02,
           readbackStride: 4,
+          velStrideMul: 2,
         },
       };
       function currentReadbackStride() {
@@ -11816,6 +13498,12 @@
         if (!lvl || !lvl.experimental) return 1;
         const p = DENSITY_PERF_PRESETS[currentDensityKey];
         return p && p.readbackStride > 0 ? p.readbackStride | 0 : 1;
+      }
+      function currentVelStrideMul() {
+        const lvl = DENSITY_LEVELS[currentDensityKey];
+        if (!lvl || !lvl.experimental) return 1;
+        const p = DENSITY_PERF_PRESETS[currentDensityKey];
+        return p && p.velStrideMul > 0 ? p.velStrideMul | 0 : 1;
       }
       function applyDensityPerfFrameClamp() {
         const lvl = DENSITY_LEVELS[currentDensityKey];
@@ -13984,7 +15672,20 @@
           `accent    ${accentLine}\n` +
           `pulse     ${pulseLine}\n` +
           `rejected  ${d.rejectedMoves}  quiesce  ${d.quiesceEvents}\n` +
-          `audio     e=${audioReact.energy.toFixed(2)} ${audioReact.onset ? "● onset" : ""}`;
+          `audio     e=${audioReact.energy.toFixed(2)} ${audioReact.onset ? "● onset" : ""}` +
+          (wgpuSim.active
+            ? `\nwgpu      vel=${_fmtMs(wgpuSim.timing.velMs)}  pos=${_fmtMs(wgpuSim.timing.posMs)}  read=${_fmtMs(wgpuSim.timing.readMs)}\n` +
+              `          N=${MAX_BODIES.toLocaleString()}  sub=${params.substeps}  stride=${currentReadbackStride()}×${currentVelStrideMul()}${wgpuSim.hasTimestamps ? "" : "  (no timestamp-query)"}\n` +
+              `bh        ${
+                bhSim.wanted
+                  ? bhSim.failed
+                    ? "FAILED (" + bhSim.failed + ")"
+                    : bhSim.pipelines && bhSim.buffers
+                      ? `on  θ=${bhSim.theta}  build=${_fmtMs(wgpuSim.timing.buildMs)}  force=${_fmtMs(wgpuSim.timing.velMs)}`
+                      : "initialising…"
+                  : "off (?bh=1 or __bhToggle(true))"
+              }`
+            : "");
       }
 
       let _toastTimer = null;
