@@ -1,5 +1,11 @@
 # Performance Audit & Optimization Plan
 
+> **2026-09-05:** Part 2's suspect ranking is superseded by
+> [OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md) (sync-readback stalls,
+> integrator, fill rate, kernel, BH close-out), whose Phase 1–2 fixes
+> have landed. Part 1's measurement recipe still applies — fill the
+> appendix table below and the plan's §5 table.
+
 Goal: find the single biggest frame-time eater empirically, fix it, repeat. No guessing.
 
 ---

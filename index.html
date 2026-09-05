@@ -2059,19 +2059,20 @@
             }
             workgroupBarrier();
 
-            if (alive) {
+            if (alive && !isAstro) {
               for (var j: u32 = 0u; j < TILE; j = j + 1u) {
                 let posB = tilePos[j];
-                if (posB.w <= 0.0) { continue; }
                 let velB = tileVel[j];
-                var kindB = i32(floor(velB.w + 0.001));
-                if (kindB > i32(NUM_KINDS) - 1) { kindB = i32(NUM_KINDS) - 1; }
-                if (kindB < 0)                  { kindB = 0; }
-                let K     = p.K[u32(kindA) * NUM_KINDS + u32(kindB)];
+                let kindB = clamp(i32(floor(velB.w + 0.001)), 0, i32(NUM_KINDS) - 1);
+                // Dead bodies carry mass <= 0; max() zeroes their term.
+                // Branchless beats a per-pair continue on SIMD lanes,
+                // and matches the GLSL path's skip exactly (any body
+                // with posB.w <= 0 contributes no force there either).
+                let mB    = max(posB.w, 0.0);
                 let d     = posB.xyz - pA;
-                let r2    = dot(d, d) + p.eps2;
+                let r2    = dot(d, d) + eps2;
                 let invR3 = inverseSqrt(r2 * r2 * r2);
-                acc = acc + p.G * posB.w * K * d * invR3;
+                acc = acc + G * mB * kRow[u32(kindB)] * d * invR3;
               }
             }
             workgroupBarrier();
@@ -3908,6 +3909,10 @@
         // the next step would read stale data from B and write the
         // freshly-uploaded data away.
         wgpuSim.which = 0;
+        // Fresh state means fresh kinds/ages — make the next readback
+        // include velocities even if the vel-cadence would skip them,
+        // so point colors don't lag a scene rewrite.
+        wgpuSim.forceVelRead = true;
       }
 
       // Round-trip check: copy posA/velA into the two staging buffers,
@@ -4878,6 +4883,143 @@
         renderer.readRenderTargetPixels(rt, x, y, w, h, buf);
       }
 
+      // ----- async texel readback (OPTIMIZATION_PLAN.md §3) ----------
+      // Non-blocking alternative to readPos/VelTexels for per-frame and
+      // periodic consumers (follow-cam, barycenter, HUD stats). On the
+      // WebGL2 path a synchronous readRenderTargetPixels drains the whole
+      // GPU queue — including this frame's O(N²) compute pass — before it
+      // returns, so CPU and GPU stop overlapping. Here the read goes into
+      // a PIXEL_PACK_BUFFER behind a fence; a later frame polls the fence
+      // and copies the bytes out without stalling. Consumers use a sample
+      // that is one or two frames old, which none of them can see.
+      // On the WebGPU path the CPU mirror is already the source, so
+      // request() resolves immediately from it. If the PBO path throws
+      // (odd driver), the reader latches onto the blocking read — i.e.
+      // today's behaviour — so consumers never break.
+      //
+      // Usage per tick:  reader.poll(); if (reader.take()) use(reader.out);
+      //                  reader.request(x, y);
+      class TexelReader {
+        constructor(which, w, h) {
+          this.which = which; // "pos" | "vel"
+          this.w = w;
+          this.h = h;
+          this.out = new Float32Array(w * h * 4);
+          this.fresh = false; // `out` holds a sample not yet taken
+          this.pending = false; // a fenced read is in flight
+          this.pbo = null;
+          this.sync = null;
+          this.failed = false; // PBO path unusable → blocking fallback
+        }
+        _mirror() {
+          const tex = this.which === "pos" ? wgpuSim.posTex : wgpuSim.velTex;
+          return wgpuSim.active && tex && tex.image && tex.image.data;
+        }
+        _blockingRead(x, y) {
+          if (this.which === "pos")
+            readPosTexels(x, y, this.w, this.h, this.out);
+          else readVelTexels(x, y, this.w, this.h, this.out);
+          this.fresh = true;
+          return true;
+        }
+        // Keep the buffer in step with the density tier. Drops any
+        // in-flight read (its bytes would be the wrong size).
+        resize(w, h) {
+          if (w === this.w && h === this.h) return;
+          this.dispose();
+          this.w = w;
+          this.h = h;
+          this.out = new Float32Array(w * h * 4);
+        }
+        // Issue a read of the w×h block at (x, y). No-op while a read is
+        // in flight. Returns true when a read was issued (or completed
+        // synchronously on the mirror / fallback paths).
+        request(x, y) {
+          if (this.pending) return false;
+          if (this._mirror() || this.failed) return this._blockingRead(x, y);
+          const gl = renderer.getContext();
+          try {
+            if (!this.pbo) {
+              this.pbo = gl.createBuffer();
+              gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
+              gl.bufferData(
+                gl.PIXEL_PACK_BUFFER,
+                this.out.byteLength,
+                gl.STREAM_READ,
+              );
+              gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+            }
+            const rt = gpu.getCurrentRenderTarget(
+              this.which === "pos" ? posVar : velVar,
+            );
+            const prev = renderer.getRenderTarget();
+            renderer.setRenderTarget(rt);
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
+            gl.readPixels(x, y, this.w, this.h, gl.RGBA, gl.FLOAT, 0);
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+            renderer.setRenderTarget(prev);
+            this.sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+            gl.flush();
+            this.pending = true;
+            return true;
+          } catch (e) {
+            console.warn("[texel-reader] PBO readback unavailable:", e);
+            this.failed = true;
+            this.pending = false;
+            return this._blockingRead(x, y);
+          }
+        }
+        // Call once per tick. Copies the sample out when the fence has
+        // signalled. Returns true when `out` holds an untaken sample.
+        poll() {
+          if (!this.pending) return this.fresh;
+          const gl = renderer.getContext();
+          try {
+            const s = gl.clientWaitSync(this.sync, 0, 0);
+            if (s === gl.TIMEOUT_EXPIRED) return this.fresh;
+            gl.deleteSync(this.sync);
+            this.sync = null;
+            this.pending = false;
+            if (s === gl.WAIT_FAILED) return this.fresh;
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
+            gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, this.out);
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+            this.fresh = true;
+          } catch (e) {
+            console.warn("[texel-reader] poll failed, falling back:", e);
+            this.failed = true;
+            this.sync = null;
+            this.pending = false;
+          }
+          return this.fresh;
+        }
+        // Mark the current sample consumed. Returns whether there was one.
+        take() {
+          const had = this.fresh;
+          this.fresh = false;
+          return had;
+        }
+        cancel() {
+          if (this.sync) {
+            try {
+              renderer.getContext().deleteSync(this.sync);
+            } catch (_) {}
+          }
+          this.sync = null;
+          this.pending = false;
+          this.fresh = false;
+        }
+        dispose() {
+          this.cancel();
+          if (this.pbo) {
+            try {
+              renderer.getContext().deleteBuffer(this.pbo);
+            } catch (_) {}
+            this.pbo = null;
+          }
+        }
+      }
+
       // ----- step 7b: live activation -----------------------------
       // Per-frame routine when wgpuSim.active is true. Runs
       // params.substeps wgpuSteps and queues an async readback into
@@ -5283,9 +5425,28 @@
         canvas: canvasEl,
         antialias: false,
         powerPreference: "high-performance",
-        preserveDrawingBuffer: true,
+        // Off (OPTIMIZATION_PLAN.md F8): keeping the backbuffer readable
+        // across frames blocks the compositor's swap optimizations. Every
+        // canvas reader we have — takeScreenshot, the thumbnail capture,
+        // captureStream — renders synchronously in the same task before
+        // it reads, which is all the spec guarantees anyway.
+        preserveDrawingBuffer: false,
       });
-      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      // Render scale (OPTIMIZATION_PLAN.md F7): device pixels per CSS px.
+      // Every full-screen pass and every additive sprite scales with its
+      // square, so it is the cheapest fps lever on Retina / 4K displays.
+      // ?scale=1 (0.5–2) or __setRenderScale(1) at runtime. Default is
+      // unchanged: min(devicePixelRatio, 2).
+      function initialRenderScale() {
+        try {
+          const v = parseFloat(
+            new URL(location.href).searchParams.get("scale"),
+          );
+          if (isFinite(v) && v >= 0.5 && v <= 2) return v;
+        } catch (_) {}
+        return Math.min(devicePixelRatio, 2);
+      }
+      renderer.setPixelRatio(initialRenderScale());
       renderer.setSize(innerWidth, innerHeight);
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.0;
@@ -6866,6 +7027,19 @@
           vec3 acc = vec3(0.0);
           vec2 ts = 1.0 / resolution.xy;
 
+          // Hoist kindA's K row and the scalar params out of the O(N)
+          // loop (OPTIMIZATION_PLAN.md F10, mirrors the WGSL kernel): a
+          // dynamically indexed uniform-array read per pair costs far
+          // more than a local lookup. The dead-body continue stays: every
+          // fragment walks the same texel sequence, so the branch is
+          // coherent and it skips the second fetch.
+          float kRow[${NUM_KINDS}];
+          for (int k = 0; k < ${NUM_KINDS}; k++) {
+            kRow[k] = uK[kindA * ${NUM_KINDS} + k];
+          }
+          float G = uG;
+          float eps2 = uEps2;
+
           // --- all-pairs gravity with interaction matrix K[kindA][kindB] ---
           for (int y = 0; y < ${texSize}; y++) {
             for (int x = 0; x < ${texSize}; x++) {
@@ -6873,15 +7047,11 @@
               vec4 posB = texture2D(texturePosition, uv2);
               if (posB.w <= 0.0) continue;
               vec4 velB = texture2D(textureVelocity, uv2);
-              float kindBf = floor(velB.w + 0.001);
-              int kindB = int(kindBf);
-              if (kindB > ${NUM_KINDS - 1}) kindB = ${NUM_KINDS - 1};
-              if (kindB < 0) kindB = 0;
-              float K = uK[kindA * ${NUM_KINDS} + kindB];
+              int kindB = clamp(int(floor(velB.w + 0.001)), 0, ${NUM_KINDS - 1});
               vec3 d = posB.xyz - p;
-              float r2 = dot(d, d) + uEps2;
+              float r2 = dot(d, d) + eps2;
               float invR3 = inversesqrt(r2 * r2 * r2);
-              acc += uG * posB.w * K * d * invR3;
+              acc += G * posB.w * kRow[kindB] * d * invR3;
             }
           }
 
@@ -7202,7 +7372,28 @@
           if (kindI == 2) sz *= 5.0;  // BH glow
           if (kindI == 3) sz *= 0.45; // dust small
           if (isHalo)     sz *= 0.4;
-          gl_PointSize = sz * (320.0 / -mv.z);
+          // Size clamp (OPTIMIZATION_PLAN.md F6). Uncapped, a body a few
+          // units from the camera asks for a sprite thousands of px wide;
+          // drivers clamp at ALIASED_POINT_SIZE_RANGE (64…1024, GPU-
+          // dependent), so the look differed per machine and near-camera
+          // swarms were pure additive overdraw. Cap ordinary bodies at
+          // uPointMax and pay part of the lost area back as brightness.
+          // The black hole keeps a generous cap so its ×5 glow in the BH
+          // scenes reads as before.
+          // No brightness payback for capped sprites: the token contact
+          // sheet showed a 2× boost on the black-hole glow white-out every
+          // BH scene (their exposure/bloom were tuned without it). Capped
+          // sprites are just smaller, as they already were on drivers with
+          // a low ALIASED_POINT_SIZE_RANGE.
+          // Sprite size scales with the viewport height (uViewScale) so the
+          // composition tuned at 1440p holds at any canvas size — without it
+          // a 1000 px-wide iframe or a 750 px tall preview is one white
+          // glow, and a 2× screenshot renders sprites at half their
+          // apparent size.
+          float rawSz = sz * (320.0 / -mv.z) * uViewScale;
+          float capSz = min(rawSz, kindI == 2 ? uPointMaxBH : uPointMax);
+          float sizeBoost = 1.0;
+          gl_PointSize = capSz;
 
           // --- channel value in [0,1] — with optional cross-fade to a 2nd channel ---
           float t = evalChannel(uChannel, mass, speed, kindI, pos.xyz, aRef, ageNorm);
@@ -8037,7 +8228,107 @@
       });
       composer.addPass(vigGrainPass);
 
-      composer.addPass(new OutputPass());
+      const outputPass = new OutputPass();
+      composer.addPass(outputPass);
+
+      // ---- Lean tail (OPTIMIZATION_PLAN.md F9; opt-in) ----------------
+      // One full-screen pass doing what CA + vignette/grain + OutputPass
+      // do in three: same sampling, same order (grain is added in linear
+      // space before tone mapping), then ACES + sRGB exactly as OutputPass
+      // — two fewer full-resolution render-target round trips per frame.
+      // Off by default until it has been eyeballed against the full chain:
+      // ?post=lean or __setPostMode("lean"). Lean mode also runs the bloom
+      // mip chain at half its usual base resolution (≈4× cheaper blur).
+      const leanPass = new ShaderPass({
+        uniforms: {
+          tDiffuse: { value: null },
+          uAmount: { value: 0.0 },
+          uVignette: { value: 0.35 },
+          uGrain: { value: 0.04 },
+          uTime: { value: 0.0 },
+          toneMappingExposure: { value: 1.0 },
+        },
+        vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+        fragmentShader: `
+          uniform sampler2D tDiffuse;
+          uniform float uAmount;
+          uniform float uVignette;
+          uniform float uGrain;
+          uniform float uTime;
+          // Declares toneMappingExposure + ACESFilmicToneMapping. The
+          // material has toneMapped = false so three's prefix does not
+          // inject this chunk a second time. colorspace_pars_fragment
+          // (linearToOutputTexel) is always in the ShaderMaterial prefix:
+          // sRGB when this is the last pass, identity into a linear RT.
+          #include <tonemapping_pars_fragment>
+          varying vec2 vUv;
+          float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+          }
+          void main() {
+            vec2 c = vUv - 0.5;
+            float d = length(c);
+            vec2 dir = c / max(d, 0.0001);
+            float scale = uAmount * d * d;
+            vec2 offR = dir * scale * 1.4;
+            vec2 offB = dir * scale * -1.4;
+            vec4 base = texture2D(tDiffuse, vUv);
+            vec2 uvR = vUv + offR;
+            vec2 uvB = vUv + offB;
+            bool inR = all(greaterThanEqual(uvR, vec2(0.0))) && all(lessThanEqual(uvR, vec2(1.0)));
+            bool inB = all(greaterThanEqual(uvB, vec2(0.0))) && all(lessThanEqual(uvB, vec2(1.0)));
+            vec4 col = vec4(
+              inR ? texture2D(tDiffuse, uvR).r : base.r,
+              base.g,
+              inB ? texture2D(tDiffuse, uvB).b : base.b,
+              base.a
+            );
+            float vig = 1.0 - smoothstep(0.25, 0.85, dot(c, c)) * uVignette;
+            col.rgb *= vig;
+            float n = hash(vUv * vec2(1920.0, 1080.0) + uTime * 11.17) - 0.5;
+            col.rgb += n * uGrain;
+            col.rgb = ACESFilmicToneMapping(col.rgb);
+            gl_FragColor = linearToOutputTexel(col);
+          }
+        `,
+      });
+      leanPass.material.toneMapped = false;
+      leanPass.enabled = false;
+      // Share the live uniform objects so setPostParams, the per-tier
+      // clamps and the loop's uTime tick reach both chains unchanged.
+      leanPass.uniforms.uAmount = caPass.uniforms.uAmount;
+      leanPass.uniforms.uVignette = vigGrainPass.uniforms.uVignette;
+      leanPass.uniforms.uGrain = vigGrainPass.uniforms.uGrain;
+      leanPass.uniforms.uTime = vigGrainPass.uniforms.uTime;
+      composer.addPass(leanPass);
+
+      // Bloom base-resolution scale. composer.setSize hands every pass the
+      // device-pixel size; UnrealBloomPass halves it internally for mip 0,
+      // and lean mode halves it once more.
+      const postMode = { mode: "full", bloomScale: 1.0 };
+      const _bloomSetSize = bloom.setSize.bind(bloom);
+      bloom.setSize = (w, h) =>
+        _bloomSetSize(
+          Math.max(2, Math.round(w * postMode.bloomScale)),
+          Math.max(2, Math.round(h * postMode.bloomScale)),
+        );
+      function setPostMode(mode) {
+        const lean = mode === "lean";
+        postMode.mode = lean ? "lean" : "full";
+        caPass.enabled = !lean;
+        vigGrainPass.enabled = !lean;
+        outputPass.enabled = !lean;
+        leanPass.enabled = lean;
+        postMode.bloomScale = lean ? 0.5 : 1.0;
+        composer.setSize(innerWidth, innerHeight); // re-sizes bloom + trails
+        clearTrails();
+        return postMode.mode;
+      }
+      try {
+        if (new URL(location.href).searchParams.get("post") === "lean") {
+          setPostMode("lean");
+        }
+      } catch (_) {}
 
       function setPostParams(post) {
         if (post.bloom !== undefined) bloom.strength = post.bloom;
@@ -8654,22 +8945,54 @@
         return i;
       }
 
-      // Run the GPU integrator for N frames BEFORE rendering, so structural
-      // features (tails, bars, lanes) arrive pre-formed rather than having
-      // the viewer wait for them to appear.
+      // Run the GPU integrator for N substeps BEFORE the viewer sees the
+      // scene, so structural features (tails, bars, lanes) arrive
+      // pre-formed. Amortized (OPTIMIZATION_PLAN.md F4): kickstartSim()
+      // only schedules; kickstartTick() (called from loop) spends a
+      // per-frame budget scaled by N until the burst is done, instead of
+      // queueing 320 O(N²) passes in one frame — a ~2 s freeze at lush,
+      // tens of seconds at colossal. Runs on whichever backend is live;
+      // the WebGPU buffers used to miss the pre-roll entirely because the
+      // burst only ever ran on the WebGL GPGPU textures.
+      const kickstart = { remaining: 0, dt: 0.015 };
       function kickstartSim(frames = 300, dt = 0.015) {
-        const prevDt = posVar.material.uniforms.uDt.value;
-        const prevSignP = posVar.material.uniforms.uSign.value;
-        const prevSignV = velVar.material.uniforms.uSign.value;
-        posVar.material.uniforms.uDt.value = dt;
-        velVar.material.uniforms.uDt.value = dt;
-        posVar.material.uniforms.uSign.value = 1.0;
-        velVar.material.uniforms.uSign.value = 1.0;
-        for (let k = 0; k < frames; k++) gpu.compute();
-        posVar.material.uniforms.uDt.value = prevDt;
-        velVar.material.uniforms.uDt.value = prevDt;
-        posVar.material.uniforms.uSign.value = prevSignP;
-        velVar.material.uniforms.uSign.value = prevSignV;
+        // Scale the pre-roll down at heavy tiers: 320 substeps at 262k+
+        // is a fixed ~30 s of GPU time however it is spread.
+        const scale = Math.min(1, Math.max(0.25, 65536 / MAX_BODIES));
+        kickstart.remaining = Math.round(frames * scale);
+        kickstart.dt = dt;
+      }
+      function kickstartPerFrame() {
+        // ≈6e5 body-substeps per frame: 32 at 16k, 9 at 65k, 6 at 99k,
+        // 2 at 262k, 1 at 518k.
+        return Math.max(1, Math.min(32, Math.floor(6e5 / MAX_BODIES)));
+      }
+      function kickstartTick() {
+        if (kickstart.remaining <= 0) return;
+        if (rebuildingPipeline) return;
+        const n = Math.min(kickstart.remaining, kickstartPerFrame());
+        const pu = posVar.material.uniforms;
+        const vu = velVar.material.uniforms;
+        const prevDt = pu.uDt.value;
+        const prevSignP = pu.uSign.value;
+        const prevSignV = vu.uSign.value;
+        pu.uDt.value = kickstart.dt;
+        vu.uDt.value = kickstart.dt;
+        pu.uSign.value = 1.0;
+        vu.uSign.value = 1.0;
+        if (wgpuSim.active) {
+          for (let k = 0; k < n; k++) wgpuStep();
+        } else {
+          for (let k = 0; k < n; k++) gpuComputeStep();
+        }
+        pu.uDt.value = prevDt;
+        vu.uDt.value = prevDt;
+        pu.uSign.value = prevSignP;
+        vu.uSign.value = prevSignV;
+        kickstart.remaining -= n;
+        // The afterimage buffer ghosts every fast-forward frame into a
+        // dotted trail; start the real-time run clean.
+        if (kickstart.remaining <= 0) clearTrails();
       }
 
       // ===============================================================
@@ -10685,7 +11008,91 @@
         fov: 55,
         autoOrbit: true,
         cameraDrift: true,
+        // "euler" | "symplectic" — see gpuComputeStep below.
+        integrator: "euler",
       };
+
+      // Integrator (OPTIMIZATION_PLAN.md F5).
+      //   euler:      both passes read last frame's state, x += v_old·dt.
+      //               What GPUComputationRenderer.compute() does natively
+      //               and what the README calls "symplectic" — it isn't:
+      //               forward Euler pumps energy into bound orbits.
+      //   symplectic: velocity pass first, then position from the NEW
+      //               velocity, x += v_new·dt. Same cost, bounded energy
+      //               error over long dwells.
+      // Opt-in via ?integrator=symplectic or __setIntegrator("symplectic")
+      // until the tuned scenes (orrery, event-horizon, petrova-line) have
+      // been A/B'd; then flip the default here. The WebGPU path honours
+      // the same flag inside wgpuStep (position pass binds velOut).
+      try {
+        const _iu = new URL(location.href).searchParams.get("integrator");
+        if (_iu === "symplectic" || _iu === "euler") params.integrator = _iu;
+      } catch (_) {}
+      function gpuComputeSymplectic() {
+        // Mirrors GPUComputationRenderer.compute() (r160) with two
+        // changes: velocity renders first, and the position pass samples
+        // the velocity target that was just written.
+        const cur = gpu.currentTextureIndex;
+        const nxt = cur === 0 ? 1 : 0;
+        const vu = velVar.material.uniforms;
+        const pu = posVar.material.uniforms;
+        vu.texturePosition.value = posVar.renderTargets[cur].texture;
+        vu.textureVelocity.value = velVar.renderTargets[cur].texture;
+        gpu.doRenderTarget(velVar.material, velVar.renderTargets[nxt]);
+        pu.texturePosition.value = posVar.renderTargets[cur].texture;
+        pu.textureVelocity.value = velVar.renderTargets[nxt].texture;
+        gpu.doRenderTarget(posVar.material, posVar.renderTargets[nxt]);
+        gpu.currentTextureIndex = nxt;
+      }
+      // Render scale at runtime (F7). Rescales the renderer, the post
+      // chain and the sprite caps together; trails are cleared because
+      // the afterimage buffer is reallocated. Also the density watchdog's
+      // first lever.
+      function setRenderScale(s, quiet) {
+        s = Math.min(2, Math.max(0.5, +s || 1));
+        if (Math.abs(s - renderer.getPixelRatio()) < 1e-3) return s;
+        renderer.setPixelRatio(s);
+        renderer.setSize(innerWidth, innerHeight);
+        composer.setPixelRatio(s);
+        composer.setSize(innerWidth, innerHeight);
+        pointMat.uniforms.uPointMax.value = 256.0 * s;
+        pointMat.uniforms.uPointMaxBH.value = 1024.0 * s;
+        clearTrails();
+        if (!quiet) showToast("Render scale", s.toFixed(2) + "×");
+        return s;
+      }
+      // One WebGL2 substep under the active integrator.
+      function gpuComputeStep() {
+        if (params.integrator === "symplectic") gpuComputeSymplectic();
+        else gpu.compute();
+      }
+      if (typeof window !== "undefined") {
+        window.__setIntegrator = (mode) => {
+          if (mode === "symplectic" || mode === "euler") {
+            params.integrator = mode;
+            showToast("Integrator", mode);
+          }
+          return params.integrator;
+        };
+        window.__setRenderScale = setRenderScale;
+        // Post chain: "full" (today's passes) | "lean" (merged tail +
+        // half-res bloom, F9). Eyeball before making lean the default.
+        window.__setPostMode = (mode) => {
+          setPostMode(mode);
+          showToast("Post", postMode.mode);
+          return postMode.mode;
+        };
+        // Sprite size caps in device px (OPTIMIZATION_PLAN.md F6). Pass a
+        // huge number to restore the old uncapped behaviour for an A/B.
+        window.__setPointMax = (px, bhPx) => {
+          if (px > 0) pointMat.uniforms.uPointMax.value = px;
+          if (bhPx > 0) pointMat.uniforms.uPointMaxBH.value = bhPx;
+          return [
+            pointMat.uniforms.uPointMax.value,
+            pointMat.uniforms.uPointMaxBH.value,
+          ];
+        };
+      }
 
       // ===============================================================
       // 16. APPLY SCENE  (with eased transition)
@@ -10738,29 +11145,46 @@
       // path (CPU mirror of the DataTexture). Throttled and skipped
       // entirely when the force term is zero.
       let _comFrameCounter = 0;
-      let _comReadBuf = null;
+      let _comReader = null;
       function maybeUpdateBarycenter() {
         if (Math.abs(params.spin) < 1e-5) return;
-        if (--_comFrameCounter > 0) return;
-        _comFrameCounter = 12;
-        const need = TEX_SIZE * TEX_SIZE * 4;
-        if (!_comReadBuf || _comReadBuf.length !== need) {
-          _comReadBuf = new Float32Array(need);
+        let data;
+        if (
+          wgpuSim.active &&
+          wgpuSim.posTex &&
+          wgpuSim.posTex.image &&
+          wgpuSim.posTex.image.data
+        ) {
+          if (--_comFrameCounter > 0) return;
+          _comFrameCounter = 12;
+          // Walk the CPU mirror in place — copying it into a scratch
+          // buffer first (8 MB at abyssal) was pure memcpy waste.
+          data = wgpuSim.posTex.image.data;
+        } else {
+          // WebGL2: fenced PBO read (OPTIMIZATION_PLAN.md F2). Request
+          // every 12th frame, consume whichever frame it lands on. The
+          // old synchronous read drained the GPU queue 5× a second on
+          // every spin scene.
+          if (!_comReader)
+            _comReader = new TexelReader("pos", TEX_SIZE, TEX_SIZE);
+          _comReader.resize(TEX_SIZE, TEX_SIZE);
+          _comReader.poll();
+          if (--_comFrameCounter <= 0 && _comReader.request(0, 0)) {
+            _comFrameCounter = 12;
+          }
+          if (!_comReader.take()) return;
+          data = _comReader.out;
         }
-        // On the WebGPU path this is a buf.set(image.data) — no GPU
-        // round-trip. On the WebGL2 path it stalls briefly to read the
-        // render target, same pattern the followCam pick already uses.
-        readPosTexels(0, 0, TEX_SIZE, TEX_SIZE, _comReadBuf);
         let sx = 0,
           sy = 0,
           sz = 0,
           sm = 0;
         for (let i = 0; i < MAX_BODIES; i++) {
-          const m = _comReadBuf[i * 4 + 3];
+          const m = data[i * 4 + 3];
           if (m <= 0) continue;
-          sx += _comReadBuf[i * 4 + 0] * m;
-          sy += _comReadBuf[i * 4 + 1] * m;
-          sz += _comReadBuf[i * 4 + 2] * m;
+          sx += data[i * 4 + 0] * m;
+          sy += data[i * 4 + 1] * m;
+          sz += data[i * 4 + 2] * m;
           sm += m;
         }
         if (sm <= 0) return;
@@ -11926,6 +12350,18 @@
         });
         fovSec.appendChild(fovS.el);
         panelRefreshers.push(() => fovS.refresh());
+        const scaleS = Slider({
+          label: "Render scale",
+          min: 0.5,
+          max: 2,
+          step: 0.25,
+          hint: "Device pixels per CSS pixel. Lower is the cheapest fps win on Retina / 4K displays; the density watchdog drops this to 1× before it steps down a tier.",
+          get: () => renderer.getPixelRatio(),
+          set: (v) => setRenderScale(v, true),
+          fmt: (v) => v.toFixed(2) + "×",
+        });
+        fovSec.appendChild(scaleS.el);
+        panelRefreshers.push(() => scaleS.refresh());
         panelEl.appendChild(fovSec);
 
         const motionSec = Section();
@@ -13573,6 +14009,7 @@
         revertStartedAt: 0,
         revertTimer: null,
         staySession: {}, // { tierKey: true }
+        scaleLeverUsed: false, // render-scale lever tried this activation
       };
       function startDensityWatchdog(prevKey) {
         const lvl = DENSITY_LEVELS[currentDensityKey];
@@ -13583,6 +14020,7 @@
         densityWatchdog.startedAt = performance.now();
         densityWatchdog.frameSamples.length = 0;
         densityWatchdog.reverting = false;
+        densityWatchdog.scaleLeverUsed = false;
       }
       function stopDensityWatchdog() {
         densityWatchdog.active = false;
@@ -13600,6 +14038,8 @@
         // Don't sample while hidden or mid-transition — both lie about FPS.
         if (document.hidden) return;
         if (transitionRaf) return;
+        // The amortized scene pre-roll lies about fps too (F4).
+        if (kickstart.remaining > 0) return;
         const now = performance.now();
         if (now - densityWatchdog.startedAt < densityWatchdog.warmupMs) return;
         const samples = densityWatchdog.frameSamples;
@@ -13617,6 +14057,20 @@
         for (const s of samples) totalDt += s.dt;
         const meanFps = samples.length / Math.max(totalDt, 1e-6);
         if (meanFps < densityWatchdog.threshold) {
+          // First lever (OPTIMIZATION_PLAN.md F7): when rendering above 1
+          // device px per CSS px, drop to 1× and re-measure before giving
+          // up a density tier — fill cost scales with the square of the
+          // ratio, body cost doesn't move.
+          if (
+            !densityWatchdog.scaleLeverUsed &&
+            renderer.getPixelRatio() > 1.001
+          ) {
+            densityWatchdog.scaleLeverUsed = true;
+            setRenderScale(1.0);
+            densityWatchdog.startedAt = now;
+            densityWatchdog.frameSamples.length = 0;
+            return;
+          }
           triggerDensityRevert(meanFps);
         }
       }
@@ -13875,22 +14329,34 @@
         return pickBodyAtNDC(x, y, Math.min(W, H) * 0.5);
       }
 
-      function followCamReadBody() {
+      // Per-frame body sample, non-blocking (OPTIMIZATION_PLAN.md F1).
+      // On WebGL2 the readers issue a fenced PBO read each frame and hand
+      // back the previous frame's texel; the chase-cam already low-passes
+      // velocity, so a one-frame-old target is invisible. On WebGPU they
+      // resolve from the CPU mirror. `blocking` is for one-shot callers
+      // (attach) that need the truth right now and can afford the drain.
+      const _followPosReader = new TexelReader("pos", 1, 1);
+      const _followVelReader = new TexelReader("vel", 1, 1);
+      function followCamReadBody(blocking) {
         if (!followCam.texel) return null;
-        readPosTexels(
-          followCam.texel.x,
-          followCam.texel.y,
-          1,
-          1,
-          followCam._pbuf,
-        );
-        readVelTexels(
-          followCam.texel.x,
-          followCam.texel.y,
-          1,
-          1,
-          followCam._vbuf,
-        );
+        const tx = followCam.texel.x;
+        const ty = followCam.texel.y;
+        if (blocking) {
+          readPosTexels(tx, ty, 1, 1, followCam._pbuf);
+          readVelTexels(tx, ty, 1, 1, followCam._vbuf);
+          // Drop any in-flight sample from a previous target.
+          _followPosReader.cancel();
+          _followVelReader.cancel();
+        } else {
+          _followPosReader.poll();
+          if (_followPosReader.take())
+            followCam._pbuf.set(_followPosReader.out);
+          _followVelReader.poll();
+          if (_followVelReader.take())
+            followCam._vbuf.set(_followVelReader.out);
+          _followPosReader.request(tx, ty);
+          _followVelReader.request(tx, ty);
+        }
         const mass = followCam._pbuf[3];
         followCam._bodyPos.set(
           followCam._pbuf[0],
@@ -13947,7 +14413,7 @@
         // so the attach swings into the right place. If the body is nearly
         // stationary, seed from the camera→body direction so the chase
         // ends up "behind" the current approach vector.
-        followCamReadBody();
+        followCamReadBody(true);
         if (followCam._bodyVel.lengthSq() > 1e-3) {
           followCam._smoothVelDir.copy(followCam._bodyVel).normalize();
         } else {
@@ -15634,6 +16100,9 @@
         if (!arr || arr.length === 0) return "—";
         return arr.slice(0, n).join(" ← ");
       }
+      function _fmtMs(x) {
+        return isFinite(x) ? x.toFixed(2) + "ms" : "—";
+      }
       function updateDebugOverlay() {
         if (!_debugOverlayVisible) return;
         const el = $("#debug-overlay");
@@ -15660,6 +16129,8 @@
         el.textContent =
           `flavour   ${d.flavour}${d.enabled ? "" : "  (off)"}${d.rehearse ? "  REHEARSAL 10×" : ""}\n` +
           `pace      ${d.pace}\n` +
+          `engine    int=${params.integrator}  scale=${renderer.getPixelRatio().toFixed(2)}×  post=${postMode.mode}  kick=${kickstart.remaining}\n` +
+          `readback  ${wgpuSim.active ? "mirror" : _followPosReader.failed ? "blocking (pbo fallback)" : "pbo"}  fps=${fpsEl.textContent}\n` +
           `state     ${d.state}  t=${_fmtSecs(d.stateTimer)}${d.wakeT > 0 ? `  wake=${_fmtSecs(d.wakeT)}` : ""}\n` +
           `dwell     ${_fmtSecs(dwellLeft)} left / ${_fmtSecs(d.dwellDuration)}\n` +
           (txLeft != null ? `tx-deadln ${_fmtSecs(txLeft)} left\n` : "") +
@@ -18198,11 +18669,30 @@
       // Read a single body's position/velocity (one-texel readback).
       const _sfBufPos = new Float32Array(4);
       const _sfBufVel = new Float32Array(4);
+      // Per-frame subject sample for track shots, non-blocking — the movie
+      // sibling of followCamReadBody (OPTIMIZATION_PLAN.md F1). Returns the
+      // latest landed sample; the first call for a new index reads
+      // synchronously so the shot starts on the body, not on zeros.
+      const _sfPosReader = new TexelReader("pos", 1, 1);
+      const _sfVelReader = new TexelReader("vel", 1, 1);
+      let _sfReaderIdx = -1;
       function readBodyState(idx) {
         const xi = idx % TEX_SIZE;
         const yi = Math.floor(idx / TEX_SIZE);
-        readPosTexels(xi, yi, 1, 1, _sfBufPos);
-        readVelTexels(xi, yi, 1, 1, _sfBufVel);
+        if (idx !== _sfReaderIdx) {
+          _sfReaderIdx = idx;
+          _sfPosReader.cancel();
+          _sfVelReader.cancel();
+          readPosTexels(xi, yi, 1, 1, _sfBufPos);
+          readVelTexels(xi, yi, 1, 1, _sfBufVel);
+        } else {
+          _sfPosReader.poll();
+          if (_sfPosReader.take()) _sfBufPos.set(_sfPosReader.out);
+          _sfVelReader.poll();
+          if (_sfVelReader.take()) _sfBufVel.set(_sfVelReader.out);
+        }
+        _sfPosReader.request(xi, yi);
+        _sfVelReader.request(xi, yi);
         return {
           pos: new THREE.Vector3(_sfBufPos[0], _sfBufPos[1], _sfBufPos[2]),
           vel: new THREE.Vector3(_sfBufVel[0], _sfBufVel[1], _sfBufVel[2]),
@@ -20294,11 +20784,30 @@
       // ===============================================================
       const stats = { ke: 0, temperature: 0, clumpiness: 0, sampled: 0 };
       let statsAccum = 0;
+      // HUD statistics, non-blocking (OPTIMIZATION_PLAN.md F3). Each call
+      // polls last second's fenced read and issues the next one; the
+      // buffers are reused (this used to allocate 2×N×16 B and drain the
+      // GPU queue twice, once a second). The JS pass is strided so it
+      // visits at most ~64k bodies — these are HUD estimates.
+      let _statsPosReader = null;
+      let _statsVelReader = null;
       function computeStats() {
-        const posBuf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
-        const velBuf = new Float32Array(TEX_SIZE * TEX_SIZE * 4);
-        readPosTexels(0, 0, TEX_SIZE, TEX_SIZE, posBuf);
-        readVelTexels(0, 0, TEX_SIZE, TEX_SIZE, velBuf);
+        if (!_statsPosReader) {
+          _statsPosReader = new TexelReader("pos", TEX_SIZE, TEX_SIZE);
+          _statsVelReader = new TexelReader("vel", TEX_SIZE, TEX_SIZE);
+        }
+        _statsPosReader.resize(TEX_SIZE, TEX_SIZE);
+        _statsVelReader.resize(TEX_SIZE, TEX_SIZE);
+        _statsPosReader.poll();
+        _statsVelReader.poll();
+        _statsPosReader.request(0, 0);
+        _statsVelReader.request(0, 0);
+        const havePos = _statsPosReader.take();
+        const haveVel = _statsVelReader.take();
+        if (!havePos || !haveVel) return; // sample lands on the next call
+        const posBuf = _statsPosReader.out;
+        const velBuf = _statsVelReader.out;
+        const step = Math.max(1, Math.floor(MAX_BODIES / 65536));
         let ke = 0,
           spSum = 0,
           sp2Sum = 0,
@@ -20308,7 +20817,7 @@
           cy = 0,
           cz = 0,
           mTot = 0;
-        for (let i = 0; i < MAX_BODIES; i++) {
+        for (let i = 0; i < MAX_BODIES; i += step) {
           const m = posBuf[i * 4 + 3];
           if (m <= 0) continue;
           live++;
@@ -20332,7 +20841,7 @@
         }
         // radial stddev from CoM
         let r2Sum = 0;
-        for (let i = 0; i < MAX_BODIES; i++) {
+        for (let i = 0; i < MAX_BODIES; i += step) {
           const m = posBuf[i * 4 + 3];
           if (m <= 0) continue;
           const dx = posBuf[i * 4 + 0] - cx;
@@ -20343,10 +20852,10 @@
         const rrms = live > 0 ? Math.sqrt(r2Sum / live) : 0;
         const vMean = live > 0 ? spSum / live : 0;
         const vVar = live > 0 ? sp2Sum / live - vMean * vMean : 0;
-        stats.ke = ke;
+        stats.ke = ke * step; // extensive: scale the strided sum back up
         stats.temperature = Math.sqrt(Math.max(vVar, 0));
         stats.clumpiness = rrms; // lower = more clustered
-        stats.sampled = live;
+        stats.sampled = live * step;
       }
 
       // ===============================================================
@@ -20711,6 +21220,10 @@
         const realDt = (now - lastTime) / 1000;
         lastTime = now;
 
+        // Amortized scene pre-roll (see kickstartSim). Runs during the
+        // intro too, so the porthole shows a formed scene.
+        kickstartTick();
+
         // Intro short-circuit: skip the sim's physics + post pipeline.
         // From LEAN_IN onward we render the sim's scene (no post) into
         // the porthole render target so the eyepiece sphere shows live
@@ -20799,7 +21312,7 @@
           if (wgpuSim.active) {
             wgpuFrameStep();
           } else {
-            for (let s = 0; s < params.substeps; s++) gpu.compute();
+            for (let s = 0; s < params.substeps; s++) gpuComputeStep();
           }
           simTime += effDt * sign * params.substeps;
           stepReverse = false;
