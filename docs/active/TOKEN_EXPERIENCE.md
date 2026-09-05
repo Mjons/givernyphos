@@ -126,7 +126,13 @@ Ten hashes rendered headless on the GPU at lush and standard
 1. **Slice 1 (landed):** tour generator + three templates, skip-on-
    input, handover to the director, the bar above, hint line, idle
    fade.
-2. Temperament trait + signature-shot trait line (recipe v2 — bump
-   `TOKEN_RECIPE_V`; not mintable until the weights lock).
-3. Moments scheduler.
-4. Mobile pass; gallery mode.
+2. **Identity layer (landed 2026-09-05):** Temperament trait
+   (drift 50 % · long-shadow 30 % · pulse 20 %, sets `director.flavour`,
+   rotation off); Signature trait (drift / chase / vertigo from the tour
+   template); Moments scheduler (first 2.5–5 min in, then every 4–9
+   min: a 40 s long exposure, an 18 s lens on the heaviest body, or a
+   30 s spin — deferred while a film plays or the holder drives,
+   restored to the recipe after, named in the hint line); the token's
+   star (the body the tour tracked) is Follow's first choice and a
+   Traits row. Recipe draw order changed (no mint yet, so still v1).
+3. Mobile pass; gallery mode.

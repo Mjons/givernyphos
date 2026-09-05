@@ -77,6 +77,19 @@ invisible until astrophage fell outside the kept K-matrix region.
 
 _(things in flight; not yet shipped)_
 
+- **100-token gate, first pass** (`render-plan.py`: every planned id
+  rendered on the GPU, stills measured, sheet + CSV): no blown frames;
+  Orrery tokens were a lone dot (authored pose far out) → token camera
+  moves in to 0.5× (`TOKEN_CAM_DIST`); Lattice / Coma / Orrery get an
+  exposure lift (`TOKEN_EXPOSURE_MUL`) and Lattice a 900-step pre-roll.
+- **Token identity: id-derived recipes + planned distribution +
+  identity layer.** `?id=N` (1..`TOKEN_EDITION`=100) derives from
+  `TOKEN_ID_SALT:id`; `TOKEN_PLAN` fixes exact family counts
+  (`__tokenPlan()`, `TOKEN_PLAN_OVERRIDES`). Recipe gains Temperament
+  (director flavour, rotation off) and Signature; Moments scheduler
+  (long exposure / lens on the heaviest body / spin, seeded cadence,
+  recipe restored after); the tour's tracked body becomes the token's
+  star for Follow and Traits.
 - **Token recipe tuning from the first contact sheet** (10 hashes ×
   lush/standard, `screenshots/token-sheet-2026-09-05.png`): channel
   stays authored (a drawn channel painted diffuse families black);

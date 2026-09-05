@@ -1504,10 +1504,18 @@
       // asks for the deterministic still. Platform SDKs win over the query
       // string: fx(hash) exposes window.$fx, Highlight exposes window.hl.
       // Section 13c holds the recipe and the boot path.
+      // Self-hosted contract path (INTERACTIVE_NFT.md decision 2026-09-05):
+      // the token id, not a platform hash, is the identity. ?id=N (1..
+      // TOKEN_EDITION) derives everything from TOKEN_ID_SALT:id, and the
+      // family comes from a planned table (TOKEN_PLAN, §13c) so the
+      // collection's family counts are exact rather than a dice roll.
+      const TOKEN_ID_SALT = "giverny-phos/2026";
+      const TOKEN_EDITION = 100;
       const TOKEN = (() => {
         const t = {
           active: false,
           hash: null,
+          id: null,
           preview: false,
           platform: "none",
           ready: false,
@@ -1526,6 +1534,13 @@
           } else if (q.get("token")) {
             t.hash = q.get("token");
             t.platform = "url";
+          } else if (q.get("id")) {
+            const id = parseInt(q.get("id"), 10);
+            if (id >= 1 && id <= TOKEN_EDITION) {
+              t.id = id;
+              t.hash = TOKEN_ID_SALT + ":" + id;
+              t.platform = "id";
+            }
           }
           if (q.get("preview") === "1") t.preview = true;
           t.active = !!t.hash;
@@ -12714,6 +12729,63 @@
         // body count — one tier is a white frame, the next a sparse field
         // (contact sheet 2026-09-05). Revisit with a per-tier exposure.
       ];
+      // Planned distribution for the self-hosted edition: exact per-family
+      // counts from the weights (largest-remainder rounding), then a
+      // seeded shuffle so ids aren't grouped by family. Data, not code —
+      // __tokenPlan() prints it; hand-edit TOKEN_PLAN_OVERRIDES to pin
+      // specific ids to families before the mint.
+      const TOKEN_PLAN_OVERRIDES = {}; // { id: sceneKey }
+      function buildTokenPlan(n) {
+        const total = TOKEN_FAMILIES.reduce((s, p) => s + p[1], 0);
+        const quota = TOKEN_FAMILIES.map(([k, w]) => ({ k, exact: (w / total) * n }));
+        let counts = quota.map((q) => ({ k: q.k, c: Math.floor(q.exact), rem: q.exact - Math.floor(q.exact) }));
+        let used = counts.reduce((s, c) => s + c.c, 0);
+        counts
+          .slice()
+          .sort((a, b) => b.rem - a.rem)
+          .forEach((c) => {
+            if (used < n) {
+              c.c++;
+              used++;
+            }
+          });
+        const list = [];
+        for (const c of counts) for (let i = 0; i < c.c; i++) list.push(c.k);
+        const r = mulberry32(fold32(TOKEN_ID_SALT + ":plan"));
+        for (let i = list.length - 1; i > 0; i--) {
+          const j = Math.floor(r() * (i + 1));
+          [list[i], list[j]] = [list[j], list[i]];
+        }
+        for (const id of Object.keys(TOKEN_PLAN_OVERRIDES)) {
+          const i = parseInt(id, 10) - 1;
+          if (i >= 0 && i < list.length && SCENES[TOKEN_PLAN_OVERRIDES[id]]) {
+            list[i] = TOKEN_PLAN_OVERRIDES[id];
+          }
+        }
+        return list;
+      }
+      const TOKEN_PLAN = buildTokenPlan(TOKEN_EDITION);
+      if (typeof window !== "undefined") {
+        window.__tokenPlan = () => {
+          const counts = {};
+          for (const k of TOKEN_PLAN) counts[k] = (counts[k] || 0) + 1;
+          return { plan: TOKEN_PLAN.slice(), counts };
+        };
+      }
+      // Temperament = the director flavour the token lives in (TOKEN_
+      // EXPERIENCE.md §3). Oracle is the event-rotation flavour — not
+      // meaningful in a one-scene world.
+      const TOKEN_TEMPERAMENTS = [
+        ["drift", 5],
+        ["long-shadow", 3],
+        ["pulse", 2],
+      ];
+      const TOKEN_TEMPERAMENT_LABEL = {
+        drift: "contemplative",
+        "long-shadow": "patient",
+        pulse: "restless",
+      };
+      const TOKEN_SIGNATURE_LABEL = { calm: "drift", dynamic: "chase", well: "vertigo" };
       const TOKEN_OWN_WEIGHT = 6; // the scene's authored palette / channel
       // `age` is excluded: every body is the same age at the token's first
       // moments, so the channel paints a flat colour.
@@ -12737,8 +12809,15 @@
       // scene grows into over its first seconds is already there (rings,
       // tails, arms). Amortized live (kickstartTick), synchronous in
       // previews. Scenes whose own kickstart is larger keep theirs.
+      // Per-family token adjustments from the 100-token gate: Orrery's
+      // authored pose is far out (a lone dot at preview size) — move in;
+      // Lattice and Coma read dim at the token's first moments — lift
+      // exposure, and give Lattice time to start collapsing.
+      const TOKEN_CAM_DIST = { orrery: 0.5 };
+      const TOKEN_EXPOSURE_MUL = { lattice: 1.35, coma: 1.2, orrery: 1.2 };
       const TOKEN_PREROLL = {
         default: 400,
+        lattice: 900,
         whirlpool: 2400, // companion pericenter ≈ 2200 steps; arms after
         cartwheel: 1200, // ring wave emerges ~1000–1300 steps in
         collision: 500, // longer and the remnant drifts off the target
@@ -12781,7 +12860,8 @@
         const pitchDeg = gentle ? 4 : 8;
         const yaw = (r() * 2 - 1) * ((yawDeg * Math.PI) / 180);
         const pitch = (r() * 2 - 1) * ((pitchDeg * Math.PI) / 180);
-        const dist = 1.0 + r() * (gentle ? 0.1 : 0.2);
+        const dist =
+          (1.0 + r() * (gentle ? 0.1 : 0.2)) * (TOKEN_CAM_DIST[scene] ?? 1);
         const tgt = new THREE.Vector3().fromArray(c.tgt);
         const rel = new THREE.Vector3().fromArray(c.pos).sub(tgt);
         const sph = new THREE.Spherical().setFromVector3(rel);
@@ -12802,9 +12882,11 @@
       // hash → recipe. Fixed draw order; every r() below is load-bearing.
       // The `share` field is a share-state object, so applyShareState()
       // is the whole apply path.
-      function deriveTokenRecipe(hash) {
+      function deriveTokenRecipe(hash, opts) {
+        const o = opts || {};
         const r = mulberry32(fold32(String(hash)));
-        const scene = weightedPick(TOKEN_FAMILIES, r());
+        const drawn = weightedPick(TOKEN_FAMILIES, r()); // always consumed
+        const scene = o.scene && SCENES[o.scene] ? o.scene : drawn;
         const sc = SCENES[scene];
         const seed = (r() * 0xffffffff) >>> 0;
         const scenarioRoll = r();
@@ -12831,7 +12913,9 @@
         const channel = sc.channel === "age" ? "speed" : sc.channel;
         const pert = (v, f) => +((v ?? 0) * (1 - f + 2 * f * r())).toFixed(3);
         const bloom = pert(sc.post.bloom, 0.15);
-        const exposure = pert(sc.post.exposure, 0.08);
+        const exposure = +(
+          pert(sc.post.exposure, 0.08) * (TOKEN_EXPOSURE_MUL[scene] ?? 1)
+        ).toFixed(3);
         const grain = pert(sc.post.grain, 0.25);
         const longExposure = (sc.post.trail ?? 0) < 0.5 && r() < 0.12;
         const trail = longExposure
@@ -12843,10 +12927,16 @@
         const spinRoll = r();
         const spin =
           spinRoll < 0.08 ? TOKEN_SPIN : spinRoll < 0.16 ? -TOKEN_SPIN : 0;
+        const temperament = weightedPick(TOKEN_TEMPERAMENTS, r());
+        const signature =
+          TOKEN_SIGNATURE_LABEL[TOKEN_TOUR_TEMPLATE[scene] || "calm"];
         const cam = tokenPerturbCamera(sc.camera, r, scene);
         return {
           v: TOKEN_RECIPE_V,
           hash: String(hash),
+          id: o.id ?? null,
+          temperament,
+          signature,
           scene,
           seed,
           collisionScenario,
@@ -12879,7 +12969,10 @@
       function tokenTraits(rec) {
         const sc = SCENES[rec.scene];
         return {
+          ...(rec.id ? { Token: `#${rec.id} of ${TOKEN_EDITION}` } : {}),
           Family: sc ? sc.name : rec.scene,
+          Temperament: TOKEN_TEMPERAMENT_LABEL[rec.temperament] || rec.temperament,
+          Signature: rec.signature,
           Variant: rec.collisionScenario || "—",
           Palette: rec.palette,
           Channel: rec.channel,
@@ -12890,12 +12983,23 @@
       }
 
       let tokenRecipe = null;
+      let tokenStar = -1; // the body the tour tracked — "the token's star"
       async function tokenBoot() {
-        tokenRecipe = deriveTokenRecipe(TOKEN.hash);
+        tokenRecipe = deriveTokenRecipe(
+          TOKEN.hash,
+          TOKEN.id ? { scene: TOKEN_PLAN[TOKEN.id - 1], id: TOKEN.id } : {},
+        );
         // Backdrop from the hash too, so frame one reproduces.
         buildStarfield(mulberry32(fold32(TOKEN.hash + ":sky")));
         installTokenUi();
         await applyTokenRecipe();
+        // Temperament: the director flavour this token lives in. No
+        // rotation — the flavour is part of the identity.
+        if (FLAVOURS[tokenRecipe.temperament]) {
+          director.flavour = tokenRecipe.temperament;
+        }
+        director.rotateMode = false;
+        tokenMomentsInit();
         const traits = tokenTraits(tokenRecipe);
         try {
           if (TOKEN.platform === "fxhash" && typeof $fx.features === "function") {
@@ -13093,6 +13197,7 @@
       // token's home pose, then wake the director. The user grabbing the
       // camera mid-settle aborts it and leaves them in control.
       function tokenAfterTour() {
+        if (movie.lockedSubject >= 0) tokenStar = movie.lockedSubject;
         const c = tokenRecipe.share.cam;
         const dist = camera.position.distanceTo(controls.target);
         const fwd = new THREE.Vector3();
@@ -13131,11 +13236,101 @@
           if (!director.enabled) toggleCinematic();
         }
       }
-      // Per-frame token chrome: settle, idle fade, hint line, bar labels.
+      // ---- Moments (TOKEN_EXPERIENCE.md §3) ------------------------------
+      // Rare, seeded, ephemeral events inside a session: a long-exposure
+      // minute, a lens flash on the heaviest body, a spin. Cadence 4–9 min
+      // of time in the scene; deferred while a film plays or the holder
+      // is driving. Everything restores to the recipe afterwards.
+      const tokenMoments = { rng: null, nextAt: 0, active: null };
+      function tokenMomentsInit() {
+        tokenMoments.rng = mulberry32(fold32(tokenRecipe.hash + ":moments"));
+        tokenMoments.nextAt =
+          performance.now() + (150 + tokenMoments.rng() * 150) * 1000;
+        tokenMoments.active = null;
+      }
+      function tokenMomentStart(kind) {
+        const rec = tokenRecipe;
+        const sc = SCENES[rec.scene];
+        const m = { kind, t: 0, dur: 40, label: "long exposure" };
+        if (kind === "lens") {
+          const idx = findSubject("heaviest");
+          if (idx < 0) return null;
+          const s = readBodyState(idx);
+          if (!(s.mass > 0)) return null;
+          setLensStatic({
+            center: [s.pos.x, s.pos.y, s.pos.z],
+            strength: 0.9,
+            einstein: 0.07,
+            shadow: 0.0,
+          });
+          lensPass.uniforms.uStrength.value = 0;
+          m.dur = 18;
+          m.label = "a lens";
+        } else if (kind === "spin") {
+          const sign = tokenMoments.rng() < 0.5 ? 1 : -1;
+          m.spin = sign * 0.12;
+          params.spin = m.spin;
+          velVar.material.uniforms.uSpin.value = m.spin;
+          m.dur = 30;
+          m.label = sign > 0 ? "a prograde turn" : "a retrograde turn";
+        } else {
+          params.trail = 0.93;
+          setPostParams({ trail: 0.93 });
+        }
+        return m;
+      }
+      function tokenMomentEnd(m) {
+        const rec = tokenRecipe;
+        const sc = SCENES[rec.scene];
+        if (m.kind === "lens") {
+          setLensStatic(sc.lens || null);
+          lensPass.uniforms.uStrength.value = lensState.targetStrength;
+        } else if (m.kind === "spin") {
+          params.spin = rec.spin;
+          velVar.material.uniforms.uSpin.value = rec.spin;
+        } else {
+          params.trail = rec.share.post.trail ?? 0;
+          setPostParams({ trail: params.trail });
+        }
+      }
+      function tokenMomentsTick(realDt) {
+        const mm = tokenMoments;
+        if (!mm.rng || TOKEN.preview) return;
+        const now = performance.now();
+        if (mm.active) {
+          const m = mm.active;
+          m.t += realDt;
+          if (m.kind === "lens") {
+            const ramp = 3;
+            const k =
+              m.t < ramp ? m.t / ramp : m.t > m.dur - ramp ? Math.max(0, (m.dur - m.t) / ramp) : 1;
+            lensPass.uniforms.uStrength.value = 0.9 * k;
+          }
+          if (m.t >= m.dur) {
+            tokenMomentEnd(m);
+            mm.active = null;
+          }
+          return;
+        }
+        if (now < mm.nextAt) return;
+        if (movie.active || now - lastUserInputTime < 8000) {
+          mm.nextAt = now + 15000;
+          return;
+        }
+        const roll = mm.rng();
+        let kind = roll < 0.45 ? "exposure" : roll < 0.75 ? "lens" : "spin";
+        const sc = SCENES[tokenRecipe.scene];
+        if (kind === "lens" && sc.lens) kind = "exposure"; // already lensed
+        mm.active = tokenMomentStart(kind);
+        mm.nextAt = now + (240 + mm.rng() * 300) * 1000;
+      }
+
+      // Per-frame token chrome: settle, moments, idle fade, hint, labels.
       let _tokenUiAccum = 0;
       function tokenTick(realDt) {
         if (TOKEN.preview) return;
         tokenTickSettle(realDt);
+        tokenMomentsTick(realDt);
         _tokenUiAccum += realDt;
         if (_tokenUiAccum < 0.25) return;
         _tokenUiAccum = 0;
@@ -13148,6 +13343,7 @@
         if (hint) {
           let text;
           if (touring) text = "click anywhere to skip the tour";
+          else if (tokenMoments.active) text = "a moment · " + tokenMoments.active.label;
           else if (followCamActive())
             text = "following · scroll to change distance · Esc releases";
           else if (director.enabled)
@@ -13310,6 +13506,9 @@
               followCamRelease("token");
               return;
             }
+            // The token's star (the body the tour tracked) first; then
+            // whatever is moving fastest right now.
+            if (tokenStar >= 0 && followCamAttachByIndex(tokenStar)) return;
             const idx = findSubject("fastest", { minSpeed: 0.5 });
             if (idx >= 0) followCamAttachByIndex(idx);
             else showToast("Follow", "nothing moving fast enough yet");
@@ -13347,7 +13546,9 @@
           }
           const d = document.createElement("div");
           d.id = "token-features";
-          const rows = Object.entries(tokenTraits(tokenRecipe)).map(([k, v]) => {
+          const entries = Object.entries(tokenTraits(tokenRecipe));
+          if (tokenStar >= 0) entries.push(["Star", "#" + tokenStar]);
+          const rows = entries.map(([k, v]) => {
             const row = document.createElement("div");
             const b = document.createElement("b");
             b.textContent = k;

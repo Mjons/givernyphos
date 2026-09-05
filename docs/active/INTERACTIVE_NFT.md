@@ -30,6 +30,17 @@ last-updated: 2026-09-05
 > The holder-facing side (opening tour, bar, hints, temperament,
 > moments) lives in [TOKEN_EXPERIENCE.md](TOKEN_EXPERIENCE.md); its
 > slice 1 landed the same day.
+>
+> **Identity decision (later the same day): self-hosted ERC-721, token
+> id is the identity.** `?id=N` (1..100) derives everything from
+> `TOKEN_ID_SALT:id`; the family comes from `TOKEN_PLAN`, a table of
+> exactly 100 families built from the weights (largest-remainder
+> rounding, seeded shuffle, `TOKEN_PLAN_OVERRIDES` to pin ids). So the
+> collection's family counts are exact, every seed is unique, and the
+> contract's `animation_url` is just `…/index.html?id=N`. The platform
+> hash hooks remain for testing. `__tokenPlan()` prints the table.
+> The 100-token gate (`render-plan.py`) renders every id and flags
+> black / blown / errored stills.
 
 A scratchpad for packaging the simulator as a collectible: every token
 is its own scene — its own galaxy, palette, physics recipe and music —
