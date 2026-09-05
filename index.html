@@ -1498,6 +1498,64 @@
       // ===============================================================
       // 1. CONFIG & DOM HELPERS
       // ===============================================================
+      // ---- Token mode (INTERACTIVE_NFT.md) — early parse -----------------
+      // Read before the density tier is chosen. `token` is the platform
+      // hash (any string; folded to 32 bits by the recipe), `preview=1`
+      // asks for the deterministic still. Platform SDKs win over the query
+      // string: fx(hash) exposes window.$fx, Highlight exposes window.hl.
+      // Section 13c holds the recipe and the boot path.
+      const TOKEN = (() => {
+        const t = {
+          active: false,
+          hash: null,
+          preview: false,
+          platform: "none",
+          ready: false,
+        };
+        try {
+          const q = new URL(location.href).searchParams;
+          const fx = window.$fx;
+          const hl = window.hl;
+          if (fx && typeof fx.hash === "string") {
+            t.hash = fx.hash;
+            t.platform = "fxhash";
+            t.preview = fx.context === "capture";
+          } else if (hl && hl.tx && typeof hl.tx.hash === "string") {
+            t.hash = hl.tx.hash;
+            t.platform = "highlight";
+          } else if (q.get("token")) {
+            t.hash = q.get("token");
+            t.platform = "url";
+          }
+          if (q.get("preview") === "1") t.preview = true;
+          t.active = !!t.hash;
+        } catch (_) {}
+        return t;
+      })();
+      // Density is a device concern in token mode (never a trait): phones
+      // get lite, a discrete desktop GPU gets lush (the app's sweet spot),
+      // everything else standard. The GPU sniff is a throwaway WebGL
+      // context + WEBGL_debug_renderer_info; any failure → standard.
+      function tokenDeviceTier() {
+        const ua = navigator.userAgent || "";
+        const coarse =
+          !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        const mobile =
+          /Mobi|Android|iPhone|iPad|iPod/i.test(ua) ||
+          (coarse && (navigator.maxTouchPoints || 0) > 1);
+        if (mobile) return "lite";
+        try {
+          const cv = document.createElement("canvas");
+          const gl = cv.getContext("webgl2") || cv.getContext("webgl");
+          const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+          const name = ext
+            ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
+            : "";
+          if (/NVIDIA|GeForce|RTX|Radeon|AMD|Arc\b/i.test(name)) return "lush";
+        } catch (_) {}
+        return "standard";
+      }
+
       // Density level → TEX_SIZE. Mutable so the user can resize live.
       // See BODY_COUNT.md. MAX_BODIES is always TEX_SIZE².
       const DENSITY_LEVELS = {
@@ -1534,6 +1592,21 @@
         "abyssal",
       ];
       function loadInitialDensity() {
+        // Token mode (INTERACTIVE_NFT.md §5.5): ?objects= still overrides
+        // for testing; otherwise the device decides, and previews always
+        // render at `standard` so every capture machine takes one path.
+        if (TOKEN.active) {
+          try {
+            const raw = (new URL(location.href).searchParams.get("objects") || "")
+              .toLowerCase()
+              .trim();
+            if (raw && DENSITY_LEVELS[raw]) return raw;
+            for (const key of DENSITY_ORDER) {
+              if (DENSITY_LEVELS[key].shortCount === raw) return key;
+            }
+          } catch (_) {}
+          return TOKEN.preview ? "standard" : tokenDeviceTier();
+        }
         // URL param takes top priority — lets an embed / share link
         // land a visitor at a specific density without them touching UI.
         // Accepts either the key name (?objects=lush) or the short count
@@ -5483,7 +5556,7 @@
       (async function probeWebGPU() {
         try {
           const url = new URL(location.href);
-          if (url.searchParams.has("nogpu")) {
+          if (url.searchParams.has("nogpu") || TOKEN.preview) {
             wgpuSim.reason = "disabled via ?nogpu";
             return;
           }
@@ -5759,6 +5832,7 @@
       };
 
       function introShouldPlay() {
+        if (TOKEN.active) return false;
         try {
           const url = new URL(location.href);
           const p = url.searchParams.get("intro");
@@ -7114,28 +7188,32 @@
       // 3. STARFIELD (procedural, twinkling)
       // ===============================================================
       let starfieldMat = null;
-      {
+      let starfieldGeo = null;
+      // Fills the backdrop from `rand` — Math.random for the app, a seeded
+      // generator in token mode so the first frame reproduces exactly.
+      function buildStarfield(rand) {
         const N = 9000;
         const pos = new Float32Array(N * 3);
         const phase = new Float32Array(N);
         const sz = new Float32Array(N);
         for (let i = 0; i < N; i++) {
-          const r = 8000 + Math.random() * 4500;
-          const theta = Math.acos(2 * Math.random() - 1);
-          const phi = Math.random() * 2 * Math.PI;
+          const r = 8000 + rand() * 4500;
+          const theta = Math.acos(2 * rand() - 1);
+          const phi = rand() * 2 * Math.PI;
           pos[i * 3 + 0] = r * Math.sin(theta) * Math.cos(phi);
           pos[i * 3 + 1] = r * Math.sin(theta) * Math.sin(phi);
           pos[i * 3 + 2] = r * Math.cos(theta);
-          phase[i] = Math.random() * 6.2831853;
-          sz[i] =
-            Math.random() < 0.025
-              ? 2.0 + Math.random() * 1.4
-              : 0.7 + Math.random() * 1.2;
+          phase[i] = rand() * 6.2831853;
+          sz[i] = rand() < 0.025 ? 2.0 + rand() * 1.4 : 0.7 + rand() * 1.2;
         }
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-        geo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
-        geo.setAttribute("aSize", new THREE.BufferAttribute(sz, 1));
+        if (!starfieldGeo) starfieldGeo = new THREE.BufferGeometry();
+        starfieldGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+        starfieldGeo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
+        starfieldGeo.setAttribute("aSize", new THREE.BufferAttribute(sz, 1));
+      }
+      {
+        buildStarfield(Math.random);
+        const geo = starfieldGeo;
         starfieldMat = new THREE.ShaderMaterial({
           uniforms: { uTime: { value: 0 }, uIntensity: { value: 0.55 } },
           transparent: true,
@@ -7597,6 +7675,12 @@
         uniform float uKindTints[${NUM_KINDS * 3}]; // per-kind optional tint multipliers
         uniform vec2  uFollowUV;         // aRef of the followed body; (-1,-1) = inactive
         uniform float uFollowPulse;      // 0..1, drives attach-halo pulse
+        uniform float uPointMax;         // sprite size cap, device px (F6)
+        uniform float uPointMaxBH;       // same, for the black hole (kind 2)
+        uniform float uViewScale;        // drawing-buffer height / 1440 (see syncPointViewScale)
+        uniform float uTierGain;         // token mode: sqrt(65536 / N), so lower tiers match lush brightness
+        uniform vec3  uPlanetPos;        // astrophage sink (PETROVA_LINE.md); kind 7 only
+        uniform float uPlanetRadius;     // arrival radius; 0 = no kind-7 fade
         attribute vec2 aRef;
         varying vec3 vColor;
         varying float vAlpha;
@@ -7753,7 +7837,7 @@
             return;
           }
 
-          vColor = c;
+          vColor = c * sizeBoost * uTierGain;
           vAlpha = isHalo ? 0.32 : 1.0;
         }
       `;
@@ -7823,6 +7907,16 @@
           uKindTints: { value: new Array(NUM_KINDS * 3).fill(1.0) },
           uFollowUV: { value: new THREE.Vector2(-1.0, -1.0) },
           uFollowPulse: { value: 0.0 },
+          // Astrophage sink for the kind-7 arrival fade; set by
+          // applyAstroUniforms, zero radius = inactive.
+          uPlanetPos: { value: new THREE.Vector3(0, 0, 0) },
+          uPlanetRadius: { value: 0.0 },
+          // Device-pixel caps (F6). If a render-scale setting ever changes
+          // the pixel ratio at runtime, rescale these with it.
+          uPointMax: { value: 256.0 * renderer.getPixelRatio() },
+          uPointMaxBH: { value: 1024.0 * renderer.getPixelRatio() },
+          uViewScale: { value: 1.0 },
+          uTierGain: { value: 1.0 },
         },
         vertexShader: pointVert,
         fragmentShader: pointFrag,
@@ -7835,6 +7929,34 @@
       const bodies = new THREE.Points(refGeom, pointMat);
       bodies.frustumCulled = false;
       scene.add(bodies);
+
+      // Sprite sizes are authored in device pixels for a 1440 px-tall frame
+      // (the CONTRIBUTING screenshot spec). Scale them with the drawing
+      // buffer so smaller canvases (iframes, previews, phones) and larger
+      // captures keep the same composition. Called every frame and from the
+      // capture path; __setPointRef(px) moves the reference.
+      let POINT_REF_HEIGHT = 1440;
+      const _dbSize = new THREE.Vector2();
+      function syncPointViewScale() {
+        const h = renderer.getDrawingBufferSize(_dbSize).y || POINT_REF_HEIGHT;
+        pointMat.uniforms.uViewScale.value = Math.max(0.2, h / POINT_REF_HEIGHT);
+        // Additive blending makes brightness ∝ body count. In token mode
+        // the tier is a device concern, so lower tiers get a gain that
+        // brings their integrated brightness to the lush look (√ because
+        // sprites also overlap less): standard ×2, lite ×4. The main app
+        // is untouched (gain 1).
+        pointMat.uniforms.uTierGain.value = TOKEN.active
+          ? Math.min(4, Math.max(1, Math.sqrt(65536 / MAX_BODIES)))
+          : 1.0;
+      }
+      syncPointViewScale();
+      if (typeof window !== "undefined") {
+        window.__setPointRef = (px) => {
+          if (px > 0) POINT_REF_HEIGHT = px;
+          syncPointViewScale();
+          return POINT_REF_HEIGHT;
+        };
+      }
 
       // ---- Photon ring  (scene-scoped; off by default) ----
       // Flat annulus in the disk plane (XZ).  Procedural glow: gaussian falloff
@@ -8322,17 +8444,21 @@
         // music play button calling playPause) runs first; otherwise we
         // play() pre-click and the click handler immediately pauses it,
         // making the play button look broken.
-        load(state.index, true);
-        const unlockAudio = () => {
-          setTimeout(() => {
-            if (audio.paused) {
-              const p = audio.play();
-              if (p && p.catch) p.catch(() => {});
-            }
-          }, 50);
-        };
-        window.addEventListener("pointerdown", unlockAudio, { once: true });
-        window.addEventListener("keydown", unlockAudio, { once: true });
+        // Token mode ships without music (INTERACTIVE_NFT.md decision):
+        // never set a src, so the bundle makes no request.
+        if (!TOKEN.active) {
+          load(state.index, true);
+          const unlockAudio = () => {
+            setTimeout(() => {
+              if (audio.paused) {
+                const p = audio.play();
+                if (p && p.catch) p.catch(() => {});
+              }
+            }, 50);
+          };
+          window.addEventListener("pointerdown", unlockAudio, { once: true });
+          window.addEventListener("keydown", unlockAudio, { once: true });
+        }
 
         return {
           audio,
@@ -8650,11 +8776,17 @@
             float scale = uAmount * d * d;
             vec2 offR = dir * scale * 1.4;
             vec2 offB = dir * scale * -1.4;
-            float r = texture2D(tDiffuse, vUv + offR).r;
-            float g = texture2D(tDiffuse, vUv).g;
-            float b = texture2D(tDiffuse, vUv + offB).b;
-            float a = texture2D(tDiffuse, vUv).a;
-            gl_FragColor = vec4(r, g, b, a);
+            // Off-frame taps fall back to the centre sample: clamped
+            // sampling smeared bright edge sprites into long red/blue
+            // streaks along the frame borders.
+            vec2 uvR = vUv + offR;
+            vec2 uvB = vUv + offB;
+            vec4 cc = texture2D(tDiffuse, vUv);
+            bool inR = all(greaterThanEqual(uvR, vec2(0.0))) && all(lessThanEqual(uvR, vec2(1.0)));
+            bool inB = all(greaterThanEqual(uvB, vec2(0.0))) && all(lessThanEqual(uvB, vec2(1.0)));
+            float r = inR ? texture2D(tDiffuse, uvR).r : cc.r;
+            float b = inB ? texture2D(tDiffuse, uvB).b : cc.b;
+            gl_FragColor = vec4(r, cc.g, b, cc.a);
           }
         `,
       });
@@ -12549,6 +12681,700 @@
       const BETWEEN_ARC_TRANSITION_MS = 20000; // grand edits between arcs
 
       // ===============================================================
+      // 13c. TOKEN MODE  (INTERACTIVE_NFT.md — one living scene per token)
+      // ===============================================================
+      // Decisions 2026-09-05: Ethereum, 100 tokens, Petrova out, music
+      // out, density is a device concern (never a trait). The hash →
+      // recipe draw order below is versioned: changing a weight table or
+      // adding a draw after the first mint means bumping TOKEN_RECIPE_V
+      // and keeping the old path alive for older tokens.
+      const TOKEN_RECIPE_V = 1;
+      // [scene, weight]. Tiers: common 8 · uncommon 4 (collision 6 — it
+      // carries five scenarios) · rare 2. petrova-line / ship-test are
+      // excluded (IP, INTERACTIVE_NFT.md §8.1).
+      const TOKEN_FAMILIES = [
+        ["quiet-drift", 8],
+        ["dust-storm", 8],
+        ["coma", 8],
+        ["lattice", 8],
+        ["orrery", 8],
+        ["milky-way", 8],
+        ["sombrero", 8],
+        ["horsehead", 8],
+        ["collision", 6],
+        ["whirlpool", 4],
+        ["cartwheel", 4],
+        ["antennae", 4],
+        ["stephans-quintet", 4],
+        ["bullet-cluster", 4],
+        ["virgo-m87", 4],
+        ["sagittarius", 2],
+        ["event-horizon", 2],
+        // birth is out: an expanding shell whose brightness scales with
+        // body count — one tier is a white frame, the next a sparse field
+        // (contact sheet 2026-09-05). Revisit with a per-tier exposure.
+      ];
+      const TOKEN_OWN_WEIGHT = 6; // the scene's authored palette / channel
+      // `age` is excluded: every body is the same age at the token's first
+      // moments, so the channel paints a flat colour.
+      // `density` only where authored: on a diffuse family it paints the
+      // darkest palette stop everywhere (contact sheet: quiet-drift went
+      // black). `kind` reads well on multi-kind scenes; `mass` is a quiet
+      // monochrome.
+      const TOKEN_CHANNEL_WEIGHTS = {
+        speed: 3,
+        density: 0,
+        mass: 1,
+        kind: 1,
+        age: 0,
+      };
+      const TOKEN_SPIN = 0.08; // slider range is ±0.5 — a whisper of vorticity
+      const TOKEN_LONG_EXPOSURE_TRAIL = 0.9;
+      // Palettes a token may draw when it doesn't keep its authored one.
+      // mono / bone read as grey-outs on most families (contact sheet).
+      const TOKEN_PALETTE_POOL = ["ice", "ember", "aurora", "nebula", "sunset", "vaporwv"];
+      // Pre-roll substeps before a token's first frame, so structure the
+      // scene grows into over its first seconds is already there (rings,
+      // tails, arms). Amortized live (kickstartTick), synchronous in
+      // previews. Scenes whose own kickstart is larger keep theirs.
+      const TOKEN_PREROLL = {
+        default: 400,
+        whirlpool: 2400, // companion pericenter ≈ 2200 steps; arms after
+        cartwheel: 1200, // ring wave emerges ~1000–1300 steps in
+        collision: 500, // longer and the remnant drifts off the target
+        antennae: 500,
+        "stephans-quintet": 600,
+        "bullet-cluster": 600,
+        birth: 120, // an expanding shell — its beauty is early
+        "event-horizon": 300,
+        sagittarius: 300,
+        "virgo-m87": 300,
+      };
+
+      // FNV-1a over the hash string → 32-bit PRNG seed.
+      function fold32(str) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < str.length; i++) {
+          h ^= str.charCodeAt(i);
+          h = Math.imul(h, 0x01000193);
+        }
+        return h >>> 0;
+      }
+      function weightedPick(pairs, u) {
+        let total = 0;
+        for (const p of pairs) total += p[1];
+        let r = u * total;
+        for (const p of pairs) {
+          r -= p[1];
+          if (r <= 0) return p[0];
+        }
+        return pairs[pairs.length - 1][0];
+      }
+      // Authored pose nudged about its target. Conservative on purpose —
+      // the contact sheet showed that moving in on a bright core blows the
+      // frame out, and gravity-well scenes are composed around the
+      // shadow, so they get only a small yaw. Never closer than authored.
+      // Returns the share-state cam[7] array.
+      function tokenPerturbCamera(c, r, scene) {
+        const gentle = TOKEN_TOUR_TEMPLATE[scene] === "well";
+        const yawDeg = gentle ? 10 : 25;
+        const pitchDeg = gentle ? 4 : 8;
+        const yaw = (r() * 2 - 1) * ((yawDeg * Math.PI) / 180);
+        const pitch = (r() * 2 - 1) * ((pitchDeg * Math.PI) / 180);
+        const dist = 1.0 + r() * (gentle ? 0.1 : 0.2);
+        const tgt = new THREE.Vector3().fromArray(c.tgt);
+        const rel = new THREE.Vector3().fromArray(c.pos).sub(tgt);
+        const sph = new THREE.Spherical().setFromVector3(rel);
+        sph.theta += yaw;
+        sph.phi = Math.max(0.15, Math.min(Math.PI - 0.15, sph.phi + pitch));
+        sph.radius *= dist;
+        const p = new THREE.Vector3().setFromSpherical(sph).add(tgt);
+        return [
+          +p.x.toFixed(3),
+          +p.y.toFixed(3),
+          +p.z.toFixed(3),
+          +tgt.x.toFixed(3),
+          +tgt.y.toFixed(3),
+          +tgt.z.toFixed(3),
+          c.fov,
+        ];
+      }
+      // hash → recipe. Fixed draw order; every r() below is load-bearing.
+      // The `share` field is a share-state object, so applyShareState()
+      // is the whole apply path.
+      function deriveTokenRecipe(hash) {
+        const r = mulberry32(fold32(String(hash)));
+        const scene = weightedPick(TOKEN_FAMILIES, r());
+        const sc = SCENES[scene];
+        const seed = (r() * 0xffffffff) >>> 0;
+        const scenarioRoll = r();
+        let collisionScenario;
+        if (scene === "collision") {
+          collisionScenario = weightedPick(
+            Object.keys(COLLISION_SCENARIOS).map((k) => [k, 1]),
+            scenarioRoll,
+          );
+        }
+        const palettePool = TOKEN_PALETTE_POOL.includes(sc.palette)
+          ? TOKEN_PALETTE_POOL
+          : [sc.palette, ...TOKEN_PALETTE_POOL];
+        const palette = weightedPick(
+          palettePool.map((k) => [k, k === sc.palette ? TOKEN_OWN_WEIGHT : 1]),
+          r(),
+        );
+        // Channel stays authored: the contact sheet showed that a drawn
+        // channel can paint a family black (density on a diffuse scene,
+        // kind on single-kind stars with a dark-start palette). An authored
+        // `age` (birth) is the darkest stop at the token's first moments,
+        // so it becomes `speed`. TOKEN_CHANNEL_WEIGHTS is kept for a later
+        // per-family opt-in.
+        const channel = sc.channel === "age" ? "speed" : sc.channel;
+        const pert = (v, f) => +((v ?? 0) * (1 - f + 2 * f * r())).toFixed(3);
+        const bloom = pert(sc.post.bloom, 0.15);
+        const exposure = pert(sc.post.exposure, 0.08);
+        const grain = pert(sc.post.grain, 0.25);
+        const longExposure = (sc.post.trail ?? 0) < 0.5 && r() < 0.12;
+        const trail = longExposure
+          ? TOKEN_LONG_EXPOSURE_TRAIL
+          : (sc.post.trail ?? 0);
+        const dopplerRoll = r();
+        const doppler =
+          (sc.doppler ?? 0) > 0 ? sc.doppler : dopplerRoll < 0.15 ? 0.3 : 0;
+        const spinRoll = r();
+        const spin =
+          spinRoll < 0.08 ? TOKEN_SPIN : spinRoll < 0.16 ? -TOKEN_SPIN : 0;
+        const cam = tokenPerturbCamera(sc.camera, r, scene);
+        return {
+          v: TOKEN_RECIPE_V,
+          hash: String(hash),
+          scene,
+          seed,
+          collisionScenario,
+          palette,
+          channel,
+          longExposure,
+          doppler,
+          spin,
+          share: {
+            v: 1,
+            scene,
+            seed,
+            cam,
+            palette,
+            channel,
+            collisionScenario,
+            post: {
+              bloom,
+              bloomRadius: sc.post.bloomRadius,
+              exposure,
+              ca: sc.post.ca,
+              vignette: sc.post.vignette,
+              grain,
+              trail,
+              doppler,
+            },
+          },
+        };
+      }
+      function tokenTraits(rec) {
+        const sc = SCENES[rec.scene];
+        return {
+          Family: sc ? sc.name : rec.scene,
+          Variant: rec.collisionScenario || "—",
+          Palette: rec.palette,
+          Channel: rec.channel,
+          Exposure: rec.longExposure ? "long" : "short",
+          Spin: rec.spin > 0 ? "prograde" : rec.spin < 0 ? "retrograde" : "none",
+          Doppler: rec.doppler > 0 ? "on" : "off",
+        };
+      }
+
+      let tokenRecipe = null;
+      async function tokenBoot() {
+        tokenRecipe = deriveTokenRecipe(TOKEN.hash);
+        // Backdrop from the hash too, so frame one reproduces.
+        buildStarfield(mulberry32(fold32(TOKEN.hash + ":sky")));
+        installTokenUi();
+        await applyTokenRecipe();
+        const traits = tokenTraits(tokenRecipe);
+        try {
+          if (TOKEN.platform === "fxhash" && typeof $fx.features === "function") {
+            $fx.features(traits);
+          } else if (
+            TOKEN.platform === "highlight" &&
+            hl.token &&
+            typeof hl.token.setTraits === "function"
+          ) {
+            hl.token.setTraits(traits);
+          }
+        } catch (e) {
+          console.warn("[token] features hook:", e);
+        }
+        window.__token = TOKEN;
+        window.__tokenRecipe = () => tokenRecipe;
+        window.__tokenFeatures = () => traits;
+        if (TOKEN.preview) tokenPreparePreview();
+        console.info(
+          "[token]",
+          TOKEN.platform,
+          tokenRecipe.scene,
+          JSON.stringify(traits),
+        );
+        return true;
+      }
+      // (Re)build the token's universe from its recipe. Also "Return to
+      // token" after the holder has wandered.
+      async function applyTokenRecipe() {
+        const rec = tokenRecipe;
+        if (!rec) return;
+        if (followCamActive()) followCamRelease("token");
+        await applyShareState(rec.share);
+        params.spin = rec.spin;
+        velVar.material.uniforms.uSpin.value = rec.spin;
+        params.doppler = rec.doppler;
+        pointMat.uniforms.uDoppler.value = rec.doppler;
+        params.trail = rec.share.post.trail ?? 0;
+        setPostParams({ trail: params.trail });
+        clearTrails();
+        // Grow the scene into itself before the first frame (TOKEN_PREROLL).
+        const want = TOKEN_PREROLL[rec.scene] ?? TOKEN_PREROLL.default;
+        if (kickstart.remaining < want) kickstartSim(want, params.dt);
+      }
+      function tokenReturn() {
+        if (movie.active) {
+          movie.onEnd = null; // no settle/handover — we're rebuilding anyway
+          stopMovie(true);
+        }
+        tokenSettle = null;
+        applyTokenRecipe().then(() => {
+          if (!director.enabled) toggleCinematic();
+          showToast("Token", "returned");
+        });
+      }
+
+      // ---- The tour: a generated opening film (TOKEN_EXPERIENCE.md §1) --
+      // Played by the movie system. No scene event — the token's scene is
+      // already loaded, so the seed is never re-rolled. Three templates by
+      // family; direction, angles and lengths are seeded from hash:tour.
+      const TOKEN_TOUR_TEMPLATE = {
+        "quiet-drift": "calm",
+        "dust-storm": "calm",
+        coma: "calm",
+        lattice: "calm",
+        orrery: "calm",
+        sombrero: "calm",
+        horsehead: "calm",
+        "milky-way": "calm",
+        collision: "dynamic",
+        whirlpool: "dynamic",
+        cartwheel: "dynamic",
+        antennae: "dynamic",
+        "stephans-quintet": "dynamic",
+        "bullet-cluster": "dynamic",
+        "event-horizon": "well",
+        sagittarius: "well",
+        "virgo-m87": "well",
+        birth: "well",
+      };
+      function buildTokenTour(rec) {
+        const r = mulberry32(fold32(rec.hash + ":tour"));
+        const sc = SCENES[rec.scene];
+        const tpl = TOKEN_TOUR_TEMPLATE[rec.scene] || "calm";
+        const fov = sc.camera.fov;
+        const c = rec.share.cam;
+        const D = Math.hypot(c[0] - c[3], c[1] - c[4], c[2] - c[5]);
+        const t = tokenTraits(rec);
+        const hash6 = rec.hash.replace(/^0x/i, "").slice(0, 6);
+        const ev = [];
+        let at = 0;
+        ev.push({
+          at: 0,
+          kind: "title",
+          main: sc.name.toUpperCase(),
+          sub: `${t.Palette} · ${t.Channel} · #${hash6}`,
+          holdSec: 7,
+        });
+        // 1. reveal — tight on the core, pulling out to the authored pose
+        const revealDur = 14 + Math.round(r() * 4);
+        ev.push({
+          at,
+          kind: "shot",
+          program: "slow-reveal",
+          duration: revealDur,
+          camera: {
+            startRadius: D * (0.42 + r() * 0.18),
+            endRadius: D,
+            startFov: fov - 6,
+            endFov: fov,
+          },
+        });
+        at += revealDur;
+        // 2. orbit — helical arc, direction seeded
+        const orbitDur = 12 + Math.round(r() * 4);
+        ev.push({
+          at,
+          kind: "shot",
+          program: r() < 0.5 ? "orbit-ascend" : "orbit-descend",
+          duration: orbitDur,
+          camera: { orbitRad: 0.7 + r() * 0.6, radiusFactor: 1.0 },
+        });
+        at += orbitDur;
+        // 3. signature shot by template
+        if (tpl === "dynamic") {
+          ev.push({
+            at,
+            kind: "shot",
+            program: "track-streamer",
+            duration: 12,
+            camera: { subject: "fastest", minSpeed: 0.5, lockSubject: true },
+          });
+          at += 12;
+        } else if (tpl === "well") {
+          // Dolly-zoom in, then a continuous pull back to the authored
+          // fov so the movie's fov restore at the end is a no-op.
+          const dolly = 0.5;
+          ev.push({
+            at,
+            kind: "shot",
+            program: "vertigo",
+            duration: 8,
+            camera: { dollyFactor: dolly },
+          });
+          at += 8;
+          const tanHalf = Math.tan((fov * Math.PI) / 360);
+          const vertigoFov = (Math.atan(tanHalf / dolly) * 360) / Math.PI;
+          ev.push({
+            at,
+            kind: "shot",
+            program: "slow-reveal",
+            duration: 8,
+            camera: {
+              startRadius: D * dolly,
+              endRadius: D,
+              startFov: Math.min(110, vertigoFov),
+              endFov: fov,
+            },
+          });
+          at += 8;
+        } else {
+          ev.push({
+            at,
+            kind: "shot",
+            program: "drift-wide",
+            duration: 12,
+            camera: { orbitDeg: 14 + r() * 10 },
+          });
+          at += 12;
+        }
+        ev.push({ at, kind: "end" });
+        return {
+          name: "Tour",
+          subtitle: sc.name,
+          duration: at,
+          events: ev,
+        };
+      }
+      let tokenSettle = null; // { t, dur, p0, p1, l0, l1, f0, f1 }
+      function tokenStartTour() {
+        if (!tokenRecipe) return;
+        FILMS["token-tour"] = buildTokenTour(tokenRecipe);
+        startMovie("token-tour");
+        tokenSettle = null;
+        movie.onEnd = tokenAfterTour;
+      }
+      function tokenTourActive() {
+        return movie.active && movie.filmKey === "token-tour";
+      }
+      function tokenSkipTour() {
+        if (!tokenTourActive()) return;
+        stopMovie(true); // fires tokenAfterTour via movie.onEnd
+      }
+      // Handover: ease from wherever the tour left the camera back to the
+      // token's home pose, then wake the director. The user grabbing the
+      // camera mid-settle aborts it and leaves them in control.
+      function tokenAfterTour() {
+        const c = tokenRecipe.share.cam;
+        const dist = camera.position.distanceTo(controls.target);
+        const fwd = new THREE.Vector3();
+        camera.getWorldDirection(fwd);
+        tokenSettle = {
+          t: 0,
+          dur: 4.5,
+          p0: camera.position.clone(),
+          p1: new THREE.Vector3(c[0], c[1], c[2]),
+          l0: camera.position.clone().addScaledVector(fwd, Math.max(dist, 1)),
+          l1: new THREE.Vector3(c[3], c[4], c[5]),
+          f0: camera.fov,
+          f1: c[6],
+          inputAt: lastUserInputTime,
+        };
+      }
+      function tokenTickSettle(dt) {
+        const s = tokenSettle;
+        if (!s) return;
+        if (movie.active) {
+          tokenSettle = null;
+          return;
+        }
+        if (lastUserInputTime !== s.inputAt) {
+          tokenSettle = null; // the holder took the camera — leave it
+          return;
+        }
+        s.t += Math.min(dt, 0.05);
+        const e = easeInOutCubic(Math.min(1, s.t / s.dur));
+        camera.position.lerpVectors(s.p0, s.p1, e);
+        controls.target.lerpVectors(s.l0, s.l1, e);
+        camera.fov = lerp(s.f0, s.f1, e);
+        camera.updateProjectionMatrix();
+        if (s.t >= s.dur) {
+          tokenSettle = null;
+          if (!director.enabled) toggleCinematic();
+        }
+      }
+      // Per-frame token chrome: settle, idle fade, hint line, bar labels.
+      let _tokenUiAccum = 0;
+      function tokenTick(realDt) {
+        if (TOKEN.preview) return;
+        tokenTickSettle(realDt);
+        _tokenUiAccum += realDt;
+        if (_tokenUiAccum < 0.25) return;
+        _tokenUiAccum = 0;
+        const body = document.body;
+        const touring = tokenTourActive();
+        const idle = (performance.now() - lastUserInputTime) / 1000;
+        body.classList.toggle("touring", touring);
+        body.classList.toggle("idle", !touring && idle > 5);
+        const hint = document.querySelector("#token-hint");
+        if (hint) {
+          let text;
+          if (touring) text = "click anywhere to skip the tour";
+          else if (followCamActive())
+            text = "following · scroll to change distance · Esc releases";
+          else if (director.enabled)
+            text = "watching · drag or scroll to take the camera · R returns home";
+          else text = "drag to orbit · scroll to zoom · click a star to follow";
+          if (hint.textContent !== text) hint.textContent = text;
+        }
+        const bar = document.querySelector("#token-bar");
+        if (bar) {
+          const cine = bar.querySelector('[data-id="cinematic"]');
+          if (cine) cine.classList.toggle("on", director.enabled);
+          const fol = bar.querySelector('[data-id="follow"]');
+          if (fol) {
+            const txt = followCamActive() ? "Release" : "Follow";
+            if (fol.textContent !== txt) fol.textContent = txt;
+          }
+        }
+      }
+      // Deterministic still (INTERACTIVE_NFT.md §5.4): director off, no
+      // drift, a synchronous pre-roll so structure exists, then hold at
+      // step K. tokenSignalReady() fires after the first rendered frame.
+      function tokenPreparePreview() {
+        if (director.enabled) toggleCinematic();
+        params.cameraDrift = false;
+        params.autoOrbit = false;
+        // applyTokenRecipe already scheduled the pre-roll; run it now.
+        while (kickstart.remaining > 0) kickstartTick();
+        params.paused = true;
+      }
+      function tokenSignalReady() {
+        TOKEN.ready = true;
+        try {
+          if (TOKEN.platform === "fxhash" && typeof $fx.preview === "function") {
+            $fx.preview();
+          } else if (
+            TOKEN.platform === "highlight" &&
+            hl.token &&
+            typeof hl.token.capturePreview === "function"
+          ) {
+            hl.token.capturePreview();
+          }
+        } catch (e) {
+          console.warn("[token] preview hook:", e);
+        }
+        window.__tokenReady = true;
+        try {
+          document.dispatchEvent(new CustomEvent("token-ready"));
+        } catch (_) {}
+      }
+      // Minimal HUD: hide the rail, panels and browser; add Return /
+      // Features / Cinematic / Fullscreen. Previews hide everything.
+      function installTokenUi() {
+        document.body.classList.add("token-mode");
+        const style = document.createElement("style");
+        style.textContent = `
+          body.token-mode #rail, body.token-mode #panel,
+          body.token-mode #scene-browser, body.token-mode #hud-film,
+          body.token-mode #hud-film-tc, body.token-mode #rec-dot,
+          body.token-mode #density-modal,
+          body.token-mode #density-revert-banner { display: none !important; }
+          #token-bar { position: fixed; right: 14px; bottom: 14px; display: flex;
+            gap: 8px; z-index: 40; font: 500 11px/1 system-ui, sans-serif; }
+          #token-bar button { background: rgba(8,10,20,.55); color: #dfe6f3;
+            border: 1px solid rgba(255,255,255,.14); border-radius: 999px;
+            padding: 8px 12px; cursor: pointer; backdrop-filter: blur(6px);
+            letter-spacing: .02em; }
+          #token-bar button:hover { background: rgba(30,36,60,.75); }
+          #token-features { position: fixed; right: 14px; bottom: 52px; z-index: 40;
+            background: rgba(8,10,20,.7); color: #dfe6f3;
+            border: 1px solid rgba(255,255,255,.14); border-radius: 10px;
+            padding: 10px 12px; font: 400 11px/1.6 system-ui, sans-serif;
+            min-width: 180px; backdrop-filter: blur(6px); }
+          #token-features b { color: #fff; }
+          #token-bar button.on { border-color: rgba(138,180,255,.6); color: #fff;
+            box-shadow: inset 0 0 0 1px rgba(138,180,255,.25); }
+          #token-bar .sep { width: 1px; background: rgba(255,255,255,.12); margin: 4px 2px; }
+          #token-hint { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+            color: rgba(223,230,243,.55); font: 400 10.5px/1 system-ui, sans-serif;
+            letter-spacing: .12em; text-transform: uppercase; pointer-events: none;
+            z-index: 39; white-space: nowrap; }
+          #token-bar, #token-hint, body.token-mode #hud { transition: opacity 700ms ease; }
+          body.token-mode.idle #token-bar, body.token-mode.idle #token-hint,
+          body.token-mode.idle #hud { opacity: 0; }
+          body.token-mode.touring #token-bar, body.token-mode.touring #hud { opacity: 0; }
+          body.token-mode.preview #hud, body.token-mode.preview #token-bar,
+          body.token-mode.preview #token-hint, body.token-mode.preview #toast,
+          body.token-mode.preview #fps-display { display: none !important; }
+        `;
+        document.head.appendChild(style);
+        if (TOKEN.preview) {
+          document.body.classList.add("preview");
+          return;
+        }
+        // Any input skips the tour; every input also counts as activity for
+        // the idle fade (mousemove/wheel/drag already do via markUserActivity).
+        document.addEventListener(
+          "pointerdown",
+          (e) => {
+            markUserActivity();
+            if (e.target && e.target.closest && e.target.closest("#token-bar")) return;
+            tokenSkipTour();
+          },
+          { capture: true },
+        );
+        document.addEventListener(
+          "keydown",
+          (e) => {
+            markUserActivity();
+            if (e.key === "Escape") return; // the main handler stops films on Esc
+            tokenSkipTour();
+          },
+          { capture: true },
+        );
+        document.addEventListener("wheel", () => tokenSkipTour(), {
+          capture: true,
+          passive: true,
+        });
+        const hint = document.createElement("div");
+        hint.id = "token-hint";
+        document.body.appendChild(hint);
+        const bar = document.createElement("div");
+        bar.id = "token-bar";
+        const mk = (label, title, fn, id) => {
+          const b = document.createElement("button");
+          b.textContent = label;
+          b.title = title;
+          if (id) b.dataset.id = id;
+          b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            fn();
+          });
+          bar.appendChild(b);
+          return b;
+        };
+        const sep = () => {
+          const s = document.createElement("div");
+          s.className = "sep";
+          bar.appendChild(s);
+        };
+        mk("Tour", "Replay this token's opening film", () => tokenStartTour(), "tour");
+        mk(
+          "Cinematic",
+          "Let the director drive the camera (C)",
+          () => {
+            if (tokenTourActive()) {
+              movie.onEnd = null;
+              stopMovie(true);
+            }
+            tokenSettle = null;
+            toggleCinematic();
+          },
+          "cinematic",
+        );
+        mk(
+          "Follow",
+          "Ride along with the fastest body — Esc releases (F)",
+          () => {
+            if (tokenTourActive()) tokenSkipTour();
+            if (followCamActive()) {
+              followCamRelease("token");
+              return;
+            }
+            const idx = findSubject("fastest", { minSpeed: 0.5 });
+            if (idx >= 0) followCamAttachByIndex(idx);
+            else showToast("Follow", "nothing moving fast enough yet");
+          },
+          "follow",
+        );
+        mk(
+          "Lens",
+          "Cycle the palette — same physics, different light (M)",
+          () => {
+            const list = Object.keys(PALETTES);
+            const i = (list.indexOf(params.palette) + 1) % list.length;
+            params.palette = list[i];
+            applyPalette(list[i]);
+            showToast("Lens", list[i]);
+          },
+          "lens",
+        );
+        mk(
+          "Moment",
+          "Nudge every body a little — the universe answers (G)",
+          () => {
+            rollDice();
+            showToast("Moment", "a nudge to every body");
+          },
+          "moment",
+        );
+        mk("Return", "Rebuild this token's universe from its seed (R)", tokenReturn, "return");
+        sep();
+        mk("Traits", "This token's attributes", () => {
+          const open = document.querySelector("#token-features");
+          if (open) {
+            open.remove();
+            return;
+          }
+          const d = document.createElement("div");
+          d.id = "token-features";
+          const rows = Object.entries(tokenTraits(tokenRecipe)).map(([k, v]) => {
+            const row = document.createElement("div");
+            const b = document.createElement("b");
+            b.textContent = k;
+            row.appendChild(b);
+            row.appendChild(document.createTextNode(" · " + v));
+            return row;
+          });
+          for (const row of rows) d.appendChild(row);
+          const seed = document.createElement("div");
+          seed.style.cssText = "opacity:.6;margin-top:6px";
+          seed.textContent = "seed " + seedToHex(tokenRecipe.seed);
+          d.appendChild(seed);
+          document.body.appendChild(d);
+        });
+        mk("Capture", "Save a 2× PNG of this moment (P)", () => takeScreenshot(2), "capture");
+        mk("⛶", "Fullscreen", () => {
+          const root = document.documentElement;
+          if (document.fullscreenElement) {
+            if (document.exitFullscreen) document.exitFullscreen();
+          } else if (root.requestFullscreen) {
+            root.requestFullscreen();
+          }
+        });
+        document.body.appendChild(bar);
+      }
+
+      // ===============================================================
       // 14. STATE UPLOAD / BLIT HELPERS
       // ===============================================================
       const blitScene = new THREE.Scene();
@@ -15054,6 +15880,7 @@
         return `universe-thumb-v1-${key}`;
       }
       function maybeCaptureThumbnail(key) {
+        if (TOKEN.active) return; // no browser, no localStorage writes
         // Capture ~800ms after scene settles, then store.
         setTimeout(() => {
           try {
@@ -18895,6 +19722,8 @@
         // reuse this index, so a film can stay on one body across many
         // shots. Set by `lockSubject: true` on the first track-streamer.
         lockedSubject: -1,
+        // Optional callback fired once by stopMovie (token tour handover).
+        onEnd: null,
       };
 
       function fmtMmSs(sec) {
@@ -20232,7 +21061,7 @@
         controls.enabled = false;
         reflectMovieOnRail();
         reflectMovieOnHud(0, f.duration);
-        showToast("Movie", f.name);
+        if (!TOKEN.active) showToast("Movie", f.name);
         if (activePanel === "movie") buildPanel("movie");
       }
 
@@ -20267,6 +21096,11 @@
         reflectMovieOnHud(0, 0);
         if (!graceful) showToast("Movie", "stopped");
         if (activePanel === "movie") buildPanel("movie");
+        if (typeof movie.onEnd === "function") {
+          const cb = movie.onEnd;
+          movie.onEnd = null;
+          cb();
+        }
       }
 
       // -------- Music event helper --------
@@ -21139,6 +21973,7 @@
       function setCaptureSize(W, H) {
         renderer.setSize(W, H, false);
         composer.setSize(W, H);
+        syncPointViewScale(); // captures at other sizes keep the composition
         camera.aspect = W / H;
         camera.updateProjectionMatrix();
         if (lensPass?.uniforms?.uAspect)
@@ -22664,6 +23499,22 @@
         const ctrl = e.ctrlKey || e.metaKey;
         const shift = e.shiftKey;
 
+        // Token mode (INTERACTIVE_NFT.md §6): interaction is a lens, never
+        // a mutation. Scene hotkeys, the browser, panels and import are
+        // off; `r` becomes "return to token".
+        if (TOKEN.active) {
+          if (/^[1-9]$/.test(key) && !ctrl && !shift) return;
+          if ("bBvVkK".includes(key) && key !== "") return;
+          if (ctrl && (key === "o" || key === "O")) {
+            e.preventDefault();
+            return;
+          }
+          if (key === "r" || key === "R") {
+            tokenReturn();
+            return;
+          }
+        }
+
         // Overlays get Esc first
         if (key === "Escape") {
           if (movie.active) {
@@ -23041,7 +23892,12 @@
         }
         pointMat.uniforms.uTime.value = simTime;
         if (starfieldMat) starfieldMat.uniforms.uTime.value = simTime;
-        vigGrainPass.uniforms.uTime.value = now * 0.001;
+        // Grain is frozen in token previews so the still reproduces.
+        vigGrainPass.uniforms.uTime.value = TOKEN.preview ? 0.0 : now * 0.001;
+        // Lean tail pass tone-maps itself; transitions poke exposure on
+        // the renderer directly, so mirror it every frame.
+        leanPass.uniforms.toneMappingExposure.value =
+          renderer.toneMappingExposure;
         updateLensProjection();
 
         // Pull FFT first so energy/onset are fresh for directorTick.
@@ -23066,9 +23922,20 @@
         }
         // Solar-system animation (runs during materialise/active/dissolve).
         updateSolarSystem(realDt);
+        // Per-scene hook (scene-local animation: the Petrova Line's
+        // arrival glow + ship sightings). Cheap, never reads the GPU.
+        // Only the current scene ticks; intro frames return above.
+        {
+          const scHook = SCENES[currentSceneKey];
+          if (scHook && typeof scHook.tick === "function") scHook.tick(realDt);
+        }
+        tickSmoothZoom(realDt);
         controls.update();
         applyDensityPerfFrameClamp();
+        syncPointViewScale();
         composer.render();
+        if (TOKEN.preview && !TOKEN.ready) tokenSignalReady();
+        if (TOKEN.active) tokenTick(realDt);
 
         if (_debugOverlayVisible) updateDebugOverlay();
 
@@ -23093,7 +23960,9 @@
         const sceneParam = url.searchParams.get("scene");
 
         let booted = false;
-        if (sParam) {
+        if (TOKEN.active) {
+          booted = await tokenBoot();
+        } else if (sParam) {
           try {
             const obj = await decodeShare(sParam);
             booted = await applyShareState(obj);
@@ -23112,7 +23981,8 @@
         if (!booted) applyScene("quiet-drift", { immediate: true });
         updateHudFromScene();
         // Cinematic mode on by default — the app is meant to be watched.
-        if (!director.enabled) toggleCinematic();
+        // (Token previews stay static: no director.)
+        if (!director.enabled && !TOKEN.preview) toggleCinematic();
         // Fire-and-forget; gated on ?hands=1, silent on failure.
         initHandTracker();
         // Stargazer intro — only on first visit unless ?intro= overrides.
@@ -23123,6 +23993,8 @@
           introBegin();
         }
         loop();
+        // Token mode opens with its generated tour (TOKEN_EXPERIENCE.md §1).
+        if (TOKEN.active && !TOKEN.preview) tokenStartTour();
       })();
     </script>
   </body>
