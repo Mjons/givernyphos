@@ -5482,6 +5482,81 @@
       controls.maxDistance = 10000;
       controls.minDistance = 1;
 
+      // ---- Smooth wheel zoom --------------------------------------------
+      // OrbitControls applies each wheel event as an instant dolly of
+      // 0.95^(Δ/100): a mouse notch is a visible 5% step and a fast flick
+      // is a burst of them, with no easing. Here wheel input accumulates
+      // into a target distance (log space, so in and out feel symmetric)
+      // and the camera eases toward it every frame. The listener sits on
+      // the document in the capture phase so OrbitControls' own wheel
+      // handler never sees the event; touch pinch still goes through
+      // OrbitControls. During follow-cam the wheel scales the chase-rig
+      // distance instead, with the same easing (see chaseRigOffset).
+      const smoothZoom = {
+        logTarget: NaN, // NaN = idle; re-seeded from the live distance
+        tau: 0.14, // ease time constant, seconds
+        perNotch: 0.12, // log-distance per 100 px of wheel delta (~12%)
+      };
+      function wheelDeltaPx(e) {
+        let dy = e.deltaY;
+        if (e.deltaMode === 1)
+          dy *= 16; // lines (Firefox)
+        else if (e.deltaMode === 2) dy *= innerHeight; // pages
+        return dy;
+      }
+      document.addEventListener(
+        "wheel",
+        (e) => {
+          if (e.target !== canvasEl || !controls.enabled) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          markUserActivity();
+          // One event is clamped to ±3 notches so a driver that reports
+          // huge deltas can't teleport the camera.
+          const k =
+            Math.max(-3, Math.min(3, wheelDeltaPx(e) / 100)) *
+            smoothZoom.perNotch;
+          if (followCamActive()) {
+            followCam.distScaleTarget = Math.max(
+              0.25,
+              Math.min(4, followCam.distScaleTarget * Math.exp(k)),
+            );
+            return;
+          }
+          if (transitionRaf) return;
+          if (!isFinite(smoothZoom.logTarget)) {
+            smoothZoom.logTarget = Math.log(
+              Math.max(camera.position.distanceTo(controls.target), 1e-3),
+            );
+          }
+          smoothZoom.logTarget = Math.max(
+            Math.log(controls.minDistance),
+            Math.min(Math.log(controls.maxDistance), smoothZoom.logTarget + k),
+          );
+        },
+        { capture: true, passive: false },
+      );
+      function tickSmoothZoom(dt) {
+        if (!isFinite(smoothZoom.logTarget)) return;
+        if (transitionRaf || movie.active || followCamActive()) {
+          smoothZoom.logTarget = NaN;
+          return;
+        }
+        const cur = Math.max(camera.position.distanceTo(controls.target), 1e-3);
+        const curLog = Math.log(cur);
+        const a = 1 - Math.exp(-Math.min(dt, 0.05) / smoothZoom.tau);
+        let nextLog = curLog + (smoothZoom.logTarget - curLog) * a;
+        if (Math.abs(smoothZoom.logTarget - nextLog) < 5e-4) {
+          nextLog = smoothZoom.logTarget;
+          smoothZoom.logTarget = NaN; // settled; next wheel re-seeds
+        }
+        const ratio = Math.exp(nextLog - curLog);
+        camera.position
+          .sub(controls.target)
+          .multiplyScalar(ratio)
+          .add(controls.target);
+      }
+
       // ===============================================================
       // 2b. STARGAZER INTRO (cold open — see STARGAZER_INTRO_PLAN.md)
       // ===============================================================
@@ -14238,6 +14313,10 @@
         _endCam: new THREE.Vector3(),
         _bodyPos: new THREE.Vector3(),
         _bodyVel: new THREE.Vector3(),
+        // Wheel zoom while following scales the chase-rig distance; the
+        // live value eases toward the target (smooth zoom).
+        distScale: 1,
+        distScaleTarget: 1,
         _pbuf: new Float32Array(4),
         _vbuf: new Float32Array(4),
         // Scratch buffer for the pick readback; allocated on first pick and
@@ -14388,7 +14467,7 @@
         // Follow distance: a sliver of the scene's natural scale — close
         // enough that foreground rushes past, far enough that the body is
         // readably sized, not a single pixel.
-        const d = clamp(baseDist * 0.08, 18, 95);
+        const d = clamp(baseDist * 0.08, 18, 95) * (followCam.distScale || 1);
         const lift = d * 0.22;
         // offset = -smoothDir * d + up * lift
         out.copy(smoothDir).multiplyScalar(-d);
@@ -14403,6 +14482,8 @@
         followCam.state = "ATTACHING";
         followCam.attachT = 0;
         followCam.age = 0;
+        followCam.distScale = 1;
+        followCam.distScaleTarget = 1;
         followCam.pulseT = followCam.pulseDur; // fade from 1 → 0
         // Snapshot current camera as the start pose of the ease.
         followCam._startCam.copy(camera.position);
@@ -14551,6 +14632,11 @@
             followCam._smoothVelDir.normalize();
           }
         }
+
+        // Ease the wheel-zoom scale toward its target (smooth zoom).
+        followCam.distScale +=
+          (followCam.distScaleTarget - followCam.distScale) *
+          (1 - Math.exp(-Math.min(realDt, 0.05) / 0.14));
 
         // Chase-cam offset from smoothed velocity direction.
         chaseRigOffset(followCam._smoothVelDir, _followTmpOffset);
