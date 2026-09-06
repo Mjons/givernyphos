@@ -17,6 +17,7 @@ Plans and audits for things being built or considered next.
 - [ORACLE_AND_FLAVOURS.md](active/ORACLE_AND_FLAVOURS.md) — diagnose stuck-in-Oracle rotation; reshape Oracle as lock → release → reveal-trail
 - [USER_MOVIES_PLAN.md](active/USER_MOVIES_PLAN.md) — polished recorder + saved compositions
 - [PERFORMANCE_AUDIT.md](active/PERFORMANCE_AUDIT.md) — measurement framework + suspect ranking
+- [MOVIE_REWIND.md](active/MOVIE_REWIND.md) — plan for a new film: one collision frozen, rewound, ridden from inside, then time-lapsed; the movie-engine features it needs
 - [TOKEN_COPY.md](active/TOKEN_COPY.md) — draft collection + per-token copy, family sentences, license line (for approval)
 - [TOKEN_EXPERIENCE.md](active/TOKEN_EXPERIENCE.md) — the holder's first sixty seconds: generated tour, bar, hints, temperament + moments plan
 - [INTERACTIVE_NFT.md](active/INTERACTIVE_NFT.md) — exploration: one living scene per token (hash → recipe, token build, previews, holder interaction, platform fit)
