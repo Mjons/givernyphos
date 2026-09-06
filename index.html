@@ -24002,6 +24002,23 @@
       let lastTime = performance.now();
       let framesAccum = 0,
         fpsAccum = 0;
+      let _lastFps = 0;
+      // Machine-readable perf snapshot for the headless harness
+      // (BARNES_HUT_PLAN.md §7b gates).
+      if (typeof window !== "undefined") {
+        window.__perfSnapshot = () => ({
+          fps: +_lastFps.toFixed(1),
+          N: MAX_BODIES,
+          tier: currentDensityKey,
+          backend: wgpuSim.active ? "webgpu" : "webgl",
+          bh: !!bhSim.wanted,
+          integrator: params.integrator,
+          readbackStride: currentReadbackStride(),
+          timing: Object.assign({}, wgpuSim.timing),
+          renderScale: renderer.getPixelRatio(),
+          drawingBuffer: renderer.getDrawingBufferSize(new THREE.Vector2()).toArray(),
+        });
+      }
 
       function loop() {
         requestAnimationFrame(loop);
@@ -24080,7 +24097,8 @@
         framesAccum++;
         fpsAccum += realDt;
         if (fpsAccum >= 0.5) {
-          fpsEl.textContent = (framesAccum / fpsAccum).toFixed(0) + " fps";
+          _lastFps = framesAccum / fpsAccum;
+          fpsEl.textContent = _lastFps.toFixed(0) + " fps";
           framesAccum = 0;
           fpsAccum = 0;
         }

@@ -333,6 +333,68 @@ BH adds several such layouts — size everything from named constants.
 
 ---
 
+## 7b. M9 execution plan (tightened 2026-09-06)
+
+Measured on an RTX 4090 the same day: the tree costs 31 / 37 ms per
+substep at 262k / 518k, but frames run at 32 / 14 fps — the CPU bounce
+(`wgpuFrameStep` readback + DataTexture re-upload, 16–33 MB/frame) and
+fill rate set the ceiling now. M9 removes the bounce. Design, with the
+July vagueness resolved:
+
+**Shape.** The WebGPU side renders the bodies into an offscreen canvas
+(instanced quads — WebGPU has no point sprites — reading pos/vel
+straight from the compute buffers, WGSL that mirrors `pointVert` /
+`pointFrag` term for term). The WebGL side imports that canvas with
+`texImage2D` (GPU-internal in Chrome) and draws it as a screen-space
+additive quad *inside the existing scene* while the `bodies` Points
+mesh is hidden. RenderPass, bloom, trails, CA, vignette and the capture
+paths are untouched; the starfield, rings, Petrova sprites, ships,
+trails and solar systems keep rendering in WebGL as before.
+
+**The seam (decides everything, so it goes first, standalone).** A
+canvas import may arrive as 8 bits per channel and this look is HDR
+(additive sums ≫ 1 feed the bloom). Three encodings, tested in a
+throwaway page before any integration: (1) `rgba16float` WebGPU canvas
+imported into an RGBA16F WebGL texture — lossless if the browser keeps
+the floats; (2) lossless pack: each 16-bit half split across two
+`rgba8unorm` texels in a double-width canvas, decoded in GLSL; (3)
+RGBM8 (rgb/M, M in alpha, range 0–16) — lossy, last resort. The test
+renders a known 0–16 gradient, imports it, reads it back in WebGL and
+reports the max value recovered and the import cost per frame at
+2560×1440 (100 imports, `performance.now` around `texImage2D` + a
+readPixels fence). Pass: an encoding that recovers ≥ 16.0 within 1 %
+and imports in < 2 ms.
+
+**CPU consumers.** With no per-frame mirror, `wgpuFrameStep` reads
+back every `mirrorEvery` frames (default 30) for stats, barycenter,
+picking and the movie subject finder; click-to-follow forces one fresh
+mirror. Follow-cam and track shots get a 32-byte async reader (copy
+one body's pos + vel to a tiny staging buffer, `mapAsync`) so they stay
+per-frame and smooth.
+
+**Flags.** `?render=wgpu|webgl`, `__setRenderPath()`, an overlay line.
+Default stays `webgl` until the look gate passes; then auto-on whenever
+the WebGPU backend is active.
+
+**Gates.**
+1. Seam experiment passes (above).
+2. Look: at lush, `render=wgpu` vs `render=webgl` screenshots of three
+   scenes (quiet-drift, collision, event-horizon) after the same
+   pre-roll, mean absolute pixel difference < 2/255 after tone mapping.
+3. Speed: `__perfSnapshot()` at 262k and 518k with the tree on — target
+   ≥ 25 fps at 518k on the 4090 (compute allows ~27).
+4. Regressions: BH_TESTING.md §5 list, plus follow-cam smoothness,
+   click-to-follow, `e` export, thumbnail capture, recording, token
+   mode at lush, both integrators.
+
+**Work split.** (A) seam experiment — throwaway page + headless run;
+(B) the renderer + composite + flags + mirror throttle + single-body
+reader in `index.html`, encoding pluggable behind a constant;
+(C) headless verification harness (WebGPU needs a secure context: run
+Windows Chrome headless on `file:///L:/…/index.html?…`, not the http
+WSL address) producing the look diff and the perf table. A and C run
+in parallel with B; integration picks the encoding from A.
+
 ## 8. Risks
 
 | risk                                                       | mitigation                                                                        |
