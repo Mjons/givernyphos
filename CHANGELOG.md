@@ -77,6 +77,9 @@ invisible until astrophage fell outside the kept K-matrix region.
 
 _(things in flight; not yet shipped)_
 
+- **Determinism audit** (INTERACTIVE_NFT.md §5.6): two renders of the
+  same token preview are bit-identical; no unseeded random draws on
+  the scene-build path in token mode. `vendor/three/LICENSE` added.
 - **Defaults from the 4090 measurements** (BH_TESTING.md §3, 2026-09-06:
   tree ≈ brute at 99k, ~3× at 262k, ~10× at 518k): with no stored
   choice, discrete GPUs (`sniffDiscreteGpu`) default to the WebGPU

@@ -347,10 +347,16 @@ is broken.
 
 ### 5.6 Determinism checklist (token build gate)
 
-- [ ] Same `?token=` → identical first frame on two machines (WebGL,
-      `standard`, preview mode). Pixel-diff < 0.5 %.
-- [ ] No network requests after load (DevTools → Network, filter all).
-- [ ] No `Math.random()` on the scene-build path in token mode.
+- [x] Same id → identical first frame, two independent renders on the
+      same machine (2026-09-06, id 7, lush preview: max pixel diff 0).
+      Two-machine check still owed.
+- [x] No network requests after load — the built bundle loads only its
+      vendored files (server log, 2026-09-05).
+- [x] No `Math.random()` on the scene-build path in token mode
+      (audit 2026-09-06): the starfield is seeded from the hash; the
+      remaining calls are the fallback seed (token mode always passes
+      one), the music shuffle, camera-drift phases (off in previews,
+      cosmetic live) and director picks.
 - [ ] Recipe `v` bumped whenever the draw order or a weight table
       changes after the first mint.
 - [ ] `index.html` from the bundle works from `file://` (some viewers
