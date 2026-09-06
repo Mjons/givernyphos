@@ -1,0 +1,1206 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>M9 seam test — WebGPU canvas → WebGL2 texture</title>
+<!--
+  M9 "seam" experiment (docs/active/BARNES_HUT_PLAN.md §7b, work item A).
+
+  Question: a WebGPU pass renders HDR (values ≫ 1) into an offscreen canvas; WebGL2 imports
+  that canvas with texImage2D. Which encoding survives, and what does the import cost?
+
+  Encodings tested (each is a WebGPU canvas → WebGL2 texture round trip):
+    1. rgba16float canvas → RGBA16F / RGBA32F / RGBA8 textures (opaque; toneMapping standard|extended)
+    2. lossless pack: rgba8unorm canvas 2× wide; the three f16 halves of a source pixel are split
+       into six bytes across two adjacent texels' RGB (alpha stays 1): texel 2x = (r_lo, r_hi, g_lo),
+       texel 2x+1 = (g_hi, b_lo, b_hi). Decoded in GLSL with unpackHalf2x16.
+    3. RGBM8: rgb/M, M in alpha, range 0–16, alphaMode premultiplied|opaque, with and without
+       UNPACK_PREMULTIPLY_ALPHA_WEBGL.
+
+  Each encoding renders a known gradient (x → 0..16 red, y → 0..16 green, blue = 1), imports,
+  decodes into an RGBA32F FBO and reads back with gl.readPixels(RGBA/FLOAT); reports min/max
+  recovered and max |error|. Then same-task freshness (render frame k, import in the same JS
+  task, expect k's value), then import cost at 2560×1440 for 100 consecutive frames
+  (texImage2D / texSubImage2D / createImageBitmap paths).
+
+  Output: console lines prefixed "SEAM " (one JSON per result) + "SEAM_SUMMARY {…}" and the same
+  text in <pre id="out">. "SEAM_MARK begin|end <name>" lines bracket the timed loops so the
+  browser-side log timestamps can serve as a real clock (see note below).
+
+  Running headless (no display; WebGPU needs a secure context → file:// URL, not http://<wsl-ip>):
+    CHROME="/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
+    "$CHROME" --headless=new --no-sandbox --ignore-gpu-blocklist --use-angle=d3d11 \
+      --enable-unsafe-webgpu --user-data-dir="C:\Users\Public\phos-seam-prof" \
+      --enable-logging=stderr --v=0 --window-size=1280,800 \
+      --dump-dom "file:///L:/projects_claudecode/givernyphos/tools/seam-test.html?hold=http://<wsl-ip>:8765" \
+      > dom.html 2> console.log
+    grep -a '"SEAM' console.log
+  Notes on headless behaviour (found empirically, Chrome 152):
+    • --dump-dom fires at `load`, before any async work; --timeout does not delay it.
+    • --virtual-time-budget keeps the page alive (with the setInterval keepalive below) but freezes
+      performance.now() inside tasks once it engages, so every in-page timing reads 0. Only the
+      SEAM_MARK log timestamps (browser-process clock) are real in that mode.
+    • Real-clock mode: pass ?hold=http://host:port where GET /hold?t=X blocks until GET /release?t=X.
+      The page adds an <img src=…/hold> before `load` (delaying it) and fires /release when done, so
+      --dump-dom runs with the results in the DOM and no virtual time. Any 15-line HTTP server does.
+  Query params: ?w=2560&h=1440&n=100&small=256&hold=http://host:port
+
+  Results 2026-09-06 (Chrome 152 headless, RTX 4090, WebGL via ANGLE D3D11, WebGPU via Dawn D3D12;
+  identical correctness with and without --enable-unsafe-webgpu; only --ignore-gpu-blocklist needed):
+    rgba16float → RGBA16F/RGBA32F : HDR kept, max 15.992 (=f16(16·255/255)), max err 0.0078 = ½ f16 ulp;
+                                    same with toneMapping standard|extended, opaque|premultiplied,
+                                    OffscreenCanvas, texSubImage2D, colour-space conversion on, ImageBitmap
+    rgba16float → RGBA8           : clamps to 1.0 (the trap the plan feared — only when asking for 8-bit)
+    pack (2 texels × RGB bytes)   : bit-exact (max err 0 on 16-bit payloads) in every variant
+    RGBM8 premultiplied           : UNPACK_PREMULTIPLY_ALPHA_WEBGL=false → Chrome un-premultiplies, err 3.96;
+                                    =true → raw bytes, err 0.034; alphaMode opaque → alpha lost, err 15
+    same-task freshness           : yes for all (render k → texImage2D → readback shows k, 4× in one task)
+    2560×1440, per frame, GPU-inclusive (B−A): 16F→RGBA16F 0.5–0.8 ms, →RGBA32F 0.8–0.9, pack 5120×1440
+    →RGBA8 0.7–1.1, RGBM 0.7–0.8, plain RGBA8 0.85–1.0; texImage2D call itself ≤0.1 ms CPU.
+    createImageBitmap path: 37–153 ms per frame (CPU readback) — unusable.
+-->
+<style>
+  body {
+    font: 12px/1.4 monospace;
+    background: #111;
+    color: #ddd;
+    margin: 8px;
+  }
+  pre {
+    white-space: pre-wrap;
+  }
+</style>
+<pre id="out">running…</pre>
+<script>
+  "use strict";
+  const KA = setInterval(() => {}, 4); // headless keepalive: keeps virtual time advancing until we finish
+  const Q = new URLSearchParams(location.search);
+  const BIG_W = +Q.get("w") || 2560,
+    BIG_H = +Q.get("h") || 1440,
+    N = +Q.get("n") || 100,
+    SMALL = +Q.get("small") || 256;
+  // ?hold=http://host:port → an <img> kept pending by the server delays `load` until we release it
+  const HOLD = Q.get("hold");
+  const HOLD_T = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  if (HOLD) {
+    const im = new Image();
+    im.src = `${HOLD}/hold?t=${HOLD_T}`;
+    im.style.display = "none";
+    document.body.appendChild(im);
+  }
+  function release() {
+    if (HOLD) new Image().src = `${HOLD}/release?t=${HOLD_T}`;
+  }
+  const OUT = [];
+  const outEl = document.getElementById("out");
+  function log(tag, obj) {
+    const line =
+      tag + " " + (typeof obj === "string" ? obj : JSON.stringify(obj));
+    console.log(line);
+    OUT.push(line);
+    outEl.textContent = OUT.join("\n");
+  }
+  function mark(kind, name) {
+    console.log(`SEAM_MARK ${kind} ${name} ${performance.now().toFixed(3)}`);
+  }
+  const r4 = (v) => (typeof v === "number" && isFinite(v) ? +v.toFixed(4) : v);
+
+  // ---------- f16 helpers (expected values for the f16-carrying encodings) ----------
+  const toF16 =
+    typeof Float16Array === "function"
+      ? (v) => {
+          const a = new Float16Array(1);
+          a[0] = v;
+          return a[0];
+        }
+      : (v) => {
+          // round-to-nearest-even f32 → f16 → f32
+          const f = new Float32Array([v]),
+            u = new Uint32Array(f.buffer)[0];
+          const s = u >>> 31,
+            e = (u >>> 23) & 0xff,
+            m = u & 0x7fffff;
+          if (e === 0xff) return v;
+          let ne = e - 127 + 15,
+            nm;
+          if (ne >= 31) return s ? -Infinity : Infinity;
+          if (ne <= 0) {
+            if (ne < -10) return s ? -0 : 0;
+            const mm = m | 0x800000,
+              sh = 14 - ne;
+            nm = mm >> sh;
+            if (
+              (mm & ((1 << sh) - 1)) > 1 << (sh - 1) ||
+              ((mm & ((1 << sh) - 1)) === 1 << (sh - 1) && nm & 1)
+            )
+              nm++;
+            ne = 0;
+          } else {
+            nm = m >> 13;
+            const rem = m & 0x1fff;
+            if (rem > 0x1000 || (rem === 0x1000 && nm & 1)) {
+              nm++;
+              if (nm === 0x400) {
+                nm = 0;
+                ne++;
+                if (ne >= 31) return s ? -Infinity : Infinity;
+              }
+            }
+          }
+          const val =
+            ne === 0
+              ? nm * Math.pow(2, -24)
+              : (1 + nm / 1024) * Math.pow(2, ne - 15);
+          return s ? -val : val;
+        };
+  const f16ulp = (v) => {
+    const a = Math.abs(v);
+    if (a < Math.pow(2, -14)) return Math.pow(2, -24);
+    return Math.pow(2, Math.floor(Math.log2(a)) - 10);
+  };
+
+  // ---------- WGSL ----------
+  const WGSL = /* wgsl */ `
+struct U { w: f32, h: f32, mode: f32, val: f32 };
+@group(0) @binding(0) var<uniform> u: U;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+// HDR value of source pixel (px, py); mode 0 = gradient 0..16, mode 1 = constant frame
+fn value(px: f32, py: f32) -> vec3f {
+  if (u.mode > 0.5 && u.mode < 1.5) { return vec3f(u.val, u.val * 0.5, 1.0); }
+  return vec3f(16.0 * px / (u.w - 1.0), 16.0 * py / (u.h - 1.0), 1.0);
+}
+// mode 2: exact 16-bit payloads (bit-exactness test for the pack)
+fn bits16(px: u32, py: u32) -> vec3u {
+  let i = py * u32(u.w) + px;
+  return vec3u(i & 0xffffu, (~i) & 0xffffu, (px * 7u + py * 13u + 1u) & 0xffffu);
+}
+@fragment fn fs_float(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return vec4f(value(floor(pos.x), floor(pos.y)), 1.0);
+}
+@fragment fn fs_pack(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let tx = u32(pos.x); let ty = u32(pos.y);
+  let sx = tx >> 1u; let half = tx & 1u;
+  var r16: u32; var g16: u32; var b16: u32;
+  if (u.mode > 1.5) {
+    let b = bits16(sx, ty); r16 = b.x; g16 = b.y; b16 = b.z;
+  } else {
+    let v = value(f32(sx), f32(ty));
+    let rg = pack2x16float(vec2f(v.r, v.g)); let bb = pack2x16float(vec2f(v.b, 0.0));
+    r16 = rg & 0xffffu; g16 = rg >> 16u; b16 = bb & 0xffffu;
+  }
+  var bytes: vec3u;
+  if (half == 0u) { bytes = vec3u(r16 & 0xffu, r16 >> 8u, g16 & 0xffu); }
+  else            { bytes = vec3u(g16 >> 8u, b16 & 0xffu, b16 >> 8u); }
+  return vec4f(vec3f(bytes) / 255.0, 1.0);
+}
+@fragment fn fs_rgbm(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let v = value(floor(pos.x), floor(pos.y));
+  let m = clamp(max(max(v.r, v.g), v.b) / 16.0, 0.0, 1.0);
+  let a = ceil(m * 255.0) / 255.0;
+  var rgb = vec3f(0.0);
+  if (a > 0.0) { rgb = v / (a * 16.0); }
+  return vec4f(rgb, a);
+}
+@fragment fn fs_ldr(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return vec4f(value(floor(pos.x), floor(pos.y)) / 16.0, 1.0);
+}`;
+
+  // ---------- GLSL decode ----------
+  const VS = `#version 300 es
+void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position = vec4(p*2.0-1.0, 0.0, 1.0); }`;
+  // mode 0 passthrough | 1 pack→half | 2 pack→raw u16 | 3 RGBM | 4 LDR×16
+  const FS = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D tex; uniform int mode;
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  if (mode == 0) { o = texelFetch(tex, p, 0); return; }
+  if (mode == 3) { vec4 c = texelFetch(tex, p, 0); o = vec4(c.rgb * c.a * 16.0, c.a); return; }
+  if (mode == 4) { vec4 c = texelFetch(tex, p, 0); o = vec4(c.rgb * 16.0, 1.0); return; }
+  vec4 t0 = texelFetch(tex, ivec2(p.x * 2, p.y), 0);
+  vec4 t1 = texelFetch(tex, ivec2(p.x * 2 + 1, p.y), 0);
+  uvec3 b0 = uvec3(t0.rgb * 255.0 + 0.5), b1 = uvec3(t1.rgb * 255.0 + 0.5);
+  uint r16 = b0.x | (b0.y << 8u), g16 = b0.z | (b1.x << 8u), b16 = b1.y | (b1.z << 8u);
+  if (mode == 2) { o = vec4(float(r16), float(g16), float(b16), 1.0); return; }
+  o = vec4(unpackHalf2x16(r16).x, unpackHalf2x16(g16).x, unpackHalf2x16(b16).x, 1.0);
+}`;
+
+  let device,
+    ubuf,
+    bindGroup,
+    shader,
+    gl,
+    prog,
+    uTex,
+    uMode,
+    fbo,
+    fboTex,
+    fboW = 0,
+    fboH = 0,
+    fbo2;
+  const pipes = {};
+  function getPipe(entry, format) {
+    const k = entry + "|" + format;
+    if (!pipes[k])
+      pipes[k] = device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module: shader, entryPoint: "vs" },
+        fragment: { module: shader, entryPoint: entry, targets: [{ format }] },
+        primitive: { topology: "triangle-list" },
+      });
+    return pipes[k];
+  }
+  const bgs = {};
+  function getBG(entry, format) {
+    const k = entry + "|" + format;
+    if (!bgs[k])
+      bgs[k] = device.createBindGroup({
+        layout: getPipe(entry, format).getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: ubuf } }],
+      });
+    return bgs[k];
+  }
+  function makeGpuCanvas(w, h, format, alphaMode, toneMode, offscreen) {
+    const c = offscreen
+      ? new OffscreenCanvas(w, h)
+      : Object.assign(document.createElement("canvas"), {
+          width: w,
+          height: h,
+        });
+    const ctx = c.getContext("webgpu");
+    const cfg = {
+      device,
+      format,
+      alphaMode,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+    };
+    if (toneMode) cfg.toneMapping = { mode: toneMode };
+    ctx.configure(cfg);
+    const cur = ctx.getConfiguration ? ctx.getConfiguration() : null;
+    return {
+      c,
+      ctx,
+      format,
+      w,
+      h,
+      alphaMode,
+      toneMode,
+      offscreen: !!offscreen,
+      tone: cur && cur.toneMapping ? cur.toneMapping.mode : undefined,
+    };
+  }
+  function srcWidth(gc, entry) {
+    return entry === "fs_pack" ? gc.w / 2 : gc.w;
+  }
+  const uArr = new Float32Array(4);
+  function render(gc, entry, mode, val) {
+    uArr[0] = srcWidth(gc, entry);
+    uArr[1] = gc.h;
+    uArr[2] = mode;
+    uArr[3] = val;
+    device.queue.writeBuffer(ubuf, 0, uArr);
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: gc.ctx.getCurrentTexture().createView(),
+          loadOp: "clear",
+          clearValue: [0, 0, 0, 1],
+          storeOp: "store",
+        },
+      ],
+    });
+    pass.setPipeline(getPipe(entry, gc.format));
+    pass.setBindGroup(0, getBG(entry, gc.format));
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  // ---------- WebGL side ----------
+  function newTex() {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  function setUnpack(o) {
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !!o.premul);
+    gl.pixelStorei(
+      gl.UNPACK_COLORSPACE_CONVERSION_WEBGL,
+      o.csc ? gl.BROWSER_DEFAULT_WEBGL : gl.NONE,
+    );
+  }
+  // spec = { internal, format, type, premul, csc, sub }
+  function importTex(tex, src, spec) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    setUnpack(spec);
+    try {
+      if (spec.sub)
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          0,
+          gl[spec.format],
+          gl[spec.type],
+          src,
+        );
+      else
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl[spec.internal],
+          gl[spec.format],
+          gl[spec.type],
+          src,
+        );
+    } catch (e) {
+      return "throw:" + e.message;
+    }
+    return gl.getError();
+  }
+  function importTexFast(tex, src, spec) {
+    // no getError (avoids sync) — for timing loops
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (spec.sub)
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        gl[spec.format],
+        gl[spec.type],
+        src,
+      );
+    else
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl[spec.internal],
+        gl[spec.format],
+        gl[spec.type],
+        src,
+      );
+  }
+  function ensureFbo(w, h) {
+    if (fboW === w && fboH === h) return;
+    if (fboTex) gl.deleteTexture(fboTex);
+    fboTex = newTex();
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      fboTex,
+      0,
+    );
+    fboW = w;
+    fboH = h;
+  }
+  function decodeDraw(tex, mode, w, h, vp) {
+    ensureFbo(w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, vp ? vp[0] : w, vp ? vp[1] : h);
+    gl.useProgram(prog);
+    gl.uniform1i(uMode, mode);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(uTex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function decodeRead(tex, mode, w, h, region) {
+    decodeDraw(tex, mode, w, h);
+    const [x, y, rw, rh] = region || [0, 0, w, h];
+    const buf = new Float32Array(rw * rh * 4);
+    gl.readPixels(x, y, rw, rh, gl.RGBA, gl.FLOAT, buf);
+    return buf;
+  }
+  const pxTmp = new Float32Array(4);
+  function syncGpu(tex, mode, w, h) {
+    // 1 px decode + readPixels = blocks until the import has landed on the GPU
+    decodeDraw(tex, mode, w, h, [1, 1]);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, pxTmp);
+    return pxTmp[0];
+  }
+  function readTexDirect(tex, w, h) {
+    // attach the imported texture itself (float formats only)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2);
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      tex,
+      0,
+    );
+    const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (st !== gl.FRAMEBUFFER_COMPLETE) return { fboStatus: st };
+    const buf = new Float32Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, buf);
+    return { buf, err: gl.getError() };
+  }
+
+  // ---------- analysis ----------
+  function analyze(buf, W, H, expect) {
+    const st = {
+      minR: Infinity,
+      maxR: -Infinity,
+      minG: Infinity,
+      maxG: -Infinity,
+      minB: Infinity,
+      maxB: -Infinity,
+      minA: Infinity,
+      maxA: -Infinity,
+    };
+    const mxN = [0, 0, 0],
+      mxF = [0, 0, 0];
+    let sumN = 0,
+      sumF = 0;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4,
+          r = buf[i],
+          g = buf[i + 1],
+          b = buf[i + 2],
+          a = buf[i + 3];
+        if (r < st.minR) st.minR = r;
+        if (r > st.maxR) st.maxR = r;
+        if (g < st.minG) st.minG = g;
+        if (g > st.maxG) st.maxG = g;
+        if (b < st.minB) st.minB = b;
+        if (b > st.maxB) st.maxB = b;
+        if (a < st.minA) st.minA = a;
+        if (a > st.maxA) st.maxA = a;
+        const eN = expect(x, y),
+          eF = expect(x, H - 1 - y);
+        const dn = [
+            Math.abs(r - eN[0]),
+            Math.abs(g - eN[1]),
+            Math.abs(b - eN[2]),
+          ],
+          df = [Math.abs(r - eF[0]), Math.abs(g - eF[1]), Math.abs(b - eF[2])];
+        for (let c = 0; c < 3; c++) {
+          if (dn[c] > mxN[c]) mxN[c] = dn[c];
+          if (df[c] > mxF[c]) mxF[c] = df[c];
+        }
+        sumN += dn[0] + dn[1] + dn[2];
+        sumF += df[0] + df[1] + df[2];
+      }
+    const flipped = sumF < sumN,
+      mx = flipped ? mxF : mxN;
+    const o = {};
+    for (const k in st) o[k] = r4(st[k]);
+    o.maxErr = r4(Math.max(...mx));
+    o.maxErrRGB = mx.map(r4);
+    o.meanErr = r4((flipped ? sumF : sumN) / (W * H * 3));
+    o.flippedY = flipped;
+    const cy = flipped ? 0 : H - 1,
+      ci = (cy * W + (W - 1)) * 4; // corner that should read (16,16,1)
+    o.cornerRGBA = [buf[ci], buf[ci + 1], buf[ci + 2], buf[ci + 3]].map(r4);
+    return o;
+  }
+  const gradExpect = (W, H) => (x, y) => [
+    (16 * x) / (W - 1),
+    (16 * y) / (H - 1),
+    1,
+  ];
+  const gradExpectF16 = (W, H) => (x, y) => [
+    toF16(Math.fround((16 * x) / (W - 1))),
+    toF16(Math.fround((16 * y) / (H - 1))),
+    1,
+  ];
+  const bitsExpect = (W) => (x, y) => {
+    const i = y * W + x;
+    return [i & 0xffff, ~i & 0xffff, (x * 7 + y * 13 + 1) & 0xffff];
+  };
+
+  // ---------- test drivers ----------
+  const RESULTS = {
+    env: {},
+    clock: {},
+    encodings: [],
+    freshness: [],
+    timing: [],
+  };
+  function gradientTest(name, gc, entry, spec, decodeMode, opts = {}) {
+    const W = srcWidth(gc, entry),
+      H = gc.h,
+      res = {
+        test: name,
+        canvas: `${gc.format}/${gc.alphaMode}${gc.tone ? "/" + gc.tone : ""}${gc.offscreen ? "/offscreen" : ""}`,
+        import:
+          `${spec.internal}/${spec.format}/${spec.type}` +
+          (spec.premul ? "/premul" : "") +
+          (spec.csc ? "/csc" : ""),
+      };
+    try {
+      render(gc, entry, opts.bits ? 2 : 0, 0);
+      const tex = newTex();
+      if (spec.sub)
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl[spec.internal], gc.w, gc.h);
+      res.glError = importTex(tex, opts.src || gc.c, spec);
+      const buf = decodeRead(tex, opts.bits ? 2 : decodeMode, W, H);
+      const exp = opts.bits ? bitsExpect(W) : gradExpect(W, H);
+      Object.assign(res, analyze(buf, W, H, exp));
+      if (!opts.bits) {
+        const a16 = analyze(buf, W, H, gradExpectF16(W, H));
+        res.maxErrVsF16 = a16.maxErr;
+        res.f16ulpAt16 = f16ulp(16);
+      }
+      if (opts.direct) {
+        const d = readTexDirect(tex, W, H);
+        res.direct = d.buf
+          ? {
+              fboOk: true,
+              ...(() => {
+                const a = analyze(d.buf, W, H, exp);
+                return { maxR: a.maxR, maxG: a.maxG, maxErr: a.maxErr };
+              })(),
+            }
+          : { fboOk: false, status: d.fboStatus };
+      }
+      res.hdr = res.maxR > 8 && res.maxG > 8;
+      res.pass = opts.bits
+        ? res.maxErr === 0
+        : res.maxR >= 16 * 0.99 && res.maxErr <= 0.16;
+      gl.deleteTexture(tex);
+    } catch (e) {
+      res.error = String(e);
+    }
+    log("SEAM", res);
+    RESULTS.encodings.push(res);
+    return res;
+  }
+  async function freshnessTest(name, gc, entry, spec, decodeMode, tol) {
+    const W = srcWidth(gc, entry),
+      H = gc.h,
+      res = { test: "fresh:" + name };
+    try {
+      const tex = newTex();
+      const vals = [3.5, 7.25, 12.0, 5.125],
+        got = [];
+      for (const v of vals) {
+        // all in one JS task, no awaits
+        render(gc, entry, 1, v);
+        importTexFast(tex, gc.c, spec);
+        const px = decodeRead(tex, decodeMode, W, H, [W >> 1, H >> 1, 1, 1]);
+        got.push(r4(px[0]));
+      }
+      res.sameTask = {
+        sent: vals,
+        got,
+        ok: vals.every((v, i) => Math.abs(got[i] - v) <= tol),
+      };
+      render(gc, entry, 1, 9.75);
+      await new Promise((r) => setTimeout(r, 0)); // next macrotask (the frame has been "presented")
+      importTexFast(tex, gc.c, spec);
+      const px2 = decodeRead(tex, decodeMode, W, H, [W >> 1, H >> 1, 1, 1]);
+      res.nextTask = {
+        sent: 9.75,
+        got: r4(px2[0]),
+        ok: Math.abs(px2[0] - 9.75) <= tol,
+      };
+      // re-import without re-render in a fresh task: contents must persist
+      await new Promise((r) => setTimeout(r, 0));
+      importTexFast(tex, gc.c, spec);
+      const px3 = decodeRead(tex, decodeMode, W, H, [W >> 1, H >> 1, 1, 1]);
+      res.persist = { got: r4(px3[0]), ok: Math.abs(px3[0] - 9.75) <= tol };
+      res.glError = gl.getError();
+      gl.deleteTexture(tex);
+    } catch (e) {
+      res.error = String(e);
+    }
+    log("SEAM", res);
+    RESULTS.freshness.push(res);
+    return res;
+  }
+  function pct(sorted, p) {
+    return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+  }
+  const FV = (k) => 1 + (k % 14); // constant frame value; stays < 16 so the clamped encodings verify too
+  function stats(arr) {
+    const s = Array.from(arr).sort((a, b) => a - b);
+    return {
+      avg: r4(s.reduce((a, b) => a + b, 0) / s.length),
+      p50: r4(pct(s, 0.5)),
+      p95: r4(pct(s, 0.95)),
+      max: r4(s[s.length - 1]),
+    };
+  }
+  // Four loops of N frames each, real clock (run with ?hold=… so no virtual time):
+  //   A render only + queue.onSubmittedWorkDone     B render + import + 1px sync at end
+  //   C render + import + full decode + 1px sync    D render + import + decode + readPixels every frame
+  // importCostPerFrameMs = B − A (GPU-inclusive), decodeCostPerFrameMs = C − B, perFrameSyncMs = D (latency bound).
+  async function timeImport(name, gc, entry, spec, decodeMode) {
+    const W = srcWidth(gc, entry),
+      H = gc.h;
+    const res = {
+      test: "time:" + name,
+      size: `${gc.w}x${gc.h}`,
+      path: spec.sub ? "texSubImage2D" : "texImage2D",
+      n: N,
+    };
+    try {
+      const tex = newTex();
+      if (spec.sub)
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl[spec.internal], gc.w, gc.h);
+      for (let i = 0; i < 5; i++) {
+        render(gc, entry, 1, FV(i));
+        importTexFast(tex, gc.c, spec);
+        decodeDraw(tex, decodeMode, W, H);
+      }
+      syncGpu(tex, decodeMode, W, H);
+      mark("begin", name + " [A]");
+      let t0 = performance.now();
+      for (let k = 0; k < N; k++) render(gc, entry, 1, FV(k));
+      await device.queue.onSubmittedWorkDone();
+      let t1 = performance.now();
+      mark("end", name + " [A]");
+      res.renderOnlyPerFrameMs = r4((t1 - t0) / N);
+      const times = new Float64Array(N);
+      mark("begin", name + " [B]");
+      t0 = performance.now();
+      for (let k = 0; k < N; k++) {
+        render(gc, entry, 1, FV(k));
+        const a = performance.now();
+        importTexFast(tex, gc.c, spec);
+        times[k] = performance.now() - a;
+      }
+      const tb = performance.now();
+      syncGpu(tex, decodeMode, W, H);
+      t1 = performance.now();
+      mark("end", name + " [B]");
+      res.importLoopPerFrameMs = r4((t1 - t0) / N);
+      res.importSyncTailMs = r4(t1 - tb);
+      mark("begin", name + " [C]");
+      t0 = performance.now();
+      for (let k = 0; k < N; k++) {
+        render(gc, entry, 1, FV(k));
+        importTexFast(tex, gc.c, spec);
+        decodeDraw(tex, decodeMode, W, H);
+      }
+      const tc = performance.now();
+      const last = syncGpu(tex, decodeMode, W, H);
+      t1 = performance.now();
+      mark("end", name + " [C]");
+      res.fullLoopPerFrameMs = r4((t1 - t0) / N);
+      res.fullSyncTailMs = r4(t1 - tc);
+      mark("begin", name + " [D]");
+      t0 = performance.now();
+      for (let k = 0; k < N; k++) {
+        render(gc, entry, 1, FV(k));
+        importTexFast(tex, gc.c, spec);
+        decodeDraw(tex, decodeMode, W, H);
+        syncGpu(tex, decodeMode, W, H);
+      }
+      t1 = performance.now();
+      mark("end", name + " [D]");
+      res.perFrameSyncMs = r4((t1 - t0) / N);
+      res.texImageCallMs = stats(times);
+      res.importCostPerFrameMs = r4(
+        res.importLoopPerFrameMs - res.renderOnlyPerFrameMs,
+      );
+      res.decodeCostPerFrameMs = r4(
+        res.fullLoopPerFrameMs - res.importLoopPerFrameMs,
+      );
+      res.lastFrameValue = r4(last);
+      res.lastFrameOk = Math.abs(last - FV(N - 1)) < 0.1;
+      res.glError = gl.getError();
+      gl.deleteTexture(tex);
+    } catch (e) {
+      res.error = String(e);
+    }
+    log("SEAM", res);
+    RESULTS.timing.push(res);
+    return res;
+  }
+  async function timeBitmap(name, gc, entry, spec, decodeMode, bmpOpts) {
+    const W = srcWidth(gc, entry),
+      H = gc.h;
+    const res = {
+      test: "time:" + name,
+      size: `${gc.w}x${gc.h}`,
+      path: "createImageBitmap+texImage2D",
+      n: N,
+      bitmapOpts: bmpOpts,
+    };
+    try {
+      const tex = newTex();
+      for (let i = 0; i < 3; i++) {
+        render(gc, entry, 1, FV(i));
+        const b = await createImageBitmap(gc.c, bmpOpts);
+        importTexFast(tex, b, spec);
+        b.close();
+        decodeDraw(tex, decodeMode, W, H);
+      }
+      syncGpu(tex, decodeMode, W, H);
+      const tCreate = new Float64Array(N),
+        tTex = new Float64Array(N);
+      mark("begin", name);
+      const t0 = performance.now();
+      for (let k = 0; k < N; k++) {
+        render(gc, entry, 1, FV(k));
+        const a = performance.now();
+        const b = await createImageBitmap(gc.c, bmpOpts);
+        const t = performance.now();
+        importTexFast(tex, b, spec);
+        tTex[k] = performance.now() - t;
+        tCreate[k] = t - a;
+        b.close();
+        decodeDraw(tex, decodeMode, W, H);
+      }
+      const tl = performance.now();
+      const last = syncGpu(tex, decodeMode, W, H);
+      const t1 = performance.now();
+      mark("end", name);
+      res.createBitmapMs = stats(tCreate);
+      res.texImageCallMs = stats(tTex);
+      res.fullLoopPerFrameMs = r4((t1 - t0) / N);
+      res.fullSyncTailMs = r4(t1 - tl);
+      res.lastFrameValue = r4(last);
+      res.lastFrameOk = Math.abs(last - FV(N - 1)) < 0.1;
+      res.glError = gl.getError();
+      gl.deleteTexture(tex);
+    } catch (e) {
+      res.error = String(e);
+    }
+    log("SEAM", res);
+    RESULTS.timing.push(res);
+    return res;
+  }
+
+  // ---------- main ----------
+  async function main() {
+    const env = RESULTS.env;
+    env.ua = navigator.userAgent;
+    env.secureContext = isSecureContext;
+    env.href = location.href;
+    env.hasGpu = !!navigator.gpu;
+    env.float16Array = typeof Float16Array === "function";
+    env.sizes = { big: [BIG_W, BIG_H], small: SMALL, n: N };
+    // real-clock sanity: sync spin bracketed by log marks (compare in-page delta with log timestamps)
+    {
+      mark("begin", "clock-spin");
+      const t0 = performance.now();
+      let s = 0;
+      for (let i = 0; i < 6e7; i++) s += i & 3;
+      RESULTS.clock.spinMsInPage = r4(performance.now() - t0);
+      mark("end", "clock-spin");
+      RESULTS.clock.spinSum = s;
+    }
+    if (!navigator.gpu) {
+      log("SEAM_SUMMARY", RESULTS);
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    env.adapter = !!adapter;
+    if (!adapter) {
+      log("SEAM_SUMMARY", RESULTS);
+      return;
+    }
+    const ai = adapter.info || {};
+    env.adapterInfo = {
+      vendor: ai.vendor,
+      architecture: ai.architecture,
+      device: ai.device,
+      description: ai.description,
+    };
+    env.shaderF16 = adapter.features.has("shader-f16");
+    env.preferredCanvasFormat = navigator.gpu.getPreferredCanvasFormat();
+    device = await adapter.requestDevice();
+    device.addEventListener("uncapturederror", (e) =>
+      log("SEAM", { gpuUncapturedError: String(e.error && e.error.message) }),
+    );
+    shader = device.createShaderModule({ code: WGSL });
+    const ci = await shader.getCompilationInfo();
+    if (ci.messages.length)
+      env.wgslMessages = ci.messages.map(
+        (m) => `${m.type} ${m.lineNum}: ${m.message}`,
+      );
+    ubuf = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const glc = document.createElement("canvas");
+    glc.width = 64;
+    glc.height = 64;
+    gl = glc.getContext("webgl2", {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: false,
+      powerPreference: "high-performance",
+    });
+    env.webgl2 = !!gl;
+    if (!gl) {
+      log("SEAM_SUMMARY", RESULTS);
+      return;
+    }
+    env.extColorBufferFloat = !!gl.getExtension("EXT_color_buffer_float");
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    env.glRenderer = dbg
+      ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+      : gl.getParameter(gl.RENDERER);
+    env.glMaxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const mk = (t, s) => {
+      const sh = gl.createShader(t);
+      gl.shaderSource(sh, s);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+        throw new Error(gl.getShaderInfoLog(sh));
+      return sh;
+    };
+    prog = gl.createProgram();
+    gl.attachShader(prog, mk(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+      throw new Error(gl.getProgramInfoLog(prog));
+    uTex = gl.getUniformLocation(prog, "tex");
+    uMode = gl.getUniformLocation(prog, "mode");
+    fbo = gl.createFramebuffer();
+    fbo2 = gl.createFramebuffer();
+    gl.disable(gl.BLEND);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.SCISSOR_TEST);
+    log("SEAM_ENV", env);
+
+    const S = SMALL;
+    const F16 = { internal: "RGBA16F", format: "RGBA", type: "HALF_FLOAT" },
+      F32 = { internal: "RGBA32F", format: "RGBA", type: "FLOAT" },
+      U8 = { internal: "RGBA8", format: "RGBA", type: "UNSIGNED_BYTE" };
+
+    // ---- 1. rgba16float canvas ----
+    let c16 = null;
+    try {
+      c16 = makeGpuCanvas(S, S, "rgba16float", "opaque", "standard");
+    } catch (e) {
+      log("SEAM", { test: "16f canvas configure(standard)", error: String(e) });
+    }
+    if (c16) {
+      gradientTest("16f/std → RGBA16F", c16, "fs_float", F16, 0, {
+        direct: true,
+      });
+      gradientTest("16f/std → RGBA32F", c16, "fs_float", F32, 0, {
+        direct: true,
+      });
+      gradientTest("16f/std → RGBA8 (clamp ref)", c16, "fs_float", U8, 0);
+    }
+    let c16x = null;
+    try {
+      c16x = makeGpuCanvas(S, S, "rgba16float", "opaque", "extended");
+    } catch (e) {
+      log("SEAM", { test: "16f canvas configure(extended)", error: String(e) });
+    }
+    if (c16x) {
+      gradientTest("16f/ext → RGBA16F", c16x, "fs_float", F16, 0, {
+        direct: true,
+      });
+      gradientTest("16f/ext → RGBA32F", c16x, "fs_float", F32, 0, {
+        direct: true,
+      });
+      gradientTest(
+        "16f/ext → RGBA16F texSubImage2D",
+        c16x,
+        "fs_float",
+        { ...F16, sub: true },
+        0,
+      );
+      gradientTest(
+        "16f/ext → RGBA16F +csc",
+        c16x,
+        "fs_float",
+        { ...F16, csc: true },
+        0,
+      );
+      try {
+        const b = await createImageBitmap(c16x.c, {
+          premultiplyAlpha: "none",
+          colorSpaceConversion: "none",
+        });
+        gradientTest("16f/ext → bitmap → RGBA16F", c16x, "fs_float", F16, 0, {
+          src: b,
+        });
+        b.close();
+      } catch (e) {
+        log("SEAM", { test: "16f bitmap", error: String(e) });
+      }
+      try {
+        const b = await createImageBitmap(c16x.c);
+        gradientTest(
+          "16f/ext → bitmap(default opts) → RGBA16F",
+          c16x,
+          "fs_float",
+          F16,
+          0,
+          { src: b },
+        );
+        b.close();
+      } catch (e) {
+        log("SEAM", { test: "16f bitmap default", error: String(e) });
+      }
+      const o16 = makeGpuCanvas(
+        S,
+        S,
+        "rgba16float",
+        "opaque",
+        "extended",
+        true,
+      );
+      gradientTest("16f/ext offscreen → RGBA16F", o16, "fs_float", F16, 0);
+    }
+    let c16p = null;
+    try {
+      c16p = makeGpuCanvas(S, S, "rgba16float", "premultiplied", "extended");
+      gradientTest("16f/ext/premultiplied → RGBA16F", c16p, "fs_float", F16, 0);
+    } catch (e) {
+      log("SEAM", { test: "16f premultiplied", error: String(e) });
+    }
+
+    // ---- 2. lossless pack ----
+    const cpk = makeGpuCanvas(2 * S, S, "rgba8unorm", "opaque");
+    gradientTest("pack rgba8 → RGBA8 (half decode)", cpk, "fs_pack", U8, 1);
+    gradientTest("pack rgba8 → RGBA8 bit-exact", cpk, "fs_pack", U8, 2, {
+      bits: true,
+    });
+    gradientTest(
+      "pack rgba8 → RGBA8 bit-exact +csc",
+      cpk,
+      "fs_pack",
+      { ...U8, csc: true },
+      2,
+      { bits: true },
+    );
+    gradientTest(
+      "pack rgba8 → RGBA8 bit-exact +premul",
+      cpk,
+      "fs_pack",
+      { ...U8, premul: true },
+      2,
+      { bits: true },
+    );
+    gradientTest(
+      "pack rgba8 → RGBA8 texSubImage2D bit-exact",
+      cpk,
+      "fs_pack",
+      { ...U8, sub: true },
+      2,
+      { bits: true },
+    );
+    try {
+      const b = await createImageBitmap(cpk.c, {
+        premultiplyAlpha: "none",
+        colorSpaceConversion: "none",
+      });
+      gradientTest(
+        "pack rgba8 → bitmap → RGBA8 bit-exact",
+        cpk,
+        "fs_pack",
+        U8,
+        2,
+        { bits: true, src: b },
+      );
+      b.close();
+    } catch (e) {
+      log("SEAM", { test: "pack bitmap", error: String(e) });
+    }
+    const cpkb = makeGpuCanvas(2 * S, S, "bgra8unorm", "opaque");
+    gradientTest("pack bgra8 → RGBA8 bit-exact", cpkb, "fs_pack", U8, 2, {
+      bits: true,
+    });
+    gradientTest("pack bgra8 → RGBA8 (half decode)", cpkb, "fs_pack", U8, 1);
+    const cpko = makeGpuCanvas(2 * S, S, "rgba8unorm", "opaque", null, true);
+    gradientTest(
+      "pack rgba8 offscreen → RGBA8 bit-exact",
+      cpko,
+      "fs_pack",
+      U8,
+      2,
+      { bits: true },
+    );
+    const cpkp = makeGpuCanvas(2 * S, S, "rgba8unorm", "premultiplied");
+    gradientTest(
+      "pack rgba8/premultiplied(alpha=1) → RGBA8 bit-exact",
+      cpkp,
+      "fs_pack",
+      U8,
+      2,
+      { bits: true },
+    );
+
+    // ---- 3. RGBM8 ----
+    const crm = makeGpuCanvas(S, S, "rgba8unorm", "premultiplied");
+    gradientTest(
+      "rgbm/premultiplied → RGBA8 (UNPACK_PREMULTIPLY=false)",
+      crm,
+      "fs_rgbm",
+      U8,
+      3,
+    );
+    gradientTest(
+      "rgbm/premultiplied → RGBA8 (UNPACK_PREMULTIPLY=true)",
+      crm,
+      "fs_rgbm",
+      { ...U8, premul: true },
+      3,
+    );
+    try {
+      const b = await createImageBitmap(crm.c, {
+        premultiplyAlpha: "premultiply",
+        colorSpaceConversion: "none",
+      });
+      gradientTest(
+        "rgbm/premultiplied → bitmap(premultiply) → RGBA8",
+        crm,
+        "fs_rgbm",
+        U8,
+        3,
+        { src: b },
+      );
+      b.close();
+    } catch (e) {
+      log("SEAM", { test: "rgbm bitmap", error: String(e) });
+    }
+    const crmo = makeGpuCanvas(S, S, "rgba8unorm", "opaque");
+    gradientTest("rgbm/opaque → RGBA8", crmo, "fs_rgbm", U8, 3);
+    // reference: plain 8-bit (value/16) — what a naive import gives
+    gradientTest("ldr8 (value/16) rgba8/opaque → RGBA8", crmo, "fs_ldr", U8, 4);
+
+    // ---- freshness ----
+    if (c16x)
+      await freshnessTest("16f/ext → RGBA16F", c16x, "fs_float", F16, 0, 0.01);
+    if (c16)
+      await freshnessTest("16f/std → RGBA16F", c16, "fs_float", F16, 0, 0.01);
+    await freshnessTest("pack rgba8 → RGBA8", cpk, "fs_pack", U8, 1, 0.01);
+    await freshnessTest(
+      "pack rgba8 offscreen → RGBA8",
+      cpko,
+      "fs_pack",
+      U8,
+      1,
+      0.01,
+    );
+    await freshnessTest(
+      "rgbm/premultiplied → RGBA8 (premul=true)",
+      crm,
+      "fs_rgbm",
+      { ...U8, premul: true },
+      3,
+      0.08,
+    );
+    await freshnessTest("ldr8 → RGBA8", crmo, "fs_ldr", U8, 4, 0.07);
+
+    // ---- timing at BIG_W×BIG_H ----
+    for (const c of [c16, c16x, c16p, cpk, cpkb, cpko, cpkp, crm, crmo])
+      if (c) c.ctx.unconfigure();
+    const B = (fmt, alpha, tone, off) =>
+      makeGpuCanvas(BIG_W, BIG_H, fmt, alpha, tone, off);
+    const BP = (fmt, off) =>
+      makeGpuCanvas(2 * BIG_W, BIG_H, fmt, "opaque", null, off);
+    const b16 = c16x ? B("rgba16float", "opaque", "extended") : null;
+    const bpk = BP("rgba8unorm"),
+      bpkb = BP("bgra8unorm"),
+      bpko = BP("rgba8unorm", true),
+      brm = B("rgba8unorm", "premultiplied"),
+      bl = B("rgba8unorm", "opaque");
+    const b16o = c16x ? B("rgba16float", "opaque", "extended", true) : null;
+    if (b16) {
+      await timeImport("16f → RGBA16F texImage2D", b16, "fs_float", F16, 0);
+      await timeImport(
+        "16f → RGBA16F texSubImage2D",
+        b16,
+        "fs_float",
+        { ...F16, sub: true },
+        0,
+      );
+      await timeImport("16f → RGBA32F texImage2D", b16, "fs_float", F32, 0);
+      await timeImport(
+        "16f offscreen → RGBA16F texImage2D",
+        b16o,
+        "fs_float",
+        F16,
+        0,
+      );
+    }
+    await timeImport("pack rgba8 → RGBA8 texImage2D", bpk, "fs_pack", U8, 1);
+    await timeImport(
+      "pack rgba8 → RGBA8 texSubImage2D",
+      bpk,
+      "fs_pack",
+      { ...U8, sub: true },
+      1,
+    );
+    await timeImport("pack bgra8 → RGBA8 texImage2D", bpkb, "fs_pack", U8, 1);
+    await timeImport(
+      "pack rgba8 offscreen → RGBA8 texImage2D",
+      bpko,
+      "fs_pack",
+      U8,
+      1,
+    );
+    await timeImport(
+      "rgbm premultiplied → RGBA8 texImage2D (premul=true)",
+      brm,
+      "fs_rgbm",
+      { ...U8, premul: true },
+      3,
+    );
+    await timeImport(
+      "ldr8 rgba8/opaque → RGBA8 texImage2D (baseline)",
+      bl,
+      "fs_ldr",
+      U8,
+      4,
+    );
+    if (b16)
+      await timeBitmap("16f → bitmap → RGBA16F", b16, "fs_float", F16, 0, {
+        premultiplyAlpha: "none",
+        colorSpaceConversion: "none",
+      });
+    await timeBitmap("pack rgba8 → bitmap → RGBA8", bpk, "fs_pack", U8, 1, {
+      premultiplyAlpha: "none",
+      colorSpaceConversion: "none",
+    });
+    await timeBitmap("ldr8 → bitmap → RGBA8 (baseline)", bl, "fs_ldr", U8, 4, {
+      premultiplyAlpha: "none",
+      colorSpaceConversion: "none",
+    });
+    // a second pass of the two front-runners, to see if the first measurement was cold
+    if (b16)
+      await timeImport(
+        "16f → RGBA16F texImage2D (2nd)",
+        b16,
+        "fs_float",
+        F16,
+        0,
+      );
+    await timeImport(
+      "pack rgba8 → RGBA8 texImage2D (2nd)",
+      bpk,
+      "fs_pack",
+      U8,
+      1,
+    );
+
+    log("SEAM_SUMMARY", RESULTS);
+  }
+  main()
+    .catch((e) => log("SEAM_ERROR", { error: String(e), stack: e && e.stack }))
+    .finally(() => {
+      clearInterval(KA);
+      log("SEAM_DONE", "ok");
+      release();
+    });
+</script>

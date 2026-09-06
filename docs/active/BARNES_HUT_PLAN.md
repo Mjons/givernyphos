@@ -365,6 +365,17 @@ reports the max value recovered and the import cost per frame at
 readPixels fence). Pass: an encoding that recovers ≥ 16.0 within 1 %
 and imports in < 2 ms.
 
+> **Seam result (2026-09-06, Chrome 152, RTX 4090, `tools/seam-test.html`):**
+> the `rgba16float` canvas imported with `texImage2D(RGBA16F, RGBA,
+> HALF_FLOAT, canvas)` is lossless (max 16 recovered within ½ f16 ulp),
+> same-task fresh, and costs 0.5–0.8 ms per frame at 2560×1440 including
+> GPU completion — the same as a plain RGBA8 import. The lossless pack
+> is bit-exact too (0.7–1.1 ms); RGBM only survives with
+> `UNPACK_PREMULTIPLY_ALPHA_WEBGL = true`; importing a float canvas
+> into an RGBA8 texture clamps to 1.0. `createImageBitmap` is a CPU
+> readback (100+ ms) — never per frame. **Decision: float canvas,
+> direct import; pack kept as the fallback for other browsers.**
+
 **CPU consumers.** With no per-frame mirror, `wgpuFrameStep` reads
 back every `mirrorEvery` frames (default 30) for stats, barycenter,
 picking and the movie subject finder; click-to-follow forces one fresh
