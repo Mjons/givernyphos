@@ -77,6 +77,13 @@ invisible until astrophage fell outside the kept K-matrix region.
 
 _(things in flight; not yet shipped)_
 
+- **Defaults from the 4090 measurements** (BH_TESTING.md §3, 2026-09-06:
+  tree ≈ brute at 99k, ~3× at 262k, ~10× at 518k): with no stored
+  choice, discrete GPUs (`sniffDiscreteGpu`) default to the WebGPU
+  compute backend, and Barnes-Hut switches itself on at ≥200k bodies
+  (`bhSim.auto`, `bhAutoApply` on activation and tier change). An
+  explicit `?bh=` flag or settings pick still wins. Above 262k the
+  CPU bridge and fill rate now set the ceiling (M9).
 - **100-token gate, first pass** (`render-plan.py`: every planned id
   rendered on the GPU, stills measured, sheet + CSV): no blown frames;
   Orrery tokens were a lone dot (authored pose far out) → token camera

@@ -1551,6 +1551,24 @@
       // get lite, a discrete desktop GPU gets lush (the app's sweet spot),
       // everything else standard. The GPU sniff is a throwaway WebGL
       // context + WEBGL_debug_renderer_info; any failure → standard.
+      // Discrete-GPU sniff: a throwaway WebGL context + the unmasked
+      // renderer string. Any failure → false. Used by token mode (tier)
+      // and by the compute-backend default (WebGPU + Barnes-Hut).
+      let _discreteGpu = null;
+      function sniffDiscreteGpu() {
+        if (_discreteGpu !== null) return _discreteGpu;
+        _discreteGpu = false;
+        try {
+          const cv = document.createElement("canvas");
+          const gl = cv.getContext("webgl2") || cv.getContext("webgl");
+          const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+          const name = ext
+            ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
+            : "";
+          _discreteGpu = /NVIDIA|GeForce|RTX|Radeon|AMD|Arc\b/i.test(name);
+        } catch (_) {}
+        return _discreteGpu;
+      }
       function tokenDeviceTier() {
         const ua = navigator.userAgent || "";
         const coarse =
@@ -1559,16 +1577,7 @@
           /Mobi|Android|iPhone|iPad|iPod/i.test(ua) ||
           (coarse && (navigator.maxTouchPoints || 0) > 1);
         if (mobile) return "lite";
-        try {
-          const cv = document.createElement("canvas");
-          const gl = cv.getContext("webgl2") || cv.getContext("webgl");
-          const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
-          const name = ext
-            ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
-            : "";
-          if (/NVIDIA|GeForce|RTX|Radeon|AMD|Arc\b/i.test(name)) return "lush";
-        } catch (_) {}
-        return "standard";
+        return sniffDiscreteGpu() ? "lush" : "standard";
       }
 
       // Density level → TEX_SIZE. Mutable so the user can resize live.
@@ -2451,6 +2460,10 @@
       const BH_AGG_ITERS = 56;
       const bhSim = {
         wanted: false,
+        // Auto mode: with no ?bh= flag, the tree switches itself on at
+        // BH_AUTO_MIN_BODIES and above (where it beats the brute kernel
+        // ~3–10× on a discrete GPU) and off below (where brute wins).
+        auto: true,
         theta: 0.5, // MAC opening angle; force reads theta² from SimParams
         // Aggregate wavefront dispatches per substep. Must exceed the
         // deepest tree (≈ 27 Morton-chain levels + log2(largest kind
@@ -2469,10 +2482,19 @@
       try {
         const _u = new URL(location.href);
         const _bh = (_u.searchParams.get("bh") || "").toLowerCase();
+        if (_bh !== "") bhSim.auto = false; // explicit flag pins it either way
         if (_bh === "1" || _bh === "true" || _bh === "on") bhSim.wanted = true;
         const _th = parseFloat(_u.searchParams.get("theta"));
         if (isFinite(_th) && _th >= 0.1 && _th <= 2.0) bhSim.theta = _th;
       } catch (_) {}
+      const BH_AUTO_MIN_BODIES = 200000; // colossal (262k) and up
+      function bhAutoApply() {
+        if (!bhSim.auto || !wgpuSim.available || bhSim.failed) return;
+        const want = MAX_BODIES >= BH_AUTO_MIN_BODIES;
+        if (want !== bhSim.wanted && typeof window.__bhToggle === "function") {
+          window.__bhToggle(want);
+        }
+      }
 
       const BH_WGSL_COMMON = /* wgsl */ `
         const BH_INVALID: u32 = 0xffffffffu;
@@ -5420,6 +5442,7 @@
         pointMat.uniforms.uVel.value = wgpuSim.velTex;
         wgpuSim.active = true;
         showToast("WebGPU", "active");
+        bhAutoApply();
         console.info("[wgpu] activated");
         return true;
       }
@@ -5512,7 +5535,10 @@
           const v = localStorage.getItem(COMPUTE_PREF_KEY);
           if (v === "webgpu" || v === "webgl") return v;
         } catch (_) {}
-        return "webgl";
+        // No stored choice: discrete GPUs default to WebGPU (measured on
+        // an RTX 4090, 2026-09-06 — BH_TESTING.md §3); everything else
+        // stays on WebGL2. A user's explicit pick always wins.
+        return sniffDiscreteGpu() ? "webgpu" : "webgl";
       }
       function saveComputeBackendPref(v) {
         try {
@@ -16579,6 +16605,7 @@
         camera.updateProjectionMatrix();
 
         rebuildingPipeline = false;
+        if (wgpuSim.active) bhAutoApply(); // tier crossed the tree threshold?
       }
 
       // Per-tier performance clamps. Experimental tiers run with the most
@@ -18891,7 +18918,7 @@
                     : bhSim.pipelines && bhSim.buffers
                       ? `on  θ=${bhSim.theta}  build=${_fmtMs(wgpuSim.timing.buildMs)}  force=${_fmtMs(wgpuSim.timing.velMs)}`
                       : "initialising…"
-                  : "off (?bh=1 or __bhToggle(true))"
+                  : "off (auto ≥262k · ?bh=1 · __bhToggle(true))"
               }`
             : "");
       }

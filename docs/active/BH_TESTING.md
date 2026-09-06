@@ -67,9 +67,16 @@ with measured numbers in the table below):
 | tier          | brute ms/substep | bh ms/substep | speedup | date       |
 | ------------- | ---------------- | ------------- | ------- | ---------- |
 | lush 65k      | 5.98             | 10.07 ¹       | 0.59×   | 2026-07-01 |
-| titanic 99k   |                  |               |         |            |
-| colossal 262k |                  |               |         |            |
-| abyssal 518k  |                  |               |         |            |
+| titanic 99k   | ~14 (extrap.)    | 16.25 ²       | ~0.9×   | 2026-09-06 |
+| colossal 262k | ~96 (extrap.)    | 31.20 ²       | ~3×     | 2026-09-06 |
+| abyssal 518k  | ~380 (extrap.)   | 36.83 ²       | ~10×    | 2026-09-06 |
+
+² Overlay timestamp samples (`force=`) on an RTX 4090, quiet-drift,
+θ=0.5, after the dispatch cuts; build 0.39 / 1.84 / 0.72 ms. Brute
+column is the 65k measurement scaled by (N/65k)² — run `__bhBench()`
+to replace it. Frame rates were 54 / 32 / 14 fps: above 262k the
+CPU bridge (`read=` 66 / 1071 / 479 ms wall) and fill rate, not the
+tree, set the ceiling — BARNES_HUT_PLAN.md §5 / M9.
 
 ¹ Measured on the M1–M6 drop _before_ the dispatch-overhead cuts that
 landed the same day (fused scan −16 dispatches, internal-only

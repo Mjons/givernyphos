@@ -48,7 +48,8 @@ browser. Run §5 before committing. Console hooks added:
 | F8 `preserveDrawingBuffer`                  | done (off)                                        | `e` export, thumbnail capture, recording still work                |
 | F9 merged tail pass + half-res bloom        | done, opt-in `?post=lean` / `__setPostMode`       | A/B `?post=lean` vs default on 3 scenes; screenshots should match   |
 | F12 bind-group cache                        | done                                              | WebGPU scenes unchanged; `wgpu` overlay line                       |
-| F11 BH gates · F13 vendor                   | not started                                       | F11 needs your GPU; F13 needs a deploy-workflow decision           |
+| F11 BH gates                                | measured 2026-09-06 (4090): tree ≈ brute at 99k, 3× at 262k, 10× at 518k | WebGPU + BH now default on discrete GPUs from 262k; bridge is the next wall (M9) |
+| F13 vendor                                  | done for the token bundle (`vendor/three`); main page still CDN | deploy-workflow decision for the main page                          |
 
 ## 1. Snapshot — where the engine is
 
