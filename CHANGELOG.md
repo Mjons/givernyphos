@@ -304,6 +304,14 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   the previews (6.5 MB). Verified headless at 1600×900 and 390×844:
   every chapter, the frame handoff, the track handoffs, zero console
   errors. Open `site/index.html` from the app folder or the site.
+- **Site: scroll above the fold.** The live frame swallowed every wheel
+  event over the hero, so the page could not be scrolled from the top.
+  The sky is now split: the left half belongs to the page (wheel and
+  touch scroll), the right half to the piece (drag to orbit, wheel to
+  zoom); on hover a hairline marks the split with "scroll" and "drag to
+  orbit · wheel to zoom" labels. Verified: `elementFromPoint` on the
+  left half is the scroll zone, on the right half the live frame. Touch
+  devices have posters, so the whole width scrolls there.
 - **`?bare=1`** — the piece with none of its chrome and none of its own
   music (HUD, rail, toasts, film and tour title cards, token bar and
   hint hidden; film music events ignored) for the site's live frames.
@@ -324,7 +332,7 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   director orbited a fixed pivot, so after about a minute at 1× (sooner
   at 3×) token #63 was staring at empty sky. The barycentre is now
   sampled on the spin term's cadence in token mode (`maybeUpdateBarycenter(
-  force)`); while the director or an idle holder owns the camera the
+force)`); while the director or an idle holder owns the camera the
   whole rig translates with it, and the post-tour settle aims at the
   system's displaced home. Verified on #63 for 110 s at 1× and 3×: the
   disc stays framed.

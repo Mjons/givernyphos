@@ -9,7 +9,7 @@
   --muted: #8b93ad;
   --line: #1c2338;
   --accent: #8ab4ff;
-  --well: #0b0e17;                 /* the second plane: sheet cells, strip images */
+  --well: #0b0e17; /* the second plane: sheet cells, strip images */
   --hair: rgba(230, 234, 245, 0.22); /* a hairline that reads on the ground */
   --serif: "Cormorant Garamond", "Cormorant", Georgia, "Times New Roman", serif;
   --sans: "Inter", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -334,6 +334,64 @@ img {
 }
 .sky .live-frame.on {
   opacity: 1;
+}
+/* The split: left half scrolls the page, right half drives the piece.
+   The zones sit above the frame; the play zone lets events through. */
+.sky .scroll-zone,
+.sky .play-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+}
+.sky .scroll-zone {
+  left: 0;
+  width: 50%;
+  pointer-events: auto;
+  cursor: default;
+}
+.sky .play-zone {
+  right: 0;
+  width: 50%;
+  pointer-events: none;
+  border-left: 1px solid rgba(230, 234, 245, 0);
+  transition: border-color 500ms var(--ease);
+}
+.sky .zone-hint {
+  position: absolute;
+  bottom: 5vh;
+  font: 400 10.5px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(230, 234, 245, 0.55);
+  text-shadow: 0 1px 4px #000;
+  opacity: 0;
+  transition: opacity 500ms var(--ease);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.sky .scroll-zone .zone-hint {
+  right: 18px;
+}
+.sky .play-zone .zone-hint {
+  left: 18px;
+}
+.sky:hover .zone-hint,
+.sky.show-zones .zone-hint {
+  opacity: 1;
+}
+.sky:hover .play-zone,
+.sky.show-zones .play-zone {
+  border-left-color: rgba(230, 234, 245, 0.14);
+}
+@media (hover: none) {
+  .sky .zone-hint,
+  .sky .play-zone {
+    display: none;
+  }
+  .sky .scroll-zone {
+    width: 100%;
+  }
 }
 .sky::after {
   /* a soft scrim under the text column only; the sim stays interactive */

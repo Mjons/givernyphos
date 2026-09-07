@@ -13,7 +13,10 @@
   var rail = doc.getElementById("rail");
   var notice = doc.getElementById("notice");
 
-  var C = window.PHOS_CONTENT && typeof window.PHOS_CONTENT === "object" ? window.PHOS_CONTENT : null;
+  var C =
+    window.PHOS_CONTENT && typeof window.PHOS_CONTENT === "object"
+      ? window.PHOS_CONTENT
+      : null;
   var reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   var coarse = matchMedia("(hover: none) and (pointer: coarse)").matches;
   var posterMode = reducedMotion || coarse; // the poster with "Open live" instead of a frame
@@ -34,7 +37,8 @@
     try {
       return fn();
     } catch (e) {
-      if (window.console) console.warn("[site]", e && e.message ? e.message : e);
+      if (window.console)
+        console.warn("[site]", e && e.message ? e.message : e);
     }
   }
   function appUrl(path) {
@@ -77,7 +81,9 @@
   // ---- head: Open Graph from content ----
   function setMeta(site) {
     if (!site) return;
-    var full = (site.title || "Giverny Phos") + (site.subtitle ? " · " + site.subtitle : "");
+    var full =
+      (site.title || "Giverny Phos") +
+      (site.subtitle ? " · " + site.subtitle : "");
     var set = function (sel, val) {
       if (!val) return;
       var m = doc.querySelector(sel);
@@ -116,7 +122,12 @@
     var openUrl = scene.url;
     if (q.id) {
       var id = parseInt(q.id, 10);
-      var tok = C && C.tokens ? C.tokens.filter(function (t) { return t.id === id; })[0] : null;
+      var tok =
+        C && C.tokens
+          ? C.tokens.filter(function (t) {
+              return t.id === id;
+            })[0]
+          : null;
       label = "#" + id + (tok && tok.family ? "  " + tok.family : "");
       openUrl = "index.html?id=" + id; // the full token page, with its intro
     } else if (q.film) {
@@ -161,7 +172,24 @@
   // ---- renderers ----
   function renderSky(ch) {
     var sky = h("div", { class: "sky", "aria-hidden": "true" });
-    if (ch.scene.poster) sky.appendChild(h("img", { class: "poster", src: ch.scene.poster, alt: "" }));
+    if (ch.scene.poster)
+      sky.appendChild(
+        h("img", { class: "poster", src: ch.scene.poster, alt: "" }),
+      );
+    // Split the sky: the left half belongs to the page (wheel and touch
+    // scroll), the right half to the piece (drag to orbit, wheel to
+    // zoom). Without this the live frame swallowed every wheel above the
+    // fold and the page could not be scrolled from the hero.
+    if (!posterMode) {
+      var zone = h("div", { class: "scroll-zone" });
+      zone.appendChild(h("span", { class: "zone-hint", text: "scroll" }));
+      sky.appendChild(zone);
+      var play = h("div", { class: "play-zone" });
+      play.appendChild(
+        h("span", { class: "zone-hint", text: "drag to orbit · wheel to zoom" }),
+      );
+      sky.appendChild(play);
+    }
     return sky;
   }
   function renderSceneData(ch) {
@@ -169,13 +197,24 @@
     var row = h("div", { class: "scene-data" });
     if (posterMode) {
       row.appendChild(h("span", { text: d.label }));
-      row.appendChild(h("a", ext({ class: "open-live", href: appUrl(d.openUrl), text: "Open live" })));
+      row.appendChild(
+        h(
+          "a",
+          ext({
+            class: "open-live",
+            href: appUrl(d.openUrl),
+            text: "Open live",
+          }),
+        ),
+      );
     } else {
       var lab = h("span");
       lab.appendChild(h("i", { class: "live-dot" }));
       lab.appendChild(doc.createTextNode("live  " + d.label));
       row.appendChild(lab);
-      row.appendChild(h("a", ext({ href: appUrl(d.openUrl), text: "open in a new tab" })));
+      row.appendChild(
+        h("a", ext({ href: appUrl(d.openUrl), text: "open in a new tab" })),
+      );
     }
     return row;
   }
@@ -183,7 +222,8 @@
     var frag = doc.createDocumentFragment();
     frag.appendChild(h("i", { class: "rule" }));
     var card = h("div", { class: "card" });
-    if (ch.kicker) card.appendChild(h("p", { class: "kicker", text: ch.kicker }));
+    if (ch.kicker)
+      card.appendChild(h("p", { class: "kicker", text: ch.kicker }));
     card.appendChild(h("h2", { class: "title", text: ch.title || ch.key }));
     card.appendChild(paragraphs(ch.body));
     frag.appendChild(card);
@@ -192,15 +232,30 @@
 
   function renderHero(ch) {
     var site = C.site || {};
-    var sec = h("section", { class: "chapter live k-" + ch.key, id: ch.key, "aria-label": ch.title || site.title });
+    var sec = h("section", {
+      class: "chapter live k-" + ch.key,
+      id: ch.key,
+      "aria-label": ch.title || site.title,
+    });
     var sky = renderSky(ch);
     sec.appendChild(sky);
     var grid = h("div", { class: "grid stage" });
     var mast = h("div", { class: "masthead text" });
-    mast.appendChild(h("p", { class: "name", text: site.title || "Giverny Phos", role: "heading", "aria-level": "2" }));
-    if (site.subtitle) mast.appendChild(h("p", { class: "sub", text: site.subtitle }));
-    mast.appendChild(h("p", { class: "line", text: site.oneLine || ch.kicker || "" }));
-    if (ch.body && ch.body.length) mast.appendChild(paragraphs(ch.body, "body"));
+    mast.appendChild(
+      h("p", {
+        class: "name",
+        text: site.title || "Giverny Phos",
+        role: "heading",
+        "aria-level": "2",
+      }),
+    );
+    if (site.subtitle)
+      mast.appendChild(h("p", { class: "sub", text: site.subtitle }));
+    mast.appendChild(
+      h("p", { class: "line", text: site.oneLine || ch.kicker || "" }),
+    );
+    if (ch.body && ch.body.length)
+      mast.appendChild(paragraphs(ch.body, "body"));
     grid.appendChild(mast);
     sec.appendChild(grid);
     sec.appendChild(renderSceneData(ch));
@@ -208,7 +263,11 @@
   }
 
   function renderLive(ch) {
-    var sec = h("section", { class: "chapter live k-" + ch.key, id: ch.key, "aria-label": ch.title });
+    var sec = h("section", {
+      class: "chapter live k-" + ch.key,
+      id: ch.key,
+      "aria-label": ch.title,
+    });
     var sky = renderSky(ch);
     sec.appendChild(sky);
     var grid = h("div", { class: "grid" });
@@ -221,7 +280,11 @@
   }
 
   function renderFlat(ch, extra) {
-    var sec = h("section", { class: "chapter flat k-" + ch.key, id: ch.key, "aria-label": ch.title });
+    var sec = h("section", {
+      class: "chapter flat k-" + ch.key,
+      id: ch.key,
+      "aria-label": ch.title,
+    });
     var grid = h("div", { class: "grid" });
     var text = h("div", { class: "text" });
     text.appendChild(titleCard(ch));
@@ -235,13 +298,28 @@
     return renderFlat(ch, function (sec) {
       var fams = C.families || [];
       var head = h("div", { class: "strip-head grid" });
-      var ctl = h("div", { class: "wide", style: "display:flex;justify-content:flex-end;gap:22px" });
-      var prev = h("button", { type: "button", text: "previous", "aria-label": "Previous family" });
-      var next = h("button", { type: "button", text: "next", "aria-label": "Next family" });
+      var ctl = h("div", {
+        class: "wide",
+        style: "display:flex;justify-content:flex-end;gap:22px",
+      });
+      var prev = h("button", {
+        type: "button",
+        text: "previous",
+        "aria-label": "Previous family",
+      });
+      var next = h("button", {
+        type: "button",
+        text: "next",
+        "aria-label": "Next family",
+      });
       ctl.appendChild(prev);
       ctl.appendChild(next);
       head.appendChild(ctl);
-      var strip = h("div", { class: "strip", role: "list", "aria-label": "The seventeen families" });
+      var strip = h("div", {
+        class: "strip",
+        role: "list",
+        "aria-label": "The seventeen families",
+      });
       fams.forEach(function (f) {
         var firstId = f.ids && f.ids.length ? f.ids[0] : null;
         var fig = h("figure", { role: "listitem" });
@@ -252,32 +330,80 @@
           loading: "lazy",
           decoding: "async",
         });
-        if (firstId != null) fig.appendChild(h("a", ext({ href: appUrl("index.html?id=" + firstId), "aria-label": "Open " + f.name + " live" }), img));
+        if (firstId != null)
+          fig.appendChild(
+            h(
+              "a",
+              ext({
+                href: appUrl("index.html?id=" + firstId),
+                "aria-label": "Open " + f.name + " live",
+              }),
+              img,
+            ),
+          );
         else fig.appendChild(img);
         var cap = h("figcaption");
         var row = h("div", { class: "fam-row" });
         var nameAttrs = { class: "fam-name", text: f.name };
-        row.appendChild(firstId != null ? h("a", ext(Object.assign({ href: appUrl("index.html?id=" + firstId) }, nameAttrs))) : h("span", nameAttrs));
+        row.appendChild(
+          firstId != null
+            ? h(
+                "a",
+                ext(
+                  Object.assign(
+                    { href: appUrl("index.html?id=" + firstId) },
+                    nameAttrs,
+                  ),
+                ),
+              )
+            : h("span", nameAttrs),
+        );
         var n = f.count != null ? f.count : f.ids ? f.ids.length : null;
         var meta = [];
         if (n != null) meta.push(n + (n === 1 ? " token" : " tokens"));
         if (f.tier) meta.push(f.tier);
-        row.appendChild(h("span", { class: "fam-meta" + (f.tier === "rare" ? " rare" : ""), text: meta.join(", ") }));
+        row.appendChild(
+          h("span", {
+            class: "fam-meta" + (f.tier === "rare" ? " rare" : ""),
+            text: meta.join(", "),
+          }),
+        );
         cap.appendChild(row);
-        if (f.sentence) cap.appendChild(h("p", { class: "fam-sentence", text: f.sentence }));
+        if (f.sentence)
+          cap.appendChild(h("p", { class: "fam-sentence", text: f.sentence }));
         var links = h("p", { class: "fam-links" });
-        links.appendChild(h("a", ext({ href: appUrl("collection.html#family=" + encodeURIComponent(f.scene || f.name)), text: "in the collection" })));
+        links.appendChild(
+          h(
+            "a",
+            ext({
+              href: appUrl(
+                "collection.html#family=" +
+                  encodeURIComponent(f.scene || f.name),
+              ),
+              text: "in the collection",
+            }),
+          ),
+        );
         cap.appendChild(links);
         fig.appendChild(cap);
         strip.appendChild(fig);
       });
       var step = function (dir) {
         var card = strip.firstElementChild;
-        var w = card ? card.getBoundingClientRect().width + 28 : strip.clientWidth * 0.8;
-        strip.scrollBy({ left: dir * w, behavior: reducedMotion ? "auto" : "smooth" });
+        var w = card
+          ? card.getBoundingClientRect().width + 28
+          : strip.clientWidth * 0.8;
+        strip.scrollBy({
+          left: dir * w,
+          behavior: reducedMotion ? "auto" : "smooth",
+        });
       };
-      prev.addEventListener("click", function () { step(-1); });
-      next.addEventListener("click", function () { step(1); });
+      prev.addEventListener("click", function () {
+        step(-1);
+      });
+      next.addEventListener("click", function () {
+        step(1);
+      });
       sec.appendChild(head);
       sec.appendChild(strip);
     });
@@ -285,8 +411,14 @@
 
   function renderHundred(ch) {
     return renderFlat(ch, function (sec) {
-      var toks = (C.tokens || []).slice().sort(function (a, b) { return a.id - b.id; });
-      var sheet = h("div", { class: "sheet", role: "list", "aria-label": "The hundred tokens" });
+      var toks = (C.tokens || []).slice().sort(function (a, b) {
+        return a.id - b.id;
+      });
+      var sheet = h("div", {
+        class: "sheet",
+        role: "list",
+        "aria-label": "The hundred tokens",
+      });
       toks.forEach(function (t) {
         var a = h("a", {
           href: appUrl("collection.html#id=" + t.id),
@@ -294,28 +426,50 @@
           title: "#" + t.id + (t.family ? "  " + t.family : ""),
           "aria-label": "Token " + t.id + (t.family ? ", " + t.family : ""),
         });
-        a.appendChild(h("img", { src: t.thumb, alt: "", loading: "lazy", decoding: "async" }));
+        a.appendChild(
+          h("img", {
+            src: t.thumb,
+            alt: "",
+            loading: "lazy",
+            decoding: "async",
+          }),
+        );
         a.appendChild(h("span", { class: "id", text: String(t.id) }));
         sheet.appendChild(a);
       });
       sec.appendChild(sheet);
-      sec.appendChild(h("p", { class: "sheet-note", text: toks.length + " tokens. The still is each token at its first moments; the live piece is what it becomes." }));
+      sec.appendChild(
+        h("p", {
+          class: "sheet-note",
+          text:
+            toks.length +
+            " tokens. The still is each token at its first moments; the live piece is what it becomes.",
+        }),
+      );
     });
   }
 
   function renderMint(ch) {
     return renderFlat(ch, function (sec, grid) {
       var m = C.mint || {};
-      if (m.question) grid.appendChild(h("p", { class: "question", text: m.question }));
+      if (m.question)
+        grid.appendChild(h("p", { class: "question", text: m.question }));
       var cols = h("div", { class: "mint-cols" });
       var left = h("div");
-      if (m.detail) left.appendChild(h("p", { class: "detail", text: m.detail }));
-      if (m.rule) left.appendChild(h("p", { class: "rule-text", text: m.rule }));
-      if (m.cta && m.link) left.appendChild(h("a", ext({ class: "cta", href: m.link, text: m.cta })));
+      if (m.detail)
+        left.appendChild(h("p", { class: "detail", text: m.detail }));
+      if (m.rule)
+        left.appendChild(h("p", { class: "rule-text", text: m.rule }));
+      if (m.cta && m.link)
+        left.appendChild(
+          h("a", ext({ class: "cta", href: m.link, text: m.cta })),
+        );
       cols.appendChild(left);
       if (m.facts && m.facts.length) {
         var ul = h("ul", { class: "facts" });
-        m.facts.forEach(function (f) { ul.appendChild(h("li", { text: f })); });
+        m.facts.forEach(function (f) {
+          ul.appendChild(h("li", { text: f }));
+        });
         cols.appendChild(ul);
       }
       grid.appendChild(cols);
@@ -326,17 +480,32 @@
     return renderFlat(ch, function (sec, grid) {
       var A = audio();
       var playFn = null;
-      if (A) ["playTrack", "play", "setTrack", "select"].some(function (n) {
-        if (typeof A[n] === "function") { playFn = n; return true; }
-        return false;
-      });
+      if (A)
+        ["playTrack", "play", "setTrack", "select"].some(function (n) {
+          if (typeof A[n] === "function") {
+            playFn = n;
+            return true;
+          }
+          return false;
+        });
       var ol = h("ol", { class: "tracks", "aria-label": "Soundtrack" });
       (C.tracks || []).forEach(function (t, i) {
         var li = h("li");
-        li.appendChild(h("span", { class: "n", text: (i + 1 < 10 ? "0" : "") + (i + 1), "aria-hidden": "true" }));
+        li.appendChild(
+          h("span", {
+            class: "n",
+            text: (i + 1 < 10 ? "0" : "") + (i + 1),
+            "aria-hidden": "true",
+          }),
+        );
         li.appendChild(h("span", { class: "t", text: t.title }));
         if (playFn) {
-          var b = h("button", { type: "button", class: "play", text: "play", "aria-label": "Play " + t.title });
+          var b = h("button", {
+            type: "button",
+            class: "play",
+            text: "play",
+            "aria-label": "Play " + t.title,
+          });
           b.addEventListener("click", function () {
             safe(function () {
               if (!entered) enter(false);
@@ -345,12 +514,23 @@
           });
           li.appendChild(b);
         }
-        trackRows.push({ li: li, title: (t.title || "").toLowerCase(), file: (t.file || "").toLowerCase() });
+        trackRows.push({
+          li: li,
+          title: (t.title || "").toLowerCase(),
+          file: (t.file || "").toLowerCase(),
+        });
         ol.appendChild(li);
       });
       grid.appendChild(ol);
       if (C.tracks && C.tracks.length) {
-        grid.appendChild(h("p", { class: "tracks-note", text: C.tracks.length + " tracks. The soundtrack belongs to this site; the token plays without music." }));
+        grid.appendChild(
+          h("p", {
+            class: "tracks-note",
+            text:
+              C.tracks.length +
+              " tracks. The soundtrack belongs to this site; the token plays without music.",
+          }),
+        );
       }
     });
   }
@@ -366,20 +546,36 @@
         dl.appendChild(h("dd", null, node));
       };
       var author = cr.author || site.author;
-      if (author) row("Made by", site.x ? h("a", ext({ href: site.x, text: author })) : doc.createTextNode(author));
+      if (author)
+        row(
+          "Made by",
+          site.x
+            ? h("a", ext({ href: site.x, text: author }))
+            : doc.createTextNode(author),
+        );
       if (cr.license) row("License", doc.createTextNode(cr.license));
       if (cr.tech && cr.tech.length) {
         var ul = h("ul", { class: "tech" });
-        cr.tech.forEach(function (t) { ul.appendChild(h("li", { text: t })); });
+        cr.tech.forEach(function (t) {
+          ul.appendChild(h("li", { text: t }));
+        });
         row("Built with", ul);
       }
       var links = (cr.links || []).slice();
       var has = function (path) {
-        return links.some(function (l) { return String(l.href || "").indexOf(path) >= 0; });
+        return links.some(function (l) {
+          return String(l.href || "").indexOf(path) >= 0;
+        });
       };
-      if (!has("index.html")) links.push({ label: "Open the piece", href: appUrl("index.html") });
-      if (!has("collection.html")) links.push({ label: "The collection viewer", href: appUrl("collection.html") });
-      if (site.live && !has(site.live)) links.push({ label: "The live site", href: site.live });
+      if (!has("index.html"))
+        links.push({ label: "Open the piece", href: appUrl("index.html") });
+      if (!has("collection.html"))
+        links.push({
+          label: "The collection viewer",
+          href: appUrl("collection.html"),
+        });
+      if (site.live && !has(site.live))
+        links.push({ label: "The live site", href: site.live });
       var dd = h("span");
       links.forEach(function (l, i) {
         if (i) dd.appendChild(h("span", { class: "sep", text: "/" }));
@@ -387,7 +583,8 @@
       });
       row("Links", dd);
       sec.querySelector(".text").appendChild(dl);
-      if (site.tagline) grid.appendChild(h("p", { class: "signoff", text: site.tagline }));
+      if (site.tagline)
+        grid.appendChild(h("p", { class: "signoff", text: site.tagline }));
     });
   }
 
@@ -396,30 +593,47 @@
     if (i === 0 && live) return renderHero(ch);
     if (live) return renderLive(ch);
     switch (ch.key) {
-      case "families": return renderFamilies(ch);
-      case "hundred": return renderHundred(ch);
-      case "mint": return renderMint(ch);
-      case "music": return renderMusic(ch);
-      case "credits": return renderCredits(ch);
-      default: return renderFlat(ch);
+      case "families":
+        return renderFamilies(ch);
+      case "hundred":
+        return renderHundred(ch);
+      case "mint":
+        return renderMint(ch);
+      case "music":
+        return renderMusic(ch);
+      case "credits":
+        return renderCredits(ch);
+      default:
+        return renderFlat(ch);
     }
   }
 
   // ---- rail ----
   function buildRail() {
     chapters.forEach(function (c) {
-      var b = h("button", { type: "button", "aria-label": c.title, title: c.title }, [h("span", { text: c.key }), h("i")]);
-      b.addEventListener("click", function () { goTo(c); });
+      var b = h(
+        "button",
+        { type: "button", "aria-label": c.title, title: c.title },
+        [h("span", { text: c.key }), h("i")],
+      );
+      b.addEventListener("click", function () {
+        goTo(c);
+      });
       rail.appendChild(b);
       railButtons[c.key] = b;
     });
   }
   function goTo(c) {
     if (!c) return;
-    c.el.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+    c.el.scrollIntoView({
+      behavior: reducedMotion ? "auto" : "smooth",
+      block: "start",
+    });
   }
   function step(dir) {
-    var i = chapters.findIndex(function (c) { return c.key === current; });
+    var i = chapters.findIndex(function (c) {
+      return c.key === current;
+    });
     goTo(chapters[Math.max(0, Math.min(chapters.length - 1, i + dir))]);
   }
 
@@ -434,7 +648,10 @@
       else railButtons[k].removeAttribute("aria-current");
     });
     var A = audio();
-    if (A && typeof A.setChapter === "function") safe(function () { A.setChapter(c.key); });
+    if (A && typeof A.setChapter === "function")
+      safe(function () {
+        A.setChapter(c.key);
+      });
   }
   function update() {
     var best = null;
@@ -445,25 +662,34 @@
     if (best.key !== current) setCurrent(best);
     if (best.scene && best.cover >= 0.5) mountLive(best);
     if (liveFrame) {
-      var owner = chapters.filter(function (c) { return c.key === liveFrame.key; })[0];
+      var owner = chapters.filter(function (c) {
+        return c.key === liveFrame.key;
+      })[0];
       if (owner && owner.cover < 0.1) unmountLive();
     }
   }
   function observe() {
     var thresholds = [];
     for (var t = 0; t <= 1.0001; t += 0.05) thresholds.push(Math.min(1, t));
-    var io = new IntersectionObserver(function (entries) {
-      var vh = window.innerHeight || 1;
-      entries.forEach(function (en) {
-        var c = byEl.get(en.target);
-        if (!c) return;
-        var rb = en.rootBounds && en.rootBounds.height ? en.rootBounds.height : vh;
-        c.cover = en.isIntersecting ? en.intersectionRect.height / rb : 0;
-        if (en.intersectionRatio >= 0.2 || c.cover >= 0.35) c.el.classList.add("seen");
-      });
-      update();
-    }, { threshold: thresholds });
-    chapters.forEach(function (c) { io.observe(c.el); });
+    var io = new IntersectionObserver(
+      function (entries) {
+        var vh = window.innerHeight || 1;
+        entries.forEach(function (en) {
+          var c = byEl.get(en.target);
+          if (!c) return;
+          var rb =
+            en.rootBounds && en.rootBounds.height ? en.rootBounds.height : vh;
+          c.cover = en.isIntersecting ? en.intersectionRect.height / rb : 0;
+          if (en.intersectionRatio >= 0.2 || c.cover >= 0.35)
+            c.el.classList.add("seen");
+        });
+        update();
+      },
+      { threshold: thresholds },
+    );
+    chapters.forEach(function (c) {
+      io.observe(c.el);
+    });
   }
 
   // ---- audio: chapter map, now-playing ----
@@ -490,8 +716,13 @@
         else r.li.removeAttribute("aria-current");
       });
     };
-    if (typeof A.on === "function") safe(function () { A.on("track", markNow); });
-    safe(function () { if (typeof A.state === "function") markNow(A.state()); });
+    if (typeof A.on === "function")
+      safe(function () {
+        A.on("track", markNow);
+      });
+    safe(function () {
+      if (typeof A.state === "function") markNow(A.state());
+    });
   }
 
   // ---- the gate ----
@@ -499,19 +730,20 @@
     if (entered) return;
     entered = true;
     var A = audio();
-    if (A) safe(function () {
-      if (silent) {
-        if (typeof A.setMuted === "function") A.setMuted(true);
-        else if (typeof A.toggleMute === "function") {
-          var st = typeof A.state === "function" ? A.state() : null;
-          if (!(st && st.muted)) A.toggleMute();
+    if (A)
+      safe(function () {
+        if (silent) {
+          if (typeof A.setMuted === "function") A.setMuted(true);
+          else if (typeof A.toggleMute === "function") {
+            var st = typeof A.state === "function" ? A.state() : null;
+            if (!(st && st.muted)) A.toggleMute();
+          }
         }
-      }
-      if (typeof A.enter === "function") {
-        var p = A.enter();
-        if (p && typeof p.catch === "function") p.catch(function () {});
-      }
-    });
+        if (typeof A.enter === "function") {
+          var p = A.enter();
+          if (p && typeof p.catch === "function") p.catch(function () {});
+        }
+      });
     body.classList.remove("pre");
     body.classList.add("entered");
     gate.classList.add("leaving");
@@ -523,8 +755,16 @@
     else setTimeout(done, 2100);
     update(); // mounts the hero's frame under the dissolving gate
     if (location.hash) {
-      var target = chapters.filter(function (c) { return "#" + c.key === location.hash; })[0];
-      if (target) setTimeout(function () { goTo(target); }, reducedMotion ? 0 : 600);
+      var target = chapters.filter(function (c) {
+        return "#" + c.key === location.hash;
+      })[0];
+      if (target)
+        setTimeout(
+          function () {
+            goTo(target);
+          },
+          reducedMotion ? 0 : 600,
+        );
     }
     wake();
   }
@@ -543,7 +783,10 @@
   function onFullscreen() {
     var A = audio();
     var on = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
-    if (A && typeof A.duck === "function") safe(function () { A.duck(on); });
+    if (A && typeof A.duck === "function")
+      safe(function () {
+        A.duck(on);
+      });
   }
 
   // ---- keyboard ----
@@ -568,7 +811,10 @@
       case "m":
       case "M":
         var A = audio();
-        if (A && typeof A.toggleMute === "function") safe(function () { A.toggleMute(); });
+        if (A && typeof A.toggleMute === "function")
+          safe(function () {
+            A.toggleMute();
+          });
         break;
       case "Escape":
         break; // closes nothing; harmless
@@ -579,13 +825,22 @@
   function noContent() {
     var msg = h("span");
     msg.appendChild(h("b", { text: "content.js not loaded" }));
-    msg.appendChild(doc.createTextNode(" — the chapters, the families and the hundred come from site/content.js, which is missing or failed to load. The gate still works; there is nothing behind it yet."));
+    msg.appendChild(
+      doc.createTextNode(
+        " — the chapters, the families and the hundred come from site/content.js, which is missing or failed to load. The gate still works; there is nothing behind it yet.",
+      ),
+    );
     notice.appendChild(msg);
     notice.hidden = false;
     var after = h("section", { class: "chapter flat", id: "missing" });
     var grid = h("div", { class: "grid" });
     var text = h("div", { class: "text" });
-    text.appendChild(h("div", { class: "notice", text: "content.js not loaded — nothing to show." }));
+    text.appendChild(
+      h("div", {
+        class: "notice",
+        text: "content.js not loaded — nothing to show.",
+      }),
+    );
     grid.appendChild(text);
     after.appendChild(grid);
     main.appendChild(after);
@@ -602,7 +857,14 @@
     if (first.scene && first.scene.poster) gatePoster.src = first.scene.poster;
     C.chapters.forEach(function (ch, i) {
       var r = renderChapter(ch, i);
-      var c = { key: ch.key, title: ch.title || ch.key, el: r.el, sky: r.sky || null, scene: ch.scene && ch.scene.kind === "live" ? ch.scene : null, cover: 0 };
+      var c = {
+        key: ch.key,
+        title: ch.title || ch.key,
+        el: r.el,
+        sky: r.sky || null,
+        scene: ch.scene && ch.scene.kind === "live" ? ch.scene : null,
+        cover: 0,
+      };
       chapters.push(c);
       byEl.set(r.el, c);
       main.appendChild(r.el);
@@ -612,10 +874,21 @@
     observe();
   }
 
-  doc.getElementById("enter-sound").addEventListener("click", function () { enter(false); });
-  doc.getElementById("enter-silent").addEventListener("click", function () { enter(true); });
+  doc.getElementById("enter-sound").addEventListener("click", function () {
+    enter(false);
+  });
+  doc.getElementById("enter-silent").addEventListener("click", function () {
+    enter(true);
+  });
   doc.addEventListener("keydown", onKey);
-  ["pointermove", "pointerdown", "keydown", "wheel", "touchstart", "scroll"].forEach(function (ev) {
+  [
+    "pointermove",
+    "pointerdown",
+    "keydown",
+    "wheel",
+    "touchstart",
+    "scroll",
+  ].forEach(function (ev) {
     doc.addEventListener(ev, wake, { passive: true });
   });
   doc.addEventListener("fullscreenchange", onFullscreen);
@@ -627,9 +900,17 @@
   // A small handle for the coordinator's checks (not a public API).
   window.__site = {
     enter: enter,
-    current: function () { return current; },
-    live: function () { return liveFrame ? liveFrame.key : null; },
-    chapters: function () { return chapters.map(function (c) { return { key: c.key, cover: +c.cover.toFixed(2) }; }); },
+    current: function () {
+      return current;
+    },
+    live: function () {
+      return liveFrame ? liveFrame.key : null;
+    },
+    chapters: function () {
+      return chapters.map(function (c) {
+        return { key: c.key, cover: +c.cover.toFixed(2) };
+      });
+    },
     posterMode: posterMode,
   };
 })();
