@@ -9931,12 +9931,22 @@
             vec2 uvSample = uBHScreen + vec2(beta.x / uAspect, beta.y);
             vec2 clamped = clamp(uvSample, vec2(0.0), vec2(1.0));
             vec4 lensed = texture2D(tDiffuse, clamped);
+            // Inside the Einstein radius the source position runs off the
+            // frame (β → -∞ as r → 0). Clamping alone smeared the frame's
+            // edge texels into a bright box in the middle of every
+            // strong-lens shot (token gate #40); fade those samples to
+            // black instead — a dark interior with a bright ring, which is
+            // what the far side of a lens looks like when nothing is there.
+            vec2 over = max(abs(uvSample - 0.5) - 0.5, 0.0);
+            float outside = max(over.x, over.y);
+            lensed.rgb *= 1.0 - smoothstep(0.0, 0.03, outside);
 
             // Magnification: μ = 1 / |det(∂β/∂θ)| = 1 / |1 - θ_E⁴ / |θ|⁴|
-            // Capped so the Einstein ring doesn't blow up to infinity.
+            // Capped so the Einstein ring doesn't blow up to infinity
+            // (5.5 white-outs a dense disc; the ring reads at 3).
             float t4 = tE2 * tE2;
             float invDet = abs(1.0 - t4 / (r2 * r2));
-            float mag = clamp(1.0 / max(invDet, 0.04), 1.0, 5.5);
+            float mag = clamp(1.0 / max(invDet, 0.04), 1.0, 3.0);
             lensed.rgb *= mag;
 
             gl_FragColor = mix(original, lensed, uStrength);
@@ -9945,6 +9955,40 @@
       });
       lensPass.enabled = false;
       composer.addPass(lensPass);
+
+      // Bloom sees a bounded frame. Additive sprites stack without limit:
+      // an accretion disc or a merger core reaches HDR values in the
+      // hundreds, and the bloom's mip chain then saturates its whole
+      // kernel footprint — a hard-edged rectangle of white around the
+      // source (token gate #40, every Event Horizon token; the square
+      // "cores" in #31). Anything above uCap is already white after tone
+      // mapping, so clamping here changes nothing but the box (compared at
+      // 6 / 2 / 1.2 on tokens 40, 13, 31: 6 still boxed, 2 is the balance).
+      const preBloomClampPass = new ShaderPass({
+        uniforms: { tDiffuse: { value: null }, uCap: { value: 2.0 } },
+        vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+        fragmentShader: `
+          uniform sampler2D tDiffuse;
+          uniform float uCap;
+          varying vec2 vUv;
+          void main() {
+            vec4 c = texture2D(tDiffuse, vUv);
+            gl_FragColor = vec4(min(c.rgb, vec3(uCap)), c.a);
+          }
+        `,
+      });
+      composer.addPass(preBloomClampPass);
+      try {
+        // Harness hook: ?bloomcap=N to compare caps on the same still.
+        const bc = parseFloat(new URL(location.href).searchParams.get("bloomcap"));
+        if (isFinite(bc) && bc > 0) preBloomClampPass.uniforms.uCap.value = bc;
+      } catch (_) {}
+      if (typeof window !== "undefined") {
+        window.__setBloomCap = (v) => {
+          preBloomClampPass.uniforms.uCap.value = Math.max(0.5, +v || 2);
+          return preBloomClampPass.uniforms.uCap.value;
+        };
+      }
 
       const bloom = new UnrealBloomPass(
         new THREE.Vector2(innerWidth, innerHeight),
@@ -12456,28 +12500,44 @@
 
       function sceneLattice() {
         zero();
-        // 3D grid of bodies with tiny random perturbations
-        const side = 14; // 14^3 = 2744
-        const spacing = 40;
+        // 3D grid of bodies with tiny random perturbations. The crystal
+        // scales with the tier (14³ = 2744 at lite, ~38³ at lush) but keeps
+        // its extent (520 units) and its total mass, so the collapse plays
+        // the same and the lattice reads on screen: at 2744 bodies the
+        // family was a near-black frame in the 100-token gate (#88).
+        const side = Math.max(
+          14,
+          Math.min(40, Math.round(Math.cbrt(MAX_BODIES * 0.85))),
+        );
+        const spacing = 520 / (side - 1);
         const total = side * side * side;
+        const massScale = 2744 / total;
         const origin = -(side - 1) * spacing * 0.5;
         let i = 0;
         for (let ix = 0; ix < side; ix++) {
           for (let iy = 0; iy < side; iy++) {
             for (let iz = 0; iz < side; iz++) {
               if (i >= MAX_BODIES) break;
-              const x = origin + ix * spacing + randn() * 1.5;
-              const y = origin + iy * spacing + randn() * 1.5;
-              const z = origin + iz * spacing + randn() * 1.5;
+              // Enough disorder to start the collapse on its own: a perfect
+              // cube is force-balanced and sat still for the whole pre-roll
+              // on every token whose spin trait was "none" (#30 #52 #78 #88).
+              const jit = spacing * 0.08;
+              const x = origin + ix * spacing + randn() * jit;
+              const y = origin + iy * spacing + randn() * jit;
+              const z = origin + iz * spacing + randn() * jit;
+              // A gentle infall (v = -k r) so the collapse is under way
+              // from the first frame for every seed; the vorticity term
+              // used to be the only thing that started it.
+              const kIn = 0.02;
               setBody(
                 i++,
                 x,
                 y,
                 z,
-                1.5 + rng() * 0.8,
-                randn() * 0.2,
-                randn() * 0.2,
-                randn() * 0.2,
+                (1.5 + rng() * 0.8) * massScale,
+                randn() * 0.5 - x * kIn,
+                randn() * 0.5 - y * kIn,
+                randn() * 0.5 - z * kIn,
                 0.0,
               );
             }
@@ -14038,7 +14098,7 @@
       // authored pose is far out (a lone dot at preview size) — move in;
       // Lattice and Coma read dim at the token's first moments — lift
       // exposure, and give Lattice time to start collapsing.
-      const TOKEN_CAM_DIST = { orrery: 0.5 };
+      const TOKEN_CAM_DIST = { orrery: 0.5, lattice: 1.25 };
       const TOKEN_EXPOSURE_MUL = { lattice: 1.35, coma: 1.2, orrery: 1.2 };
       const TOKEN_PREROLL = {
         default: 400,
@@ -14249,11 +14309,17 @@
         window.__tokenRecipe = () => tokenRecipe;
         window.__tokenFeatures = () => traits;
         if (TOKEN.preview) tokenPreparePreview();
+        // One line the harness parses (tools/build-metadata.py): traits,
+        // then the 32-bit seed and the hash the recipe was derived from.
         console.info(
           "[token]",
           TOKEN.platform,
           tokenRecipe.scene,
           JSON.stringify(traits),
+          "seed",
+          (tokenRecipe.seed >>> 0).toString(16).padStart(8, "0"),
+          "hash",
+          tokenRecipe.hash,
         );
         return true;
       }

@@ -15,6 +15,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import crypto from "node:crypto";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -97,6 +99,36 @@ const entries = [];
 walk(OUT_DIR, OUT_DIR, entries);
 fs.writeFileSync(ZIP, makeZip(entries));
 
+// 7. content hashes (launch board: "record the bundle content hash in the
+// repo"). dist/token.manifest.json lists every file's SHA-256 and one
+// bundle hash over the sorted "name  sha256" lines, so a rebuild can be
+// checked against what was minted. The manifest sits beside the bundle,
+// not inside it (it would change the hash it records).
+const sha = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
+const fileHashes = entries.map((e) => ({
+  name: e.name,
+  bytes: e.data.length,
+  sha256: sha(e.data),
+}));
+const bundleSha256 = sha(
+  fileHashes.map((f) => `${f.name}  ${f.sha256}\n`).join(""),
+);
+let git = null;
+try {
+  git = execSync("git rev-parse HEAD", { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] })
+    .toString()
+    .trim();
+} catch (_) {}
+const manifest = {
+  bundle: "giverny-phos token build",
+  builtAt: new Date().toISOString(),
+  git,
+  bundleSha256,
+  files: fileHashes,
+};
+const MANIFEST = path.join(ROOT, "dist", "token.manifest.json");
+fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
+
 const total = entries.reduce((s, e) => s + e.data.length, 0);
 console.log(
   `built ${path.relative(ROOT, OUT_DIR)}/ (${entries.length} files, ${mb(total)} MB unpacked; html ${mb(before)} → ${mb(html.length)} MB)`,
@@ -104,6 +136,7 @@ console.log(
 console.log(
   `zip   ${path.relative(ROOT, ZIP)} (${mb(fs.statSync(ZIP).size)} MB)`,
 );
+console.log(`hash  ${bundleSha256}  (${path.relative(ROOT, MANIFEST)}, git ${git ? git.slice(0, 10) : "?"})`);
 
 // ---------------------------------------------------------------- helpers
 function mb(n) {

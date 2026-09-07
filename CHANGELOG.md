@@ -10,6 +10,55 @@ that bit us once and shouldn't bite us again.
 Each entry: the bug, the failure mode, the fix, and the rule. Read
 this before touching the relevant area.
 
+### Bloom turns an unbounded HDR source into a hard-edged box
+
+**Bug:** Every strong-source scene (Event Horizon, dense merger cores)
+rendered a bright rectangle around the source — visible in the token
+gate sheet as a box around token #40 and square "cores" in #31, and
+accepted there because nothing measured it.
+
+**Failure mode:** Additive point sprites stack without limit, so a
+disc of thousands of overlapping bodies reaches HDR values in the
+hundreds. `UnrealBloomPass` blurs with separable, finite kernels over
+five mips; a source that bright saturates the kernel's whole footprint
+at every mip, and the sum comes out of tone mapping as a plateau with
+straight, slightly rounded edges. Disabling bloom removed it; the lens
+pass, the ring quad, the starfield and the CA fallback were all
+suspected first and are innocent.
+
+**Fix:** `preBloomClampPass` (`min(rgb, uCap)`, cap 2.0) between the
+lens pass and the bloom. Anything above the cap is already white after
+tone mapping, so nothing but the box changes. Compared at 6 / 2 / 1.2.
+
+**Rule:** Bloom input must be bounded. If a new pass or a new sprite
+path feeds the composer before the bloom, keep it behind the clamp —
+and when a still shows a rectangle, check the bloom before the shaders.
+
+### A perfect lattice is force-balanced and never collapses
+
+**Bug:** Four of the eight Lattice tokens (#30 #52 #78 #88) were
+near-black frames; the 960×600 gate passed them because their mean
+luminance (0.034) sat above the black threshold (0.03) on film grain.
+
+**Failure mode:** `sceneLattice` built a fixed 14³ cube at every tier
+(2744 bodies at lush — a few dim points 750 units away). Worse, a cube
+of equal masses on a regular grid has zero net force on every body:
+the only thing that ever started the "Order collapsing" show was the
+recipe's vorticity term, so tokens whose spin trait rolled "none" sat
+motionless through the whole pre-roll while the speed channel painted
+them black. Raising the jitter alone (3.75 % → 8 %) did not start it
+within 900 steps.
+
+**Fix:** The crystal scales with the tier (side = cbrt(0.85 N), same
+520-unit extent, same total mass), gets 8 % jitter, a thermal kick of
+0.5 and a radial infall v = −0.02 r; token camera at 1.25×.
+
+**Rule:** A family's opening must not depend on a rolled trait. When a
+scene's motion comes from a symmetry break, put the break in the
+generator. And gate stills against a threshold above the grain floor
+(0.02 at 1600×900): the metadata tool flags below 0.015 and prints
+per-id luminance so a dark family stands out by number.
+
 ### Audio `abort` event listeners cascade
 
 **Bug:** A music-playlist "loop guarantee" added a listener for the
@@ -216,6 +265,55 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   profile boots at the stored verdict, and one step followed by 50 s of
   the director frames the token normally. `tools/film-strip.mjs --hold`
   keeps a run alive after the film ends and writes an end frame.
+- **Look fixes from the 1600×900 preview pass** (the 100 previews at
+  full size showed what the 960×600 gate sheet hid):
+  - _Bloom box._ Every strong-source scene (Event Horizon tokens, the
+    cores in Collision · Polar) carried a hard-edged bright rectangle:
+    additive sprites stack to HDR values in the hundreds and the bloom's
+    mip chain then saturates its whole kernel footprint. New
+    `preBloomClampPass` (`min(rgb, uCap)`, cap 2.0, `__setBloomCap`,
+    `?bloomcap=` for the harness) sits between the lens and the bloom.
+    Compared at 6 / 2 / 1.2 on tokens 40, 13, 31: 6 still boxed, 2 keeps
+    the clusters intact and removes the box.
+  - _Lens interior._ Inside the Einstein radius the lens equation maps
+    the source off the frame; the clamped edge texels used to smear
+    into the ring's interior. Off-frame samples now fade to black, and
+    the magnification cap drops 5.5 → 3 (a dense disc white-outs at 5.5).
+  - _Lattice family._ Half of the eight lattice tokens (#30 #52 #78 #88,
+    the ones whose spin trait is "none") were near-black frames: the
+    crystal was a fixed 14³ = 2744 bodies at every tier, and a perfect
+    cube is force-balanced, so without the vorticity term it sat still
+    through the whole pre-roll with the speed channel painting it black.
+    `sceneLattice` now scales with the tier (~38³ at lush; same extent,
+    same total mass), has 8 % jitter and a gentle radial infall
+    (v = −0.02 r) so the collapse is under way from the first frame for
+    every seed; the token camera sits at 1.25× (`TOKEN_CAM_DIST`) so no
+    seed's pose lands inside the cloud. All eight verified at 1600×900.
+  - The official previews render at `lush` (`--tier lush`): the tier a
+    desktop viewer sees and the tier the gate ran at; standard vs lush
+    differ only in field density thanks to the tier gain.
+- **Metadata generator + bundle manifest** (launch board p6-meta,
+  p5-hash). `tools/build-metadata.py` renders every id's preview from
+  the built bundle (`dist/token/index.html?id=N&preview=1`, the same
+  deterministic still the 100-token gate measured, 1600×900), reads
+  the traits / seed / hash from the page's `[token]` console line (now
+  logged with `seed <hex8> hash <hash>`), and writes one ERC-721 JSON
+  per token (name `Giverny Phos #N — Family`, the TOKEN_COPY.md
+  description with the family sentence, temperament, signature and
+  seed; `image`, `animation_url`, attributes Family / Temperament /
+  Signature / Variant / Palette / Channel / Exposure / Spin / Doppler
+  plus a Number display trait), the previews, a summary CSV with the
+  gate's black/blown flags, and — with `--archive` — the identity table
+  `docs/active/token-metadata-v1.json`. `--base` / `--images` re-write
+  the URLs after pinning without re-rendering (`--no-render`).
+  `tools/build-token.mjs` now writes `dist/token.manifest.json` (SHA-256
+  per file, one bundle hash over the sorted list, git commit, build
+  time) and prints the bundle hash — the record to keep beside whatever
+  gets minted. Note for the bundle: Chrome blocks ES-module imports
+  from `file://`, so the folder build opens locally only with
+  `--allow-file-access-from-files` (the generator passes it); a gateway
+  serves it fine. A single-file build that inlines three.js would
+  remove the caveat (board p5-local).
 - **Determinism audit** (INTERACTIVE_NFT.md §5.6): two renders of the
   same token preview are bit-identical; no unseeded random draws on
   the scene-build path in token mode. `vendor/three/LICENSE` added.

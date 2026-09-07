@@ -23,6 +23,7 @@ Plans and audits for things being built or considered next.
 - [INTERACTIVE_NFT.md](active/INTERACTIVE_NFT.md) — exploration: one living scene per token (hash → recipe, token build, previews, holder interaction, platform fit)
 - [OPTIMIZATION_PLAN.md](active/OPTIMIZATION_PLAN.md) — 2026-09 full-path audit (sync stalls, fill rate, kernel, BH close-out, integrator) + phased plan; Petrova v2 scope
 - [PERFORMANCE_NEXT.md](active/PERFORMANCE_NEXT.md) — 2026-09-06: the tricks not yet tried for 262k–1M bodies (group traversal with subgroups, quadrupoles, block time-steps, TreePM, splat rendering, a fidelity governor), ranked by expected gain
+- [RECOVERY_PLAN.md](active/RECOVERY_PLAN.md) — what is immutable after the mint (recipe v1, salt, plan, bundle hash) versus what may still be fixed and re-pinned; the weekly health check
 - [SHOW_DARK_MATTER_AUDIT.md](active/SHOW_DARK_MATTER_AUDIT.md) — diagnostic on the halo toggle
 
 Build artefacts: `tools/build-token.mjs` produces the network-free token

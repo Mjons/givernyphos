@@ -1,0 +1,1907 @@
+{
+ "edition": 100,
+ "generated": "2026-09-06",
+ "copy": "docs/active/TOKEN_COPY.md",
+ "tokens": [
+  {
+   "id": 1,
+   "name": "Giverny Phos #1 — Lattice",
+   "scene": "lattice",
+   "seed": "3470ab13",
+   "hash": "giverny-phos/2026:1",
+   "traits": {
+    "Token": "#1 of 100",
+    "Family": "Lattice",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 2,
+   "name": "Giverny Phos #2 — Lattice",
+   "scene": "lattice",
+   "seed": "10c3f547",
+   "hash": "giverny-phos/2026:2",
+   "traits": {
+    "Token": "#2 of 100",
+    "Family": "Lattice",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "prograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 3,
+   "name": "Giverny Phos #3 — Horsehead",
+   "scene": "horsehead",
+   "seed": "13d13b77",
+   "hash": "giverny-phos/2026:3",
+   "traits": {
+    "Token": "#3 of 100",
+    "Family": "Horsehead",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 4,
+   "name": "Giverny Phos #4 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "b940514b",
+   "hash": "giverny-phos/2026:4",
+   "traits": {
+    "Token": "#4 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 5,
+   "name": "Giverny Phos #5 — Stephan's Quintet",
+   "scene": "stephans-quintet",
+   "seed": "2cf1f92f",
+   "hash": "giverny-phos/2026:5",
+   "traits": {
+    "Token": "#5 of 100",
+    "Family": "Stephan's Quintet",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "bone",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 6,
+   "name": "Giverny Phos #6 — Horsehead",
+   "scene": "horsehead",
+   "seed": "71af47e6",
+   "hash": "giverny-phos/2026:6",
+   "traits": {
+    "Token": "#6 of 100",
+    "Family": "Horsehead",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 7,
+   "name": "Giverny Phos #7 — Orrery",
+   "scene": "orrery",
+   "seed": "99d8d229",
+   "hash": "giverny-phos/2026:7",
+   "traits": {
+    "Token": "#7 of 100",
+    "Family": "Orrery",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 8,
+   "name": "Giverny Phos #8 — Orrery",
+   "scene": "orrery",
+   "seed": "0dd78afc",
+   "hash": "giverny-phos/2026:8",
+   "traits": {
+    "Token": "#8 of 100",
+    "Family": "Orrery",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "prograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 9,
+   "name": "Giverny Phos #9 — Horsehead",
+   "scene": "horsehead",
+   "seed": "e3ec7aa7",
+   "hash": "giverny-phos/2026:9",
+   "traits": {
+    "Token": "#9 of 100",
+    "Family": "Horsehead",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 10,
+   "name": "Giverny Phos #10 — Antennae",
+   "scene": "antennae",
+   "seed": "ef0e5ac5",
+   "hash": "giverny-phos/2026:10",
+   "traits": {
+    "Token": "#10 of 100",
+    "Family": "Antennae",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 11,
+   "name": "Giverny Phos #11 — Antennae",
+   "scene": "antennae",
+   "seed": "cd716b84",
+   "hash": "giverny-phos/2026:11",
+   "traits": {
+    "Token": "#11 of 100",
+    "Family": "Antennae",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 12,
+   "name": "Giverny Phos #12 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "ece22552",
+   "hash": "giverny-phos/2026:12",
+   "traits": {
+    "Token": "#12 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 13,
+   "name": "Giverny Phos #13 — Cartwheel",
+   "scene": "cartwheel",
+   "seed": "2db877f6",
+   "hash": "giverny-phos/2026:13",
+   "traits": {
+    "Token": "#13 of 100",
+    "Family": "Cartwheel",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 14,
+   "name": "Giverny Phos #14 — Coma Cluster",
+   "scene": "coma",
+   "seed": "66332c5e",
+   "hash": "giverny-phos/2026:14",
+   "traits": {
+    "Token": "#14 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 15,
+   "name": "Giverny Phos #15 — Milky Way",
+   "scene": "milky-way",
+   "seed": "e2c88302",
+   "hash": "giverny-phos/2026:15",
+   "traits": {
+    "Token": "#15 of 100",
+    "Family": "Milky Way",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 16,
+   "name": "Giverny Phos #16 — Lattice",
+   "scene": "lattice",
+   "seed": "1efd812e",
+   "hash": "giverny-phos/2026:16",
+   "traits": {
+    "Token": "#16 of 100",
+    "Family": "Lattice",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 17,
+   "name": "Giverny Phos #17 — Milky Way",
+   "scene": "milky-way",
+   "seed": "2b0faaf4",
+   "hash": "giverny-phos/2026:17",
+   "traits": {
+    "Token": "#17 of 100",
+    "Family": "Milky Way",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 18,
+   "name": "Giverny Phos #18 — Coma Cluster",
+   "scene": "coma",
+   "seed": "f6610e4c",
+   "hash": "giverny-phos/2026:18",
+   "traits": {
+    "Token": "#18 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 19,
+   "name": "Giverny Phos #19 — Horsehead",
+   "scene": "horsehead",
+   "seed": "1047d00c",
+   "hash": "giverny-phos/2026:19",
+   "traits": {
+    "Token": "#19 of 100",
+    "Family": "Horsehead",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 20,
+   "name": "Giverny Phos #20 — Horsehead",
+   "scene": "horsehead",
+   "seed": "d43ff8f2",
+   "hash": "giverny-phos/2026:20",
+   "traits": {
+    "Token": "#20 of 100",
+    "Family": "Horsehead",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 21,
+   "name": "Giverny Phos #21 — Sombrero",
+   "scene": "sombrero",
+   "seed": "1325992b",
+   "hash": "giverny-phos/2026:21",
+   "traits": {
+    "Token": "#21 of 100",
+    "Family": "Sombrero",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 22,
+   "name": "Giverny Phos #22 — Cartwheel",
+   "scene": "cartwheel",
+   "seed": "ae086b1c",
+   "hash": "giverny-phos/2026:22",
+   "traits": {
+    "Token": "#22 of 100",
+    "Family": "Cartwheel",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 23,
+   "name": "Giverny Phos #23 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "bc5a8f25",
+   "hash": "giverny-phos/2026:23",
+   "traits": {
+    "Token": "#23 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 24,
+   "name": "Giverny Phos #24 — Sombrero",
+   "scene": "sombrero",
+   "seed": "5b14f05e",
+   "hash": "giverny-phos/2026:24",
+   "traits": {
+    "Token": "#24 of 100",
+    "Family": "Sombrero",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 25,
+   "name": "Giverny Phos #25 — Virgo · M87",
+   "scene": "virgo-m87",
+   "seed": "d92beaca",
+   "hash": "giverny-phos/2026:25",
+   "traits": {
+    "Token": "#25 of 100",
+    "Family": "Virgo · M87",
+    "Temperament": "contemplative",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 26,
+   "name": "Giverny Phos #26 — Bullet Cluster",
+   "scene": "bullet-cluster",
+   "seed": "6c44e78c",
+   "hash": "giverny-phos/2026:26",
+   "traits": {
+    "Token": "#26 of 100",
+    "Family": "Bullet Cluster",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 27,
+   "name": "Giverny Phos #27 — Orrery",
+   "scene": "orrery",
+   "seed": "1f2c114f",
+   "hash": "giverny-phos/2026:27",
+   "traits": {
+    "Token": "#27 of 100",
+    "Family": "Orrery",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 28,
+   "name": "Giverny Phos #28 — Coma Cluster",
+   "scene": "coma",
+   "seed": "7104849c",
+   "hash": "giverny-phos/2026:28",
+   "traits": {
+    "Token": "#28 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 29,
+   "name": "Giverny Phos #29 — Stephan's Quintet",
+   "scene": "stephans-quintet",
+   "seed": "764e5254",
+   "hash": "giverny-phos/2026:29",
+   "traits": {
+    "Token": "#29 of 100",
+    "Family": "Stephan's Quintet",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "bone",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 30,
+   "name": "Giverny Phos #30 — Lattice",
+   "scene": "lattice",
+   "seed": "16ea63f6",
+   "hash": "giverny-phos/2026:30",
+   "traits": {
+    "Token": "#30 of 100",
+    "Family": "Lattice",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 31,
+   "name": "Giverny Phos #31 — Collision · Polar passage",
+   "scene": "collision",
+   "seed": "1483ff61",
+   "hash": "giverny-phos/2026:31",
+   "traits": {
+    "Token": "#31 of 100",
+    "Family": "Collision",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "Polar passage",
+    "Palette": "nebula",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 32,
+   "name": "Giverny Phos #32 — Milky Way",
+   "scene": "milky-way",
+   "seed": "4cf9b203",
+   "hash": "giverny-phos/2026:32",
+   "traits": {
+    "Token": "#32 of 100",
+    "Family": "Milky Way",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 33,
+   "name": "Giverny Phos #33 — Event Horizon",
+   "scene": "event-horizon",
+   "seed": "dd466c60",
+   "hash": "giverny-phos/2026:33",
+   "traits": {
+    "Token": "#33 of 100",
+    "Family": "Event Horizon",
+    "Temperament": "patient",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 34,
+   "name": "Giverny Phos #34 — Milky Way",
+   "scene": "milky-way",
+   "seed": "da4ce914",
+   "hash": "giverny-phos/2026:34",
+   "traits": {
+    "Token": "#34 of 100",
+    "Family": "Milky Way",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 35,
+   "name": "Giverny Phos #35 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "3e7f50a9",
+   "hash": "giverny-phos/2026:35",
+   "traits": {
+    "Token": "#35 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 36,
+   "name": "Giverny Phos #36 — Collision · Antennae (prograde)",
+   "scene": "collision",
+   "seed": "b6e7b7b1",
+   "hash": "giverny-phos/2026:36",
+   "traits": {
+    "Token": "#36 of 100",
+    "Family": "Collision",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "Antennae (prograde)",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 37,
+   "name": "Giverny Phos #37 — Sombrero",
+   "scene": "sombrero",
+   "seed": "ab7a865b",
+   "hash": "giverny-phos/2026:37",
+   "traits": {
+    "Token": "#37 of 100",
+    "Family": "Sombrero",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 38,
+   "name": "Giverny Phos #38 — Horsehead",
+   "scene": "horsehead",
+   "seed": "3c4d06fe",
+   "hash": "giverny-phos/2026:38",
+   "traits": {
+    "Token": "#38 of 100",
+    "Family": "Horsehead",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 39,
+   "name": "Giverny Phos #39 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "3dcc5174",
+   "hash": "giverny-phos/2026:39",
+   "traits": {
+    "Token": "#39 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 40,
+   "name": "Giverny Phos #40 — Event Horizon",
+   "scene": "event-horizon",
+   "seed": "672ba1da",
+   "hash": "giverny-phos/2026:40",
+   "traits": {
+    "Token": "#40 of 100",
+    "Family": "Event Horizon",
+    "Temperament": "patient",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "bone",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 41,
+   "name": "Giverny Phos #41 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "907fe707",
+   "hash": "giverny-phos/2026:41",
+   "traits": {
+    "Token": "#41 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 42,
+   "name": "Giverny Phos #42 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "ed44949c",
+   "hash": "giverny-phos/2026:42",
+   "traits": {
+    "Token": "#42 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 43,
+   "name": "Giverny Phos #43 — Orrery",
+   "scene": "orrery",
+   "seed": "30554433",
+   "hash": "giverny-phos/2026:43",
+   "traits": {
+    "Token": "#43 of 100",
+    "Family": "Orrery",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 44,
+   "name": "Giverny Phos #44 — Orrery",
+   "scene": "orrery",
+   "seed": "5b786476",
+   "hash": "giverny-phos/2026:44",
+   "traits": {
+    "Token": "#44 of 100",
+    "Family": "Orrery",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 45,
+   "name": "Giverny Phos #45 — Horsehead",
+   "scene": "horsehead",
+   "seed": "02fb1ee1",
+   "hash": "giverny-phos/2026:45",
+   "traits": {
+    "Token": "#45 of 100",
+    "Family": "Horsehead",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "mass",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 46,
+   "name": "Giverny Phos #46 — Bullet Cluster",
+   "scene": "bullet-cluster",
+   "seed": "7b022e1a",
+   "hash": "giverny-phos/2026:46",
+   "traits": {
+    "Token": "#46 of 100",
+    "Family": "Bullet Cluster",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 47,
+   "name": "Giverny Phos #47 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "c4c1138a",
+   "hash": "giverny-phos/2026:47",
+   "traits": {
+    "Token": "#47 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 48,
+   "name": "Giverny Phos #48 — Stephan's Quintet",
+   "scene": "stephans-quintet",
+   "seed": "ae0a24cf",
+   "hash": "giverny-phos/2026:48",
+   "traits": {
+    "Token": "#48 of 100",
+    "Family": "Stephan's Quintet",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "bone",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 49,
+   "name": "Giverny Phos #49 — Orrery",
+   "scene": "orrery",
+   "seed": "4e17b0a0",
+   "hash": "giverny-phos/2026:49",
+   "traits": {
+    "Token": "#49 of 100",
+    "Family": "Orrery",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 50,
+   "name": "Giverny Phos #50 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "0a86a7e5",
+   "hash": "giverny-phos/2026:50",
+   "traits": {
+    "Token": "#50 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 51,
+   "name": "Giverny Phos #51 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "7291d1c7",
+   "hash": "giverny-phos/2026:51",
+   "traits": {
+    "Token": "#51 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 52,
+   "name": "Giverny Phos #52 — Lattice",
+   "scene": "lattice",
+   "seed": "7c6d0a85",
+   "hash": "giverny-phos/2026:52",
+   "traits": {
+    "Token": "#52 of 100",
+    "Family": "Lattice",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 53,
+   "name": "Giverny Phos #53 — Virgo · M87",
+   "scene": "virgo-m87",
+   "seed": "f26c3089",
+   "hash": "giverny-phos/2026:53",
+   "traits": {
+    "Token": "#53 of 100",
+    "Family": "Virgo · M87",
+    "Temperament": "contemplative",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 54,
+   "name": "Giverny Phos #54 — Cartwheel",
+   "scene": "cartwheel",
+   "seed": "f7ef884b",
+   "hash": "giverny-phos/2026:54",
+   "traits": {
+    "Token": "#54 of 100",
+    "Family": "Cartwheel",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 55,
+   "name": "Giverny Phos #55 — Lattice",
+   "scene": "lattice",
+   "seed": "11583fab",
+   "hash": "giverny-phos/2026:55",
+   "traits": {
+    "Token": "#55 of 100",
+    "Family": "Lattice",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "prograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 56,
+   "name": "Giverny Phos #56 — Antennae",
+   "scene": "antennae",
+   "seed": "5371582a",
+   "hash": "giverny-phos/2026:56",
+   "traits": {
+    "Token": "#56 of 100",
+    "Family": "Antennae",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 57,
+   "name": "Giverny Phos #57 — Bullet Cluster",
+   "scene": "bullet-cluster",
+   "seed": "9aa37559",
+   "hash": "giverny-phos/2026:57",
+   "traits": {
+    "Token": "#57 of 100",
+    "Family": "Bullet Cluster",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 58,
+   "name": "Giverny Phos #58 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "8d468ddc",
+   "hash": "giverny-phos/2026:58",
+   "traits": {
+    "Token": "#58 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 59,
+   "name": "Giverny Phos #59 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "8c7333fc",
+   "hash": "giverny-phos/2026:59",
+   "traits": {
+    "Token": "#59 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 60,
+   "name": "Giverny Phos #60 — Collision · Grazing flyby (fast)",
+   "scene": "collision",
+   "seed": "c386fb5a",
+   "hash": "giverny-phos/2026:60",
+   "traits": {
+    "Token": "#60 of 100",
+    "Family": "Collision",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "Grazing flyby (fast)",
+    "Palette": "ember",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 61,
+   "name": "Giverny Phos #61 — Sagittarius",
+   "scene": "sagittarius",
+   "seed": "7fee651e",
+   "hash": "giverny-phos/2026:61",
+   "traits": {
+    "Token": "#61 of 100",
+    "Family": "Sagittarius",
+    "Temperament": "patient",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 62,
+   "name": "Giverny Phos #62 — Sombrero",
+   "scene": "sombrero",
+   "seed": "31df48c6",
+   "hash": "giverny-phos/2026:62",
+   "traits": {
+    "Token": "#62 of 100",
+    "Family": "Sombrero",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "density",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 63,
+   "name": "Giverny Phos #63 — Whirlpool",
+   "scene": "whirlpool",
+   "seed": "ceb14ee3",
+   "hash": "giverny-phos/2026:63",
+   "traits": {
+    "Token": "#63 of 100",
+    "Family": "Whirlpool",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 64,
+   "name": "Giverny Phos #64 — Coma Cluster",
+   "scene": "coma",
+   "seed": "534159a7",
+   "hash": "giverny-phos/2026:64",
+   "traits": {
+    "Token": "#64 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 65,
+   "name": "Giverny Phos #65 — Collision · Milky Way × Andromeda",
+   "scene": "collision",
+   "seed": "669fae13",
+   "hash": "giverny-phos/2026:65",
+   "traits": {
+    "Token": "#65 of 100",
+    "Family": "Collision",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "Milky Way × Andromeda",
+    "Palette": "nebula",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "prograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 66,
+   "name": "Giverny Phos #66 — Sombrero",
+   "scene": "sombrero",
+   "seed": "1084a741",
+   "hash": "giverny-phos/2026:66",
+   "traits": {
+    "Token": "#66 of 100",
+    "Family": "Sombrero",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 67,
+   "name": "Giverny Phos #67 — Horsehead",
+   "scene": "horsehead",
+   "seed": "78522175",
+   "hash": "giverny-phos/2026:67",
+   "traits": {
+    "Token": "#67 of 100",
+    "Family": "Horsehead",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 68,
+   "name": "Giverny Phos #68 — Coma Cluster",
+   "scene": "coma",
+   "seed": "9fb15117",
+   "hash": "giverny-phos/2026:68",
+   "traits": {
+    "Token": "#68 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 69,
+   "name": "Giverny Phos #69 — Sagittarius",
+   "scene": "sagittarius",
+   "seed": "b24988bf",
+   "hash": "giverny-phos/2026:69",
+   "traits": {
+    "Token": "#69 of 100",
+    "Family": "Sagittarius",
+    "Temperament": "contemplative",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 70,
+   "name": "Giverny Phos #70 — Whirlpool",
+   "scene": "whirlpool",
+   "seed": "7c44c5c0",
+   "hash": "giverny-phos/2026:70",
+   "traits": {
+    "Token": "#70 of 100",
+    "Family": "Whirlpool",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 71,
+   "name": "Giverny Phos #71 — Orrery",
+   "scene": "orrery",
+   "seed": "44064813",
+   "hash": "giverny-phos/2026:71",
+   "traits": {
+    "Token": "#71 of 100",
+    "Family": "Orrery",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 72,
+   "name": "Giverny Phos #72 — Stephan's Quintet",
+   "scene": "stephans-quintet",
+   "seed": "af267d33",
+   "hash": "giverny-phos/2026:72",
+   "traits": {
+    "Token": "#72 of 100",
+    "Family": "Stephan's Quintet",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 73,
+   "name": "Giverny Phos #73 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "00ba2318",
+   "hash": "giverny-phos/2026:73",
+   "traits": {
+    "Token": "#73 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 74,
+   "name": "Giverny Phos #74 — Sombrero",
+   "scene": "sombrero",
+   "seed": "97a7bac4",
+   "hash": "giverny-phos/2026:74",
+   "traits": {
+    "Token": "#74 of 100",
+    "Family": "Sombrero",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 75,
+   "name": "Giverny Phos #75 — Whirlpool",
+   "scene": "whirlpool",
+   "seed": "96045d18",
+   "hash": "giverny-phos/2026:75",
+   "traits": {
+    "Token": "#75 of 100",
+    "Family": "Whirlpool",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 76,
+   "name": "Giverny Phos #76 — Virgo · M87",
+   "scene": "virgo-m87",
+   "seed": "2c3dfa62",
+   "hash": "giverny-phos/2026:76",
+   "traits": {
+    "Token": "#76 of 100",
+    "Family": "Virgo · M87",
+    "Temperament": "restless",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 77,
+   "name": "Giverny Phos #77 — Coma Cluster",
+   "scene": "coma",
+   "seed": "9476c768",
+   "hash": "giverny-phos/2026:77",
+   "traits": {
+    "Token": "#77 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 78,
+   "name": "Giverny Phos #78 — Lattice",
+   "scene": "lattice",
+   "seed": "893272fb",
+   "hash": "giverny-phos/2026:78",
+   "traits": {
+    "Token": "#78 of 100",
+    "Family": "Lattice",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 79,
+   "name": "Giverny Phos #79 — Sombrero",
+   "scene": "sombrero",
+   "seed": "20c45b0c",
+   "hash": "giverny-phos/2026:79",
+   "traits": {
+    "Token": "#79 of 100",
+    "Family": "Sombrero",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 80,
+   "name": "Giverny Phos #80 — Whirlpool",
+   "scene": "whirlpool",
+   "seed": "c2eefde0",
+   "hash": "giverny-phos/2026:80",
+   "traits": {
+    "Token": "#80 of 100",
+    "Family": "Whirlpool",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "on"
+   }
+  },
+  {
+   "id": 81,
+   "name": "Giverny Phos #81 — Bullet Cluster",
+   "scene": "bullet-cluster",
+   "seed": "3da1e4ae",
+   "hash": "giverny-phos/2026:81",
+   "traits": {
+    "Token": "#81 of 100",
+    "Family": "Bullet Cluster",
+    "Temperament": "restless",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "prograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 82,
+   "name": "Giverny Phos #82 — Milky Way",
+   "scene": "milky-way",
+   "seed": "f5d5a72e",
+   "hash": "giverny-phos/2026:82",
+   "traits": {
+    "Token": "#82 of 100",
+    "Family": "Milky Way",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 83,
+   "name": "Giverny Phos #83 — Cartwheel",
+   "scene": "cartwheel",
+   "seed": "56803adc",
+   "hash": "giverny-phos/2026:83",
+   "traits": {
+    "Token": "#83 of 100",
+    "Family": "Cartwheel",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "nebula",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 84,
+   "name": "Giverny Phos #84 — Milky Way",
+   "scene": "milky-way",
+   "seed": "325d231f",
+   "hash": "giverny-phos/2026:84",
+   "traits": {
+    "Token": "#84 of 100",
+    "Family": "Milky Way",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 85,
+   "name": "Giverny Phos #85 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "9e501b9e",
+   "hash": "giverny-phos/2026:85",
+   "traits": {
+    "Token": "#85 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 86,
+   "name": "Giverny Phos #86 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "1846c10c",
+   "hash": "giverny-phos/2026:86",
+   "traits": {
+    "Token": "#86 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ice",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 87,
+   "name": "Giverny Phos #87 — Milky Way",
+   "scene": "milky-way",
+   "seed": "4f94b100",
+   "hash": "giverny-phos/2026:87",
+   "traits": {
+    "Token": "#87 of 100",
+    "Family": "Milky Way",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "prograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 88,
+   "name": "Giverny Phos #88 — Lattice",
+   "scene": "lattice",
+   "seed": "d8add08d",
+   "hash": "giverny-phos/2026:88",
+   "traits": {
+    "Token": "#88 of 100",
+    "Family": "Lattice",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "vaporwv",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 89,
+   "name": "Giverny Phos #89 — Collision · Grazing flyby (fast)",
+   "scene": "collision",
+   "seed": "9f0255d8",
+   "hash": "giverny-phos/2026:89",
+   "traits": {
+    "Token": "#89 of 100",
+    "Family": "Collision",
+    "Temperament": "contemplative",
+    "Signature": "chase",
+    "Variant": "Grazing flyby (fast)",
+    "Palette": "nebula",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 90,
+   "name": "Giverny Phos #90 — Milky Way",
+   "scene": "milky-way",
+   "seed": "cc08be77",
+   "hash": "giverny-phos/2026:90",
+   "traits": {
+    "Token": "#90 of 100",
+    "Family": "Milky Way",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 91,
+   "name": "Giverny Phos #91 — Coma Cluster",
+   "scene": "coma",
+   "seed": "cd0fd7bd",
+   "hash": "giverny-phos/2026:91",
+   "traits": {
+    "Token": "#91 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "ember",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 92,
+   "name": "Giverny Phos #92 — Orrery",
+   "scene": "orrery",
+   "seed": "8ae9baf1",
+   "hash": "giverny-phos/2026:92",
+   "traits": {
+    "Token": "#92 of 100",
+    "Family": "Orrery",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "mono",
+    "Channel": "kind",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 93,
+   "name": "Giverny Phos #93 — Sombrero",
+   "scene": "sombrero",
+   "seed": "90568277",
+   "hash": "giverny-phos/2026:93",
+   "traits": {
+    "Token": "#93 of 100",
+    "Family": "Sombrero",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 94,
+   "name": "Giverny Phos #94 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "3b4ee1e4",
+   "hash": "giverny-phos/2026:94",
+   "traits": {
+    "Token": "#94 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 95,
+   "name": "Giverny Phos #95 — Dust Storm",
+   "scene": "dust-storm",
+   "seed": "37ec1e78",
+   "hash": "giverny-phos/2026:95",
+   "traits": {
+    "Token": "#95 of 100",
+    "Family": "Dust Storm",
+    "Temperament": "restless",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "density",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 96,
+   "name": "Giverny Phos #96 — Collision · Head-on (slow merger)",
+   "scene": "collision",
+   "seed": "256c4db2",
+   "hash": "giverny-phos/2026:96",
+   "traits": {
+    "Token": "#96 of 100",
+    "Family": "Collision",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "Head-on (slow merger)",
+    "Palette": "sunset",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 97,
+   "name": "Giverny Phos #97 — Quiet Drift",
+   "scene": "quiet-drift",
+   "seed": "6e2a76ca",
+   "hash": "giverny-phos/2026:97",
+   "traits": {
+    "Token": "#97 of 100",
+    "Family": "Quiet Drift",
+    "Temperament": "contemplative",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 98,
+   "name": "Giverny Phos #98 — Antennae",
+   "scene": "antennae",
+   "seed": "5029d6c1",
+   "hash": "giverny-phos/2026:98",
+   "traits": {
+    "Token": "#98 of 100",
+    "Family": "Antennae",
+    "Temperament": "patient",
+    "Signature": "chase",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "speed",
+    "Exposure": "short",
+    "Spin": "retrograde",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 99,
+   "name": "Giverny Phos #99 — Virgo · M87",
+   "scene": "virgo-m87",
+   "seed": "b9790692",
+   "hash": "giverny-phos/2026:99",
+   "traits": {
+    "Token": "#99 of 100",
+    "Family": "Virgo · M87",
+    "Temperament": "restless",
+    "Signature": "vertigo",
+    "Variant": "—",
+    "Palette": "sunset",
+    "Channel": "speed",
+    "Exposure": "long",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  },
+  {
+   "id": 100,
+   "name": "Giverny Phos #100 — Coma Cluster",
+   "scene": "coma",
+   "seed": "1146f07d",
+   "hash": "giverny-phos/2026:100",
+   "traits": {
+    "Token": "#100 of 100",
+    "Family": "Coma Cluster",
+    "Temperament": "patient",
+    "Signature": "drift",
+    "Variant": "—",
+    "Palette": "aurora",
+    "Channel": "mass",
+    "Exposure": "short",
+    "Spin": "none",
+    "Doppler": "off"
+   }
+  }
+ ]
+}
