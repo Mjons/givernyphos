@@ -1,20 +1,18 @@
 {
-  "cleanUrls": true,
-  "redirects": [
+  "routes": [
     {
-      "source": "/:path*",
+      "src": "/(.*)",
       "has": [{ "type": "host", "value": "www.givernyphos.space" }],
-      "destination": "https://givernyphos.space/:path*",
-      "permanent": true
-    }
-  ],
-  "rewrites": [
-    { "source": "/", "destination": "/site/index.html" },
-    { "source": "/site.css", "destination": "/site/site.css" },
-    { "source": "/site.js", "destination": "/site/site.js" },
-    { "source": "/audio.css", "destination": "/site/audio.css" },
-    { "source": "/audio.js", "destination": "/site/audio.js" },
-    { "source": "/content.js", "destination": "/site/content.js" },
-    { "source": "/assets/:path*", "destination": "/site/assets/:path*" }
+      "dest": "https://givernyphos.space/$1",
+      "status": 308
+    },
+    { "src": "^/$", "dest": "/site/index.html" },
+    { "src": "^/site\\.css$", "dest": "/site/site.css" },
+    { "src": "^/site\\.js$", "dest": "/site/site.js" },
+    { "src": "^/audio\\.css$", "dest": "/site/audio.css" },
+    { "src": "^/audio\\.js$", "dest": "/site/audio.js" },
+    { "src": "^/content\\.js$", "dest": "/site/content.js" },
+    { "src": "^/assets/(.*)$", "dest": "/site/assets/$1" },
+    { "handle": "filesystem" }
   ]
 }
