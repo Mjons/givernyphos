@@ -371,10 +371,68 @@ img {
   white-space: nowrap;
 }
 .sky .scroll-zone .zone-hint {
-  right: 18px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 .sky .play-zone .zone-hint {
-  left: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* the next cue — bottom centre, always there once entered */
+.next-cue {
+  position: fixed;
+  left: 50%;
+  bottom: 3.5vh;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 10px 18px;
+  border: 1px solid rgba(230, 234, 245, 0.22);
+  border-radius: 999px;
+  background: rgba(7, 9, 15, 0.55);
+  color: var(--ink);
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 700ms var(--ease),
+    border-color 300ms var(--ease);
+}
+body.entered .next-cue {
+  opacity: 1;
+  pointer-events: auto;
+}
+.next-cue:hover,
+.next-cue:focus-visible {
+  border-color: var(--accent);
+  color: #fff;
+}
+.next-cue .next-chev {
+  display: inline-block;
+  font-size: 13px;
+  animation: cue-bob 2.2s ease-in-out infinite;
+}
+@keyframes cue-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(3px);
+  }
+}
+@media (max-width: 640px) {
+  .next-cue {
+    bottom: 14px;
+    padding: 12px 16px;
+  }
 }
 .sky:hover .zone-hint,
 .sky.show-zones .zone-hint {
@@ -935,6 +993,11 @@ body.idle #rail {
 }
 
 /* ---- motion preferences ---- */
+@media (prefers-reduced-motion: reduce) {
+  .next-cue .next-chev {
+    animation: none;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;

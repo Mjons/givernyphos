@@ -638,9 +638,44 @@
   }
 
   // ---- which chapter owns the viewport ----
+  // A plain "next" cue at the bottom centre: the rail is easy to miss,
+  // this is not. Names the next chapter; on the last one it goes home.
+  var cue = null;
+  function ensureCue() {
+    if (cue) return cue;
+    cue = h("button", { class: "next-cue", type: "button" });
+    cue.appendChild(h("span", { class: "next-label" }));
+    cue.appendChild(h("span", { class: "next-chev", "aria-hidden": "true", text: "↓" }));
+    cue.addEventListener("click", function () {
+      var i = chapters.findIndex(function (c) {
+        return c.key === current;
+      });
+      if (i >= chapters.length - 1) goTo(chapters[0]);
+      else step(1);
+    });
+    body.appendChild(cue);
+    return cue;
+  }
+  function updateCue(c) {
+    var el = ensureCue();
+    var i = chapters.indexOf(c);
+    var next = chapters[i + 1];
+    var label = el.querySelector(".next-label");
+    var chev = el.querySelector(".next-chev");
+    if (next) {
+      label.textContent = "Next · " + (next.title || next.key);
+      chev.textContent = "↓";
+      el.setAttribute("aria-label", "Next: " + (next.title || next.key));
+    } else {
+      label.textContent = "Back to the top";
+      chev.textContent = "↑";
+      el.setAttribute("aria-label", "Back to the top");
+    }
+  }
   function setCurrent(c) {
     current = c.key;
     body.setAttribute("data-chapter", c.key);
+    updateCue(c);
     Object.keys(railButtons).forEach(function (k) {
       var on = k === c.key;
       railButtons[k].classList.toggle("current", on);

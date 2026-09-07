@@ -312,6 +312,13 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   lean levers still apply. Verified headless: 65k → 33k → 65k in under
   five seconds, no errors. The site's two live frames now run at 33k
   (`objects=dense`), the homepage default.
+- **Site: a "Next" cue.** The chapter rail on the right is easy to
+  miss, so a pill sits at the bottom centre once you have entered —
+  "Next · Not a rendering" with a bobbing chevron — naming the chapter
+  that follows and scrolling to it; on the last chapter it reads "Back
+  to the top". The hero's split-zone labels moved to the quarter points
+  to keep the centre clear. Verified: visible after Enter, one click
+  advances the current chapter, no errors.
 - **Site: scroll above the fold.** The live frame swallowed every wheel
   event over the hero, so the page could not be scrolled from the top.
   The sky is now split: the left half belongs to the page (wheel and
