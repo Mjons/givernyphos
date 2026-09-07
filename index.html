@@ -1271,6 +1271,20 @@
         margin-top: 10px;
         font-weight: 400;
       }
+      /* Lower-third variant: a chapter card that sits under the action */
+      #film-title.lower {
+        top: auto;
+        bottom: 14vh;
+        left: 8vw;
+        transform: none;
+        text-align: left;
+        font-size: 22px;
+        letter-spacing: 0.4em;
+      }
+      #film-title.lower .sub {
+        font-size: 9px;
+        margin-top: 6px;
+      }
 
       /* Film list in movie panel */
       .film-item {
@@ -5974,6 +5988,7 @@
         if (TOKEN.active) return false;
         try {
           const url = new URL(location.href);
+          if (url.searchParams.has("film")) return false;
           const p = url.searchParams.get("intro");
           if (p === "0") return false;
           if (p === "1") return true;
@@ -10738,7 +10753,7 @@
       // tens of seconds at colossal. Runs on whichever backend is live;
       // the WebGPU buffers used to miss the pre-roll entirely because the
       // burst only ever ran on the WebGL GPGPU textures.
-      const kickstart = { remaining: 0, dt: 0.015 };
+      const kickstart = { remaining: 0, dt: 0.015, boost: 0 };
       function kickstartSim(frames = 300, dt = 0.015) {
         // Scale the pre-roll down at heavy tiers: 320 substeps at 262k+
         // is a fixed ~30 s of GPU time however it is spread.
@@ -10754,7 +10769,10 @@
       function kickstartTick() {
         if (kickstart.remaining <= 0) return;
         if (rebuildingPipeline) return;
-        const n = Math.min(kickstart.remaining, kickstartPerFrame());
+        const n = Math.min(
+          kickstart.remaining,
+          Math.max(kickstartPerFrame(), kickstart.boost || 0),
+        );
         const pu = posVar.material.uniforms;
         const vu = velVar.material.uniforms;
         const prevDt = pu.uDt.value;
@@ -10776,7 +10794,10 @@
         kickstart.remaining -= n;
         // The afterimage buffer ghosts every fast-forward frame into a
         // dotted trail; start the real-time run clean.
-        if (kickstart.remaining <= 0) clearTrails();
+        if (kickstart.remaining <= 0) {
+          clearTrails();
+          kickstart.boost = 0;
+        }
       }
 
       // ===============================================================
@@ -14671,7 +14692,12 @@
           s.className = "sep";
           bar.appendChild(s);
         };
-        mk("Tour", "Replay this token's opening film", () => tokenStartTour(), "tour");
+        mk(
+          "Tour",
+          "Replay this token's opening film",
+          () => tokenStartTour(),
+          "tour",
+        );
         mk(
           "Cinematic",
           "Let the director drive the camera (C)",
@@ -18355,8 +18381,11 @@
         const kind = Math.floor((followCam._vbuf[3] || 0) + 0.001);
         generateSolarSystem(pick.bodyIndex, kind);
         reflectHudFollow();
-        showToast("Following", "#" + pick.bodyIndex);
-        sfx.play("lock");
+        // A film's follow shot is silent: no toast, no lock chime.
+        if (!movie.active) {
+          showToast("Following", "#" + pick.bodyIndex);
+          sfx.play("lock");
+        }
       }
 
       function followCamRelease(reason) {
@@ -18373,7 +18402,7 @@
         // Fade out the procedural solar system.
         dissolveSolarSystem();
         reflectHudFollow();
-        if (reason) showToast("Released", reason);
+        if (reason && !movie.active) showToast("Released", reason);
       }
 
       // Attach to a body by its flat index (0..MAX_BODIES-1). Index maps
@@ -18951,7 +18980,7 @@
             bBase = palette[(palette.indexOf(aBase) + 1) % 3];
           const jitterA = 0.75 + rngFn() * 0.5;
           const jitterB = 0.75 + rngFn() * 0.5;
-          const colorA = new THREE.Color(
+          let colorA = new THREE.Color(
             Math.min(1.2, aBase.x * jitterA),
             Math.min(1.2, aBase.y * jitterA),
             Math.min(1.2, aBase.z * jitterA),
@@ -21150,6 +21179,12 @@
         lockedSubject: -1,
         // Optional callback fired once by stopMovie (token tour handover).
         onEnd: null,
+        // Rewind additions: a signed physics-speed ramp (negative = the
+        // sim runs backwards) and generic parameter ramps (exposure,
+        // bloom, grain, vignette, trail, fov). Ticked by tickMovieRamps.
+        timeRamp: null, // { from, to, t, dur }
+        waitKick: false, // prewarm { wait: true } holds the clock
+        ramps: [], // [{ param, from, to, t, dur }]
       };
 
       function fmtMmSs(sec) {
@@ -21161,9 +21196,10 @@
 
       // -------- Title overlay helpers --------
       let _titleHideTimer = null;
-      function showFilmTitle(main, sub, holdMs = 2500) {
+      function showFilmTitle(main, sub, holdMs = 2500, style) {
         const el = $("#film-title");
         if (!el) return;
+        el.classList.toggle("lower", style === "lower");
         el.innerHTML = `${main}${sub ? `<span class="sub">${sub}</span>` : ""}`;
         requestAnimationFrame(() => el.classList.add("show"));
         clearTimeout(_titleHideTimer);
@@ -21181,6 +21217,245 @@
       }
 
       const FILMS = {
+        // Rewind — a collision, three times (docs/active/MOVIE_REWIND.md).
+        // One head-on merger: witnessed at 1×, frozen and circled at
+        // closest approach, rewound in mono until the discs come apart,
+        // played again from inside on the real follow-cam, then a jump to
+        // the remnant in 6× time-lapse. Film time in seconds; physics is
+        // ~0.72 sim-s per film-s at 1× (dt 0.012 × 60 fps).
+        rewind: {
+          name: "Rewind",
+          subtitle: "a collision, three times",
+          duration: 262,
+          events: [
+            // Same-timestamp events fire in this order: the scene first,
+            // then a short settle with the clock held, then the music.
+            // The discs start 280 apart (the scenario's 500 needed a
+            // 2800-step pre-roll to reach closest approach by 0:50).
+            {
+              at: 0,
+              kind: "scene",
+              key: "collision",
+              scenario: "Head-on (slow merger)",
+              collision: { initialSep: 280 },
+              seed: 0x2ea1d7,
+              camera: { pos: [520, 260, 700], tgt: [0, 0, 0], fov: 50 },
+            },
+            { at: 0, kind: "prewarm", steps: 400, boost: 40, wait: true },
+            {
+              at: 0,
+              kind: "music",
+              action: "play",
+              trackTitle: "The Pair",
+              volume: 0.55,
+              fadeIn: 4,
+            },
+            {
+              at: 0,
+              kind: "title",
+              main: "REWIND",
+              sub: "a collision, three times",
+              holdSec: 7,
+            },
+            // I. witness
+            {
+              at: 0,
+              kind: "shot",
+              program: "slow-reveal",
+              duration: 16,
+              look: {
+                palette: "ice",
+                channel: "speed",
+                trail: 0.3,
+                doppler: 0.3,
+                grain: 0.04,
+                vignette: 0.4,
+              },
+              camera: {
+                startRadius: 380,
+                endRadius: 900,
+                startFov: 44,
+                endFov: 52,
+              },
+            },
+            {
+              at: 16,
+              kind: "shot",
+              program: "orbit-ascend",
+              duration: 18,
+              camera: { orbitRad: 1.2, radiusFactor: 1.0 },
+            },
+            {
+              at: 34,
+              kind: "shot",
+              program: "track-streamer",
+              duration: 16,
+              // Close to the disc the sprites are big and bloom floods the
+              // frame: pull exposure and bloom down for the two inside
+              // shots (the freeze and the vertigo put them back).
+              look: { trail: 0.5, exposure: 0.6, bloom: 0.5 },
+              // An outer-disc star (~100 from a nucleus, disc radius 120),
+              // locked for the ride in III. ("fastest" picked an escapee
+              // 2500 units out by 2:36; ring 60 sat in the core's glare.)
+              camera: {
+                subject: "bound",
+                ring: 100,
+                minSpeed: 0.5,
+                lockSubject: true,
+                offset: 80, // chase distance (default 0.18 × the 900 radius)
+              },
+            },
+            // II. anatomy — freeze, then the tide turns
+            {
+              at: 50,
+              kind: "shot",
+              program: "orbit-descend",
+              duration: 24,
+              freeze: true,
+              roll: 18,
+              look: { trail: 0.0, grain: 0.02, exposure: 1.15, bloom: 0.9 },
+              camera: { orbitRad: 1.6, radius: 700, tgt: [0, 0, 0] },
+            },
+            { at: 74, kind: "shot", program: "hold-still", duration: 8 },
+            // −1× for 64 s puts the discs ~16 s before their initial
+            // conditions by 2:26 — clearly apart.
+            { at: 74, kind: "time", speed: -1.0, ramp: 8 },
+            {
+              at: 82,
+              kind: "shot",
+              program: "drift-wide",
+              duration: 26,
+              look: {
+                palette: "mono",
+                grain: 0.08,
+                vignette: 0.7,
+                trail: 0.35,
+              },
+              camera: { orbitDeg: 30 },
+            },
+            {
+              at: 108,
+              kind: "shot",
+              program: "orbit-ascend",
+              duration: 24,
+              camera: { orbitRad: 1.0, radius: 900 },
+            },
+            {
+              at: 132,
+              kind: "shot",
+              program: "ascend-out",
+              duration: 14,
+              camera: { lift: 500, back: 300 },
+            },
+            // III. inside — forward again, riding the locked star
+            {
+              at: 146,
+              kind: "title",
+              main: "AGAIN",
+              sub: "the same event, forward",
+              holdSec: 5,
+              style: "lower",
+            },
+            {
+              at: 146,
+              kind: "shot",
+              program: "slow-reveal",
+              duration: 10,
+              look: { palette: "ice", grain: 0.04, vignette: 0.4, trail: 0.4 },
+              camera: { startRadius: 1300, endRadius: 800 },
+            },
+            // 1.5× forward: the 40 s ride spans the approach and the
+            // pass-through (~0:40 of sim time) and ends just after it,
+            // while the star is still in the thick of the cores.
+            { at: 146, kind: "time", speed: 1.5, ramp: 6 },
+            {
+              at: 156,
+              kind: "shot",
+              program: "follow",
+              duration: 40,
+              look: { trail: 0.5, exposure: 0.8, bloom: 0.6 },
+              camera: { subject: "lock", solarSystem: false },
+            },
+            {
+              at: 196,
+              kind: "shot",
+              program: "vertigo",
+              duration: 10,
+              lensFollow: "heaviest",
+              look: { doppler: 0.5, lens: 0.6, exposure: 0.9, bloom: 0.8 },
+              camera: {
+                tgt: "heaviest", // the cores, not the star we just rode
+                dollyFactor: 0.5,
+                radius: 420,
+                einstein: 0.07,
+                shadow: 0.0,
+              },
+            },
+            {
+              at: 206,
+              kind: "shot",
+              program: "crash-zoom",
+              duration: 4,
+              lensFollow: "heaviest",
+              look: { lens: 0.9 },
+              camera: { einstein: 0.09, shadow: 0.0 },
+            },
+            // IV. epilogue — a jump under black, then time-lapse
+            {
+              at: 210,
+              kind: "travel",
+              style: "fade-to-black",
+              duration: 3,
+              clearTrail: true,
+            },
+            // The jump happens under the black: 3× from here on (6× kicked
+            // the nuclei out of the remnant — too coarse a step for the
+            // merged core).
+            { at: 210, kind: "time", speed: 3, ramp: 2 },
+            {
+              at: 213,
+              kind: "travel",
+              style: "fade-in",
+              duration: 3,
+              camera: { exposure: 0.95 },
+            },
+            {
+              at: 216,
+              kind: "shot",
+              program: "orbit-ascend",
+              duration: 28,
+              look: {
+                palette: "ember",
+                channel: "mass",
+                trail: 0.9,
+                lens: 0.0,
+                doppler: 0.0,
+                grain: 0.05,
+                vignette: 0.5,
+              },
+              // Pivot on the heaviest body (the remnant drifts) and reset
+              // the field of view the vertigo left at 105°.
+              camera: { orbitRad: 1.3, radius: 550, tgt: "heaviest", fov: 50 },
+            },
+            {
+              at: 244,
+              kind: "shot",
+              program: "ascend-out",
+              duration: 16,
+              camera: { lift: 700, back: 400 },
+            },
+            { at: 244, kind: "time", speed: 1, ramp: 10 },
+            { at: 244, kind: "music", action: "fade", duration: 16 },
+            {
+              at: 256,
+              kind: "title",
+              main: "REWIND",
+              sub: "it never quite comes back",
+              holdSec: 6,
+            },
+            { at: 262, kind: "end" },
+          ],
+        },
         "first-light": {
           name: "First Light",
           subtitle: "an introduction",
@@ -22483,6 +22758,10 @@
           lens: lensPass.uniforms.uStrength.value,
           fov: camera.fov,
           speed: params.speed,
+          reverse: params.reverse,
+          paused: params.paused,
+          grain: vigGrainPass.uniforms.uGrain.value,
+          vignette: vigGrainPass.uniforms.uVignette.value,
         };
         controls.enabled = false;
         reflectMovieOnRail();
@@ -22494,9 +22773,15 @@
       function stopMovie(graceful = true) {
         if (!movie.active) return;
         movie.active = false;
+        if (movie.shot) endShot(movie.shot);
         movie.shot = null;
         movie.travel = null;
+        movie.timeRamp = null;
+        movie.ramps = [];
+        movie.waitKick = false;
+        kickstart.boost = 0;
         movie.scrubbing = false;
+        camera.up.set(0, 1, 0);
         hideFilmTitle();
         controls.enabled = true;
         // Reset music to 1× / unmuted regardless of where we ended up
@@ -22517,6 +22802,16 @@
           camera.fov = b.fov;
           camera.updateProjectionMatrix();
           params.speed = b.speed;
+          params.reverse = !!b.reverse;
+          params.paused = !!b.paused;
+          if (b.grain != null) {
+            vigGrainPass.uniforms.uGrain.value = b.grain;
+            params.grain = b.grain;
+          }
+          if (b.vignette != null) {
+            vigGrainPass.uniforms.uVignette.value = b.vignette;
+            params.vignette = b.vignette;
+          }
         }
         reflectMovieOnRail();
         reflectMovieOnHud(0, 0);
@@ -22591,6 +22886,27 @@
         let bestIdx = -1;
         let bestScore = -Infinity;
         const minSpeed = opts.minSpeed ?? 0.5;
+        // "bound": a disc star — the alive body (speed ≥ minSpeed) whose
+        // distance from the heaviest body is closest to opts.ring (default
+        // 60). "fastest" tends to pick an escapee flung clear of the
+        // galaxies; a film that rides one star through a merger wants a
+        // body that stays with the discs (Rewind's follow shot).
+        let hx = 0,
+          hy = 0,
+          hz = 0;
+        const ring = opts.ring ?? 60;
+        if (kind === "bound") {
+          let hm = -Infinity;
+          for (let i = 0; i < MAX_BODIES; i++) {
+            const m = posBuf[i * 4 + 3];
+            if (m > hm) {
+              hm = m;
+              hx = posBuf[i * 4 + 0];
+              hy = posBuf[i * 4 + 1];
+              hz = posBuf[i * 4 + 2];
+            }
+          }
+        }
         for (let i = 0; i < MAX_BODIES; i++) {
           const m = posBuf[i * 4 + 3];
           if (m <= 0) continue;
@@ -22607,6 +22923,14 @@
               if (speed2 < minSpeed * minSpeed) continue;
               score = speed2;
               break;
+            case "bound": {
+              if (speed2 < minSpeed * minSpeed) continue;
+              const dx = posBuf[i * 4 + 0] - hx;
+              const dy = posBuf[i * 4 + 1] - hy;
+              const dz = posBuf[i * 4 + 2] - hz;
+              score = -Math.abs(Math.sqrt(dx * dx + dy * dy + dz * dz) - ring);
+              break;
+            }
             case "brightest_dopplered": {
               // Bright = fast × massive; dopplered = velocity aligned with
               // current camera->body direction.
@@ -22687,6 +23011,30 @@
         // requested by the shot.
         if (ev.look) applyShotLook(ev.look);
 
+        // Rewind additions: a shot can re-centre its pivot before the
+        // start pose is sampled — `camera.tgt` as [x, y, z] or a finder
+        // name ("heaviest"). A follow or track shot leaves the pivot on
+        // its star; the next orbit wants the merger, not the star.
+        {
+          const cam = ev.cameraCfg || ev.camera || {};
+          const tgt = cam.tgt;
+          if (Array.isArray(tgt)) {
+            controls.target.fromArray(tgt);
+          } else if (typeof tgt === "string") {
+            const idx = findSubject(tgt, {});
+            if (idx >= 0) {
+              const s = readBodyState(idx);
+              if (s.mass > 0) controls.target.copy(s.pos);
+            }
+          }
+          // `camera.fov` pins the shot's field of view; otherwise the
+          // previous shot's end value carries over (a vertigo leaves 105°).
+          if (typeof cam.fov === "number" && cam.fov > 0) {
+            camera.fov = cam.fov;
+            camera.updateProjectionMatrix();
+          }
+        }
+
         const startPos = camera.position.clone();
         const startTgt = controls.target.clone();
         const startFov = camera.fov;
@@ -22711,7 +23059,14 @@
           startTheta,
           subjectIdx: -1,
           subjectLostCounter: 0,
+          // Rewind additions
+          freeze: !!ev.freeze, // pause physics for the shot (bullet time)
+          roll: ev.roll || 0, // degrees, eased in over the shot
+          lensFollow: ev.lensFollow || null, // "heaviest" etc. — lens centre tracks a body
+          lensIdx: -1,
+          following: false, // program "follow": real follow-cam attached
         };
+        if (movie.shot) endShot(movie.shot); // an overlapping shot cut in
         // Subject finder for programs that need one. Supports three modes:
         //   subject: "fastest" / "brightest" / etc. → findSubject lookup
         //   subject: <number>                       → fixed body index
@@ -22720,7 +23075,7 @@
         // `lockSubject: true` on a finder pick stores the result for later
         // "lock" references — the way a film locks onto one body for a
         // multi-shot journey.
-        if (ev.program === "track-streamer") {
+        if (ev.program === "track-streamer" || ev.program === "follow") {
           const cam = ev.camera || {};
           const which = cam.subject ?? "fastest";
           // minSpeed default 0.5 (matches findSubject's own default) — at
@@ -22740,9 +23095,38 @@
             p.subjectIdx = which | 0;
             movie.lockedSubject = p.subjectIdx;
           } else {
-            p.subjectIdx = findSubject(which, { minSpeed });
+            p.subjectIdx = findSubject(which, { minSpeed, ring: cam.ring });
             if (cam.lockSubject && p.subjectIdx >= 0) {
               movie.lockedSubject = p.subjectIdx;
+            }
+          }
+        }
+        if (p.freeze) params.paused = true;
+        if (ev.program === "follow") {
+          // The real follow-cam: chase rig, star trail, solar-system
+          // decoration (opt out with camera.solarSystem: false — a planet
+          // crossing the lens is a lot in a cut about a galaxy).
+          // updateFollowCam is ticked from tickShot because the loop only
+          // calls it outside movie mode.
+          if (p.subjectIdx >= 0 && followCamAttachByIndex(p.subjectIdx)) {
+            p.following = true;
+            if ((ev.camera || {}).solarSystem === false) disposeSolarSystem();
+          }
+        }
+        if (p.lensFollow) {
+          const idx = findSubject(p.lensFollow, {});
+          if (idx >= 0) {
+            const s = readBodyState(idx);
+            if (s.mass > 0) {
+              p.lensIdx = idx;
+              const cam = ev.camera || {};
+              setLensStatic({
+                center: [s.pos.x, s.pos.y, s.pos.z],
+                einstein: cam.einstein ?? 0.08,
+                shadow: cam.shadow ?? 0.02,
+                strength: (ev.look && ev.look.lens) ?? 0.6,
+              });
+              lensPass.uniforms.uStrength.value = lensState.targetStrength;
             }
           }
         }
@@ -22773,6 +23157,25 @@
           lensState.targetStrength = lk.lens;
           params.lens = lk.lens;
         }
+        // Rewind additions: post terms a shot may set directly.
+        const post = {};
+        if (lk.grain !== undefined) {
+          post.grain = lk.grain;
+          params.grain = lk.grain;
+        }
+        if (lk.vignette !== undefined) {
+          post.vignette = lk.vignette;
+          params.vignette = lk.vignette;
+        }
+        if (lk.bloom !== undefined) {
+          post.bloom = lk.bloom;
+          params.bloomStrength = lk.bloom;
+        }
+        if (lk.exposure !== undefined) {
+          post.exposure = lk.exposure;
+          params.exposure = lk.exposure;
+        }
+        if (Object.keys(post).length) setPostParams(post);
       }
 
       function tickShot(p, realDt) {
@@ -22888,7 +23291,9 @@
               Math.PI - 0.2,
             );
             const rScale = p.camera.radiusFactor ?? 1.0;
-            const r = p.startRadius * rScale;
+            // `camera.radius` pins an absolute distance (a cut); else the
+            // current distance scaled by radiusFactor.
+            const r = (p.camera.radius ?? p.startRadius) * rScale;
             camera.position.set(
               p.startTgt.x + r * Math.sin(newTheta) * Math.cos(newPhi),
               p.startTgt.y + r * Math.cos(newTheta),
@@ -22948,20 +23353,37 @@
               .addScaledVector(up, offDist * upMul)
               .addScaledVector(velDir, offDist * velMul);
             camera.position.copy(camPos);
+            // OrbitControls.update() re-aims at controls.target every
+            // frame, so the pivot has to ride along or the lookAt is lost.
+            controls.target.copy(s.pos);
             camera.lookAt(s.pos);
+            camera.fov = p.startFov;
+            camera.updateProjectionMatrix();
+            break;
+          }
+          case "follow": {
+            // Real follow-cam drives the camera; hold if it never attached
+            // or released itself (body died / timed out).
+            if (p.following && followCamActive()) {
+              updateFollowCam(realDt);
+            } else {
+              camera.lookAt(controls.target);
+            }
             camera.fov = p.startFov;
             camera.updateProjectionMatrix();
             break;
           }
           case "vertigo": {
             // Dolly-zoom: dolly in aggressively while FOV widens to preserve
-            // apparent target size. Background stretches.
+            // apparent target size. Background stretches. `camera.radius`
+            // pins the starting distance (else the current one).
             const e = easeInOutCubic(t);
             const dollyFactor = p.camera.dollyFactor ?? 0.52;
-            const newR = p.startRadius * lerp(1.0, dollyFactor, e);
+            const R0 = p.camera.radius ?? p.startRadius;
+            const newR = R0 * lerp(1.0, dollyFactor, e);
             const tanStart = Math.tan((p.startFov * Math.PI) / 360);
             // tan(newFov/2) * newR = tan(startFov/2) * startR  (preserve size)
-            const tanNew = (tanStart * p.startRadius) / Math.max(newR, 1);
+            const tanNew = (tanStart * R0) / Math.max(newR, 1);
             const newFov = (Math.atan(tanNew) * 360) / Math.PI;
             const fwd = p.startPos.clone().sub(p.startTgt).normalize();
             camera.position.copy(p.startTgt).addScaledVector(fwd, newR);
@@ -22997,7 +23419,14 @@
           }
         }
 
-        if (t >= 1) movie.shot = null;
+        // Rewind additions: roll rides on top of any program; a lens
+        // that follows a body re-centres every frame.
+        if (p.roll) applyShotRoll(p, t);
+        if (p.lensFollow && p.lensIdx >= 0) {
+          const s = readBodyState(p.lensIdx);
+          if (s.mass > 0) lensState.center.copy(s.pos);
+        }
+        if (t >= 1) endShot(p);
       }
 
       // -------- Travels --------
@@ -23022,17 +23451,37 @@
           startSpeed: params.speed,
         };
         movie.travel = b;
+        if (movie.shot) endShot(movie.shot);
         movie.shot = null;
+        // `clearTrail: true` — drop the followed star's trail and the
+        // afterimage under the cut (a ride's trail would otherwise hang
+        // in the epilogue).
+        if (ev.clearTrail) {
+          clearTrail();
+          clearTrails();
+        }
       }
 
       function endTravel() {
         movie.travel = null;
       }
 
-      function doSceneSwap(nextKey) {
+      function doSceneSwap(nextKey, opts) {
         if (!nextKey) return;
         const sc = SCENES[nextKey];
         if (!sc) return;
+        // Rewind additions: a film can pin the seed, the collision
+        // scenario and the opening camera pose so its cut is reproducible.
+        const o = opts || {};
+        if (o.seed != null) seedRng(o.seed | 0);
+        if (nextKey === "collision" && o.scenario) {
+          applyCollisionScenarioRaw(o.scenario);
+        }
+        if (nextKey === "collision" && o.collision) {
+          // Per-film tweaks on top of the named scenario (initialSep …).
+          Object.assign(collision, o.collision);
+          collision.galaxyMassB = collision.galaxyMassA * collision.massRatio;
+        }
         sc.make();
         uploadStateToGPU();
         uploadK(K_PRESETS[sc.K] || K_PRESETS.neutral);
@@ -23051,6 +23500,16 @@
         lensPass.uniforms.uStrength.value = lensState.targetStrength;
         currentSceneKey = nextKey;
         clearTrails();
+        updateHudFromScene();
+        if (o.camera) {
+          if (o.camera.pos) camera.position.fromArray(o.camera.pos);
+          if (o.camera.tgt) controls.target.fromArray(o.camera.tgt);
+          if (o.camera.fov) {
+            camera.fov = o.camera.fov;
+            camera.updateProjectionMatrix();
+          }
+          camera.lookAt(controls.target);
+        }
       }
 
       function tickTravel(tr, realDt) {
@@ -23198,6 +23657,18 @@
             renderer.toneMappingExposure = tr.startExposure * (1 - e);
             break;
           }
+          case "fade-in": {
+            // From black up to camera.exposure (default 1.0). No swap —
+            // pair with a `prewarm` event under the black for a time jump.
+            const e = easeOutCubic(t);
+            const target = tr.camera.exposure ?? 1.0;
+            renderer.toneMappingExposure = target * e;
+            if (t >= 1) {
+              params.exposure = target;
+              endTravel();
+            }
+            break;
+          }
           case "black-hole-dive": {
             // Dolly toward the lens center while ramping the lens, dip to black
             // under cover of the shadow, emerge into the next scene.
@@ -23267,7 +23738,7 @@
         switch (ev.kind) {
           case "scene":
             // Synchronous scene load, no transition
-            doSceneSwap(ev.key);
+            doSceneSwap(ev.key, ev);
             break;
           case "shot":
             beginShot(ev);
@@ -23276,7 +23747,43 @@
             beginTravel(ev);
             break;
           case "title":
-            showFilmTitle(ev.main, ev.sub, (ev.holdSec || 3) * 1000);
+            showFilmTitle(ev.main, ev.sub, (ev.holdSec || 3) * 1000, ev.style);
+            break;
+          case "time":
+            // Signed physics speed: `speed: -1.5` runs the sim backwards
+            // at 1.5×. `ramp` eases from the current signed speed, so a
+            // ramp through zero reads as the tide turning.
+            if (ev.ramp > 0) {
+              movie.timeRamp = {
+                from: movieSignedSpeed(),
+                to: ev.speed ?? 1,
+                t: 0,
+                dur: ev.ramp,
+              };
+            } else {
+              movie.timeRamp = null;
+              setMovieSignedSpeed(ev.speed ?? 1);
+            }
+            break;
+          case "ramp":
+            movie.ramps.push({
+              param: ev.param,
+              from: ev.from ?? rampParamFrom(ev.param),
+              to: ev.to,
+              t: 0,
+              dur: ev.duration ?? 1,
+            });
+            break;
+          case "prewarm":
+            // Pre-roll through the amortized kickstart — never a
+            // synchronous burst (1500 O(N²) steps froze the loop for
+            // seconds and the film clock jumped to the end card). `boost`
+            // raises the per-frame step budget while the screen is black;
+            // `wait: true` holds the film clock, and any later event at
+            // the same timestamp, until the pre-roll has landed.
+            kickstartSim(ev.steps || 300, params.dt);
+            kickstart.boost = ev.boost || 0;
+            if (ev.wait) movie.waitKick = true;
             break;
           case "music":
             handleFilmMusicEvent(ev);
@@ -23290,19 +23797,121 @@
       function movieTick(realDt) {
         if (!movie.active) return;
         if (movie.paused || movie.scrubbing) return;
+        // A `prewarm` with wait:true holds the clock until the pre-roll
+        // has landed (kickstartTick runs earlier in the same loop pass).
+        if (movie.waitKick) {
+          if (kickstart.remaining > 0) return;
+          movie.waitKick = false;
+        }
         // Accumulator — advancing by realDt * speed makes the whole film
         // play faster while keeping shot/travel lerps correct (they read
-        // (movie.elapsed - beginT) / duration).
-        movie.elapsed += realDt * (movie.speed || 1);
+        // (movie.elapsed - beginT) / duration). Clamped: a tab switch or
+        // a long GPU stall must not skip the film to its end card.
+        movie.elapsed += Math.min(realDt, 0.25) * (movie.speed || 1);
         while (
           movie.cursor < movie.timeline.length &&
           movie.timeline[movie.cursor].at <= movie.elapsed
         ) {
           fireMovieEvent(movie.timeline[movie.cursor++]);
+          if (movie.waitKick) break;
         }
+        tickMovieRamps(realDt * (movie.speed || 1));
         if (movie.travel) tickTravel(movie.travel, realDt);
         else if (movie.shot) tickShot(movie.shot, realDt);
         reflectMovieOnHud(movie.elapsed, movie.film ? movie.film.duration : 0);
+      }
+
+      // ---- Rewind additions: signed time + parameter ramps ----------
+      function movieSignedSpeed() {
+        return params.speed * (params.reverse ? -1 : 1);
+      }
+      function setMovieSignedSpeed(s) {
+        params.speed = Math.min(8, Math.abs(s));
+        params.reverse = s < 0;
+      }
+      function rampParamFrom(param) {
+        switch (param) {
+          case "exposure":
+            return renderer.toneMappingExposure;
+          case "bloom":
+            return bloom.strength;
+          case "grain":
+            return vigGrainPass.uniforms.uGrain.value;
+          case "vignette":
+            return vigGrainPass.uniforms.uVignette.value;
+          case "trail":
+            return trailsPass.uniforms.damp.value;
+          case "fov":
+            return camera.fov;
+        }
+        return 0;
+      }
+      function applyRampParam(param, v) {
+        if (param === "exposure") {
+          renderer.toneMappingExposure = v;
+          params.exposure = v;
+        } else if (param === "bloom") {
+          bloom.strength = v;
+          params.bloomStrength = v;
+        } else if (param === "grain") {
+          vigGrainPass.uniforms.uGrain.value = v;
+          params.grain = v;
+        } else if (param === "vignette") {
+          vigGrainPass.uniforms.uVignette.value = v;
+          params.vignette = v;
+        } else if (param === "trail") {
+          trailsPass.uniforms.damp.value = v;
+          trailsPass.enabled = v > 0.001;
+          params.trail = v;
+        } else if (param === "fov") {
+          camera.fov = v;
+          camera.updateProjectionMatrix();
+        }
+      }
+      function tickMovieRamps(dt) {
+        const tr = movie.timeRamp;
+        if (tr) {
+          tr.t += dt;
+          const e = easeInOutCubic(Math.min(1, tr.t / Math.max(tr.dur, 1e-3)));
+          setMovieSignedSpeed(lerp(tr.from, tr.to, e));
+          if (tr.t >= tr.dur) movie.timeRamp = null;
+        }
+        if (movie.ramps.length) {
+          const keep = [];
+          for (const r of movie.ramps) {
+            r.t += dt;
+            const e = easeInOutCubic(Math.min(1, r.t / Math.max(r.dur, 1e-3)));
+            applyRampParam(r.param, lerp(r.from, r.to, e));
+            if (r.t < r.dur) keep.push(r);
+          }
+          movie.ramps = keep;
+        }
+      }
+      // Camera roll for a shot: rotate camera.up about the view axis.
+      // OrbitControls.update() re-aims with lookAt(target) every frame
+      // and honours camera.up, so the roll survives it.
+      const _rollFwd = new THREE.Vector3();
+      function applyShotRoll(p, t) {
+        const ang = ((p.roll * Math.PI) / 180) * easeInOutCubic(t);
+        _rollFwd.subVectors(controls.target, camera.position).normalize();
+        camera.up.set(0, 1, 0).applyAxisAngle(_rollFwd, ang);
+        camera.lookAt(controls.target);
+      }
+      // Undo a shot's side effects (freeze, roll, follow, lens follow).
+      function endShot(p) {
+        if (!p) return;
+        if (movie.shot === p) movie.shot = null;
+        if (p.freeze) params.paused = false;
+        if (p.roll) camera.up.set(0, 1, 0);
+        if (p.following) {
+          if (followCamActive()) followCamRelease(); // silent: no toast
+          p.following = false;
+        }
+        if (p.lensFollow) {
+          const sc = SCENES[currentSceneKey];
+          setLensStatic(sc && sc.lens ? sc.lens : null);
+          lensPass.uniforms.uStrength.value = lensState.targetStrength;
+        }
       }
 
       // Music keeps pace with the film — but speeds > 2× pitch-shift badly,
@@ -25532,6 +26141,11 @@
         loop();
         // Token mode opens with its generated tour (TOKEN_EXPERIENCE.md §1).
         if (TOKEN.active && !TOKEN.preview) tokenStartTour();
+        // ?film=<key> starts a movie straight away (the intro is skipped).
+        if (!TOKEN.active) {
+          const fk = url.searchParams.get("film");
+          if (fk && FILMS[fk]) startMovie(fk);
+        }
       })();
     </script>
   </body>

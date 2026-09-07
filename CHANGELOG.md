@@ -45,6 +45,56 @@ handlers also cascade.
 > When binding `error`, always check `audio.error.code` and skip
 > code 1 (`MEDIA_ERR_ABORTED`).
 
+### Follow-cam solar systems threw on lava / ice / ocean planets
+
+**Bug:** `generateSolarSystem` declared `colorA` with `const` and then
+reassigned it for the ICE and OCEAN planet types (`colorB` was already
+`let`). Any follow that rolled one of those types threw
+`Assignment to constant variable`, left a half-built system in
+`solarSys`, and from then on `updateSolarSystem` threw every frame —
+the canvas froze while the HUD kept updating. Found by the _Rewind_
+film's follow shot (2026-09-06).
+
+**Fix:** `let colorA`.
+
+**Rule:**
+
+> **A per-frame function that touches partially-initialised state must
+> not be reachable after a failed builder.** Builders that populate
+> shared state (`solarSys`, trails, decorations) should either build
+> into a local and commit at the end, or set their state to NONE in a
+> `catch`.
+
+### WebGPU quad sprites must emulate GL's point-size clamp
+
+**Bug:** The M9 WebGPU point path (one instanced quad per body,
+WGSL mirroring `pointVert` term for term) matched the WebGL points
+pixel-for-pixel in quiet-drift and event-horizon but rendered the
+collision scene's galaxy cores at half the brightness (harness look
+gate: mean |diff| 22/255, gate is 2).
+
+**Failure mode:** At the collision camera distance most bodies ask
+for a ~0.6 px sprite. GL clamps `gl_PointSize` to
+`ALIASED_POINT_SIZE_RANGE` (min 1 px on every driver) _after_ the
+vertex shader, so every WebGL body still lights exactly one fragment
+at full alpha. A 0.6 px quad covers a pixel centre only ~⅓ of the
+time, so thousands of core bodies silently vanished. Per-sprite math
+was identical; the difference only showed where sprites are
+sub-pixel, which is why two of three gate scenes passed.
+
+**Fix:** `capSz = clamp(capSz, u.s4.z, u.s4.w)` at the end of the
+WGSL vertex stage, fed from the WebGL context's actual
+`gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)` (`wgpuRender.glPointRange`)
+so both paths clamp identically on the same machine.
+
+**Rule:**
+
+> **Anything that replaces `gl_PointSize` with geometry must apply the
+> driver's point-size clamp itself.** Mirror the shader math _and_ the
+> fixed-function stage after it. And a look gate needs a scene where
+> sprites are sub-pixel (far camera, dense cores) — close-camera scenes
+> will not catch this.
+
 ### Adding a new `KIND_*` requires updating WGSL + WebGPU buffer sizes
 
 **Bug:** Bumping `NUM_KINDS` from 7 → 8 (to add `KIND_ASTROPHAGE`)
@@ -77,6 +127,76 @@ invisible until astrophage fell outside the kept K-matrix region.
 
 _(things in flight; not yet shipped)_
 
+- **M9: WebGPU point rendering + WebGL composite** (BARNES_HUT_PLAN.md
+  §7b, work item B; section "6b. WEBGPU RENDER PATH" in index.html).
+  With the WebGPU compute backend live, `?render=wgpu` /
+  `__setRenderPath("wgpu")` draws the bodies on the WebGPU side straight
+  from the ping-pong storage buffers — one instanced quad per body,
+  WGSL that mirrors `pointVert` / `pointFrag` term for term
+  (`WGSL_RENDER_SHADER`) — into an offscreen `rgba16float` canvas that
+  WebGL imports with `texSubImage2D(RGBA16F, HALF_FLOAT)` and adds to
+  the scene as a screen-space quad while the `bodies` Points mesh is
+  hidden. Post chain, capture, thumbnails and recording are untouched.
+  Encoding is pluggable behind `WGPU_RENDER_ENCODING`
+  (`"float"` default per the seam experiment, `tools/seam-test.html`;
+  `"pack2"` lossless 8-bit fallback, `"rgbm"` last resort). On this
+  path the per-frame readback drops to every `wgpuRender.mirrorEvery`
+  (30) frames (`wgpuFrameStep` → `wgpuIssueMirror`); `wgpuForceMirror()`
+  refreshes it before click-to-follow / F picks; follow-cam and movie
+  track shots sample one body per frame via `WgpuBodyReader` (32-byte
+  staging + mapAsync). Any failure sets `wgpuRender.failed`, logs
+  `[render] …` and falls back to the WebGL points. Default stays
+  `webgl`; `?render=wgpu` implies the WebGPU backend; token previews
+  stay on WebGL. Also: `?compute=webgpu|webgl` (unsaved), a `?freeze=N`
+  harness flag (director/drift off, N synchronous substeps once the
+  backend settled, grain pinned, no toasts, paused; `done` waits for the
+  mirror), a hidden `<pre id="perf-json">` with `__perfSnapshot()` (now
+  with `renderPath`, `encoding`, `importMs`, `submitMs`, `composeMs`,
+  `loopFrames`, `simTime`), and a `render` line in the debug overlay.
+  Look gate (same page, same frozen state, both paths): collision 0.001,
+  event-horizon 0.017, quiet-drift 0.006 /255 mean |diff| — after the
+  point-size-clamp fix in the ledger above. Import costs 0.2–0.5 ms per
+  frame; at 262k/518k the frame is now compute-bound (velMs 44/77 ms
+  per substep on the 4090), so the render path alone does not move fps
+  there — the mirror bounce is off the frame (readMs 1481→271 ms,
+  2661→474 ms).
+
+- **Movie engine: time and physics beats** (for the new film _Rewind_,
+  docs/active/MOVIE_REWIND.md): `time` event (signed physics speed with
+  a ramp — negative runs the sim backwards; crossing zero flips
+  `params.reverse`), `ramp` event (exposure / bloom / grain / vignette /
+  trail / fov), `prewarm` event (pre-roll through the amortized
+  kickstart — `boost` steps per frame, `wait: true` holds the film
+  clock and later same-timestamp events until it lands; never a
+  synchronous burst, which froze the loop for seconds and jumped the
+  film clock to its end card), `fade-in` travel, shot flags `freeze`
+  (bullet time), `roll` (degrees,
+  via `camera.up` so OrbitControls' re-aim keeps it), `lensFollow`
+  (lens centre tracks a body), new `follow` shot program (the real
+  follow-cam with trail and solar system, ticked from the movie loop),
+  `camera.radius` on orbit/vertigo shots, `camera.tgt` on any shot
+  ([x, y, z] or a finder name such as `"heaviest"` — re-centres the
+  pivot, since a follow or track shot leaves it on its star),
+  `subject: "bound"` finder (a disc star at `ring` distance from the
+  heaviest body; `"fastest"` picks an escapee — the first cut rode a
+  star 2500 units out into black), `look.grain/vignette/bloom/
+exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
+  overrides such as `initialSep`, opening `camera`), title
+  `style: "lower"`, `?film=<key>`. Track shots now move
+  `controls.target` with the subject (OrbitControls' per-frame re-aim
+  used to undo their lookAt). The film clock advances at most 0.25 s
+  per frame (a tab switch or GPU stall no longer skips to the end
+  card). A film's follow shot is silent (no toast, no lock chime).
+  `stopMovie` restores reverse/paused/grain/vignette and releases any
+  shot side effects. `__perfSnapshot().film` exposes the film clock;
+  `tools/film-strip.mjs` screenshots a real-time headless run at chosen
+  film timestamps — Chrome's virtual time never advanced the physics,
+  so the earlier virtual-time strips only ever showed a few steps of
+  evolution.
+- **New film: Rewind** (4:22, _The Pair_) — one head-on merger
+  witnessed, frozen and circled with a roll at closest approach, rewound
+  in mono until the discs part, replayed from inside on the follow-cam,
+  then a jump to the remnant in 6× time-lapse. `?film=rewind`.
 - **Determinism audit** (INTERACTIVE_NFT.md §5.6): two renders of the
   same token preview are bit-identical; no unseeded random draws on
   the scene-build path in token mode. `vendor/three/LICENSE` added.
