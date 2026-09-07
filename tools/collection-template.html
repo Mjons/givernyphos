@@ -1,0 +1,1093 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Giverny Phos · The Hundred</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --ground: #07090f;
+        --surface: #0d1120;
+        --surface-2: #131a2e;
+        --ink: #e6eaf5;
+        --muted: #8b93ad;
+        --faint: #5a6280;
+        --line: #1c2338;
+        --line-strong: #2a3452;
+        --accent: #8ab4ff;
+        --accent-soft: rgba(138, 180, 255, 0.14);
+        --ok: #3fc38a;
+        --warn: #e8b04a;
+        --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+        --mono:
+          "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+        --rail: 264px;
+        --drawer: 520px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--ground);
+        color: var(--ink);
+        font: 400 14px/1.5 var(--body);
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--accent);
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        background: none;
+        border: 0;
+        cursor: pointer;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      .card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      /* ---- top bar ---- */
+      .top {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 18px 28px;
+        align-items: end;
+        padding: 18px 24px 14px;
+        background: linear-gradient(var(--ground) 82%, rgba(7, 9, 15, 0));
+        border-bottom: 1px solid var(--line);
+      }
+      .eyebrow {
+        font: 500 10.5px/1 var(--mono);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      h1 {
+        margin: 0;
+        font: 500 26px/1 var(--body);
+        letter-spacing: 0.3em;
+        font-variant: small-caps;
+        text-shadow: 0 0 18px rgba(138, 180, 255, 0.2);
+      }
+      .counts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 18px;
+        font: 500 12px/1.4 var(--mono);
+        color: var(--muted);
+        padding-bottom: 3px;
+      }
+      .counts b {
+        color: var(--ink);
+        font-weight: 500;
+      }
+      .search {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        background: var(--surface);
+        min-width: 260px;
+      }
+      .search input {
+        flex: 1;
+        background: none;
+        border: 0;
+        color: var(--ink);
+        font: 400 13px var(--body);
+        outline: none;
+      }
+      .search input::placeholder {
+        color: var(--faint);
+      }
+      .search kbd {
+        font: 500 10px var(--mono);
+        color: var(--faint);
+        border: 1px solid var(--line-strong);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+
+      /* ---- layout ---- */
+      .layout {
+        display: grid;
+        grid-template-columns: var(--rail) 1fr;
+        min-height: calc(100vh - 80px);
+      }
+      .rail {
+        border-right: 1px solid var(--line);
+        padding: 18px 18px 40px;
+        position: sticky;
+        top: 80px;
+        align-self: start;
+        max-height: calc(100vh - 80px);
+        overflow: auto;
+        scrollbar-width: thin;
+      }
+      .rail h2 {
+        margin: 18px 0 8px;
+        font: 500 10.5px/1 var(--mono);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .rail section:first-child h2 {
+        margin-top: 0;
+      }
+      .fam {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 2px;
+      }
+      .fam button {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 4px 10px;
+        align-items: center;
+        padding: 5px 8px;
+        border-radius: 6px;
+        text-align: left;
+        font-size: 13px;
+      }
+      .fam button:hover {
+        background: var(--surface);
+      }
+      .fam button.on {
+        background: var(--accent-soft);
+        color: #fff;
+      }
+      .fam .n {
+        font: 500 11px var(--mono);
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .fam .bar {
+        grid-column: 1 / -1;
+        height: 3px;
+        border-radius: 2px;
+        background: var(--line);
+        overflow: hidden;
+      }
+      .fam .bar i {
+        display: block;
+        height: 100%;
+        width: var(--p);
+        background: var(--accent);
+        opacity: 0.8;
+      }
+      .fam button.dim {
+        opacity: 0.45;
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .chip {
+        padding: 4px 9px;
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        font: 500 11.5px/1.2 var(--body);
+        color: var(--muted);
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .chip:hover {
+        color: var(--ink);
+        border-color: var(--accent);
+      }
+      .chip.on {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .chip.zero {
+        opacity: 0.35;
+      }
+      .chip .n {
+        font: 500 10px var(--mono);
+        color: var(--faint);
+      }
+      .chip.on .n {
+        color: var(--accent);
+      }
+      .rail select {
+        width: 100%;
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font: 400 13px var(--body);
+      }
+      .rail .reset {
+        margin-top: 18px;
+        width: 100%;
+        padding: 8px;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .rail .reset:hover {
+        color: var(--ink);
+        border-color: var(--accent);
+      }
+      .rail .foot {
+        margin-top: 22px;
+        font: 400 10.5px/1.6 var(--mono);
+        color: var(--faint);
+        word-break: break-all;
+      }
+
+      /* ---- grid ---- */
+      main {
+        padding: 18px 24px 60px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+        gap: 14px;
+      }
+      .card {
+        position: relative;
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        cursor: pointer;
+        text-align: left;
+        padding: 0;
+        display: grid;
+        transition:
+          transform 160ms ease,
+          border-color 160ms ease;
+      }
+      .card:hover {
+        transform: translateY(-2px);
+        border-color: var(--line-strong);
+      }
+      .card.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
+      }
+      .card img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        background: #000;
+      }
+      .card .meta {
+        padding: 8px 10px 10px;
+        display: grid;
+        gap: 2px;
+      }
+      .card .id {
+        font: 500 11px var(--mono);
+        color: var(--accent);
+        letter-spacing: 0.04em;
+      }
+      .card .fam-name {
+        font-weight: 500;
+        font-size: 13px;
+      }
+      .card .sub {
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .card .flag {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        font: 500 10px var(--mono);
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: rgba(232, 176, 74, 0.18);
+        color: var(--warn);
+      }
+      .empty {
+        color: var(--muted);
+        padding: 40px 0;
+        text-align: center;
+      }
+
+      /* ---- drawer ---- */
+      .drawer {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: var(--drawer);
+        max-width: 100vw;
+        background: var(--surface);
+        border-left: 1px solid var(--line-strong);
+        box-shadow: -30px 0 60px rgba(0, 0, 0, 0.5);
+        z-index: 40;
+        overflow: auto;
+        scrollbar-width: thin;
+        transform: translateX(100%);
+        transition: transform 220ms ease;
+      }
+      .drawer.open {
+        transform: none;
+      }
+      .drawer .stage {
+        position: relative;
+        background: #000;
+        aspect-ratio: 16 / 9;
+      }
+      .drawer .stage img,
+      .drawer .stage iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        object-fit: cover;
+      }
+      .drawer .stage .live-note {
+        position: absolute;
+        left: 12px;
+        bottom: 10px;
+        font: 500 10px var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: rgba(230, 234, 245, 0.6);
+      }
+      .drawer .nav {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        right: 10px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .drawer .nav button {
+        background: rgba(8, 10, 20, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 999px;
+        padding: 6px 11px;
+        font: 500 11px var(--mono);
+        backdrop-filter: blur(6px);
+      }
+      .drawer .nav button:hover {
+        border-color: var(--accent);
+      }
+      .drawer .body {
+        padding: 18px 22px 40px;
+        display: grid;
+        gap: 16px;
+      }
+      .drawer .title .id {
+        font: 500 11px var(--mono);
+        color: var(--accent);
+        letter-spacing: 0.06em;
+      }
+      .drawer h2 {
+        margin: 2px 0 0;
+        font: 500 20px/1.2 var(--body);
+        letter-spacing: 0.16em;
+        font-variant: small-caps;
+      }
+      .drawer .desc {
+        margin: 0;
+        color: var(--muted);
+        max-width: 60ch;
+      }
+      .traits {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px 14px;
+        margin: 0;
+      }
+      .traits div {
+        display: grid;
+        gap: 1px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--ground);
+      }
+      .traits dt {
+        font: 500 10px/1 var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--faint);
+      }
+      .traits dd {
+        margin: 0;
+        font-size: 13px;
+      }
+      .traits dd.mono {
+        font: 400 12px var(--mono);
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .actions a,
+      .actions button {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 13px;
+        border-radius: 999px;
+        border: 1px solid var(--line-strong);
+        font: 500 12px var(--body);
+        text-decoration: none;
+        color: var(--ink);
+      }
+      .actions .primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #0a0f1e;
+      }
+      .actions a:hover,
+      .actions button:hover {
+        border-color: var(--accent);
+      }
+      .drawer .fine {
+        font: 400 11px/1.6 var(--mono);
+        color: var(--faint);
+        word-break: break-all;
+      }
+      .scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        background: rgba(0, 0, 0, 0.35);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 220ms ease;
+      }
+      .scrim.on {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 22px;
+        transform: translate(-50%, 10px);
+        background: var(--surface-2);
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        padding: 8px 14px;
+        font: 500 11.5px var(--mono);
+        opacity: 0;
+        transition:
+          opacity 200ms ease,
+          transform 200ms ease;
+        z-index: 50;
+        pointer-events: none;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+
+      @media (max-width: 860px) {
+        .top {
+          grid-template-columns: 1fr;
+          align-items: start;
+          gap: 10px;
+        }
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .rail {
+          position: static;
+          max-height: none;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .fam {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        :root {
+          --drawer: 100vw;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .card,
+        .drawer,
+        .scrim,
+        .toast {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <div class="eyebrow">
+          giverny phos · interactive collection · recipe v1
+        </div>
+        <h1>The Hundred</h1>
+      </div>
+      <div class="counts" id="counts"></div>
+      <label class="search">
+        <span aria-hidden="true">⌕</span>
+        <input
+          id="q"
+          type="search"
+          placeholder="id, family, palette, seed…"
+          autocomplete="off"
+        />
+        <kbd>/</kbd>
+      </label>
+    </header>
+
+    <div class="layout">
+      <aside class="rail" aria-label="Filters">
+        <section>
+          <h2>Families</h2>
+          <ul class="fam" id="families"></ul>
+        </section>
+        <section>
+          <h2>Palette</h2>
+          <div class="chips" id="f-Palette"></div>
+        </section>
+        <section>
+          <h2>Temperament</h2>
+          <div class="chips" id="f-Temperament"></div>
+        </section>
+        <section>
+          <h2>Signature</h2>
+          <div class="chips" id="f-Signature"></div>
+        </section>
+        <section>
+          <h2>Spin · Doppler · Exposure</h2>
+          <div class="chips" id="f-Spin"></div>
+          <div class="chips" id="f-Doppler" style="margin-top: 6px"></div>
+          <div class="chips" id="f-Exposure" style="margin-top: 6px"></div>
+        </section>
+        <section>
+          <h2>Sort</h2>
+          <select id="sort">
+            <option value="id">by id</option>
+            <option value="family">by family</option>
+            <option value="bright">brightest first</option>
+            <option value="dark">darkest first</option>
+            <option value="palette">by palette</option>
+          </select>
+        </section>
+        <button class="reset" id="reset">Clear filters</button>
+        <div class="foot" id="foot"></div>
+      </aside>
+
+      <main>
+        <div class="grid" id="grid" role="list"></div>
+        <p class="empty" id="empty" hidden>No tokens match. Clear a filter.</p>
+      </main>
+    </div>
+
+    <div class="scrim" id="scrim"></div>
+    <aside class="drawer" id="drawer" aria-label="Token" aria-hidden="true">
+      <div class="stage" id="stage">
+        <img id="d-img" alt="" />
+        <div class="nav">
+          <button id="d-prev" title="Previous (←)">← prev</button>
+          <button id="d-live" title="Load the live piece here">▶ live</button>
+          <button id="d-next" title="Next (→)">next →</button>
+          <button id="d-close" title="Close (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="body">
+        <div class="title">
+          <div class="id" id="d-id"></div>
+          <h2 id="d-name"></h2>
+        </div>
+        <p class="desc" id="d-desc"></p>
+        <dl class="traits" id="d-traits"></dl>
+        <div class="actions">
+          <a class="primary" id="a-open" target="_blank" rel="noopener"
+            >Open live ↗</a
+          >
+          <a id="a-gallery" target="_blank" rel="noopener">Gallery mode</a>
+          <button id="a-copy">Copy link</button>
+        </div>
+        <div class="fine" id="d-fine"></div>
+      </div>
+    </aside>
+    <div class="toast" id="toast"></div>
+
+    <script>
+      window.COLLECTION = /* __DATA__ */ null;
+    </script>
+    <script>
+      (function () {
+        var C = window.COLLECTION;
+        if (!C) return;
+        var tokens = C.tokens;
+        var byId = {};
+        tokens.forEach(function (t) {
+          byId[t.id] = t;
+        });
+        var TRAITS = [
+          "Palette",
+          "Temperament",
+          "Signature",
+          "Spin",
+          "Doppler",
+          "Exposure",
+        ];
+        var state = {
+          family: null,
+          q: "",
+          sort: "id",
+          filters: {},
+          open: null,
+          live: false,
+        };
+        TRAITS.forEach(function (k) {
+          state.filters[k] = null;
+        });
+
+        // ---- URL state (?id=N opens the drawer; #family=… keeps a filter) ----
+        try {
+          var u = new URL(location.href);
+          var openId = parseInt(
+            u.searchParams.get("id") || u.hash.replace(/^#id=/, ""),
+            10,
+          );
+          if (openId >= 1 && byId[openId]) state.open = openId;
+        } catch (e) {}
+
+        var $ = function (id) {
+          return document.getElementById(id);
+        };
+        var esc = function (s) {
+          return String(s).replace(/[&<>"]/g, function (c) {
+            return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+          });
+        };
+        function liveUrl(t, extra) {
+          var base = C.liveBase;
+          var sep = base.indexOf("?") >= 0 ? "&" : "?";
+          return base + sep + "id=" + t.id + (extra ? "&" + extra : "");
+        }
+
+        function visible() {
+          var q = state.q.trim().toLowerCase();
+          var list = tokens.filter(function (t) {
+            if (state.family && t.scene !== state.family) return false;
+            for (var i = 0; i < TRAITS.length; i++) {
+              var k = TRAITS[i];
+              if (state.filters[k] && t.traits[k] !== state.filters[k])
+                return false;
+            }
+            if (q) {
+              if (/^#?\d+$/.test(q)) return String(t.id) === q.replace("#", "");
+              var hay = (
+                t.name +
+                " " +
+                t.scene +
+                " " +
+                t.seed +
+                " " +
+                Object.values(t.traits).join(" ")
+              ).toLowerCase();
+              if (hay.indexOf(q) < 0) return false;
+            }
+            return true;
+          });
+          var s = state.sort;
+          list.sort(function (a, b) {
+            if (s === "family")
+              return a.family.localeCompare(b.family) || a.id - b.id;
+            if (s === "bright") return b.lum - a.lum || a.id - b.id;
+            if (s === "dark") return a.lum - b.lum || a.id - b.id;
+            if (s === "palette")
+              return (
+                a.traits.Palette.localeCompare(b.traits.Palette) || a.id - b.id
+              );
+            return a.id - b.id;
+          });
+          return list;
+        }
+
+        // ---- rail ----
+        function renderRail(list) {
+          var famCounts = {};
+          var famAll = {};
+          tokens.forEach(function (t) {
+            famAll[t.scene] = (famAll[t.scene] || 0) + 1;
+          });
+          list.forEach(function (t) {
+            famCounts[t.scene] = (famCounts[t.scene] || 0) + 1;
+          });
+          var fams = C.families; // [{scene, name, count}] in plan order
+          var maxN = Math.max.apply(
+            null,
+            fams.map(function (f) {
+              return famAll[f.scene] || 0;
+            }),
+          );
+          $("families").innerHTML = fams
+            .map(function (f) {
+              var n = famCounts[f.scene] || 0;
+              var all = famAll[f.scene] || 0;
+              var on = state.family === f.scene;
+              return (
+                '<li><button data-fam="' +
+                f.scene +
+                '" class="' +
+                (on ? "on" : "") +
+                (n === 0 && !on ? " dim" : "") +
+                '">' +
+                "<span>" +
+                esc(f.name) +
+                '</span><span class="n">' +
+                (n === all ? all : n + " / " + all) +
+                "</span>" +
+                '<span class="bar"><i style="--p:' +
+                Math.round((100 * all) / maxN) +
+                '%"></i></span></button></li>'
+              );
+            })
+            .join("");
+          TRAITS.forEach(function (k) {
+            var counts = {};
+            var order = C.values[k] || [];
+            list.forEach(function (t) {
+              counts[t.traits[k]] = (counts[t.traits[k]] || 0) + 1;
+            });
+            $("f-" + k).innerHTML = order
+              .map(function (v) {
+                var n = counts[v] || 0;
+                var on = state.filters[k] === v;
+                return (
+                  '<button class="chip' +
+                  (on ? " on" : "") +
+                  (n === 0 && !on ? " zero" : "") +
+                  '" data-k="' +
+                  k +
+                  '" data-v="' +
+                  esc(v) +
+                  '">' +
+                  esc(v) +
+                  '<span class="n">' +
+                  n +
+                  "</span></button>"
+                );
+              })
+              .join("");
+          });
+        }
+
+        // ---- grid ----
+        function renderGrid(list) {
+          var g = $("grid");
+          g.innerHTML = list
+            .map(function (t) {
+              var flag = t.flags
+                ? '<span class="flag">' + esc(t.flags) + "</span>"
+                : "";
+              return (
+                '<button class="card' +
+                (state.open === t.id ? " active" : "") +
+                '" role="listitem" data-id="' +
+                t.id +
+                '">' +
+                '<img loading="lazy" src="' +
+                t.thumb +
+                '" alt="' +
+                esc(t.name) +
+                '">' +
+                flag +
+                '<div class="meta"><div class="id">#' +
+                t.id +
+                '</div><div class="fam-name">' +
+                esc(t.family) +
+                "</div>" +
+                '<div class="sub">' +
+                esc(t.traits.Palette) +
+                " · " +
+                esc(t.traits.Temperament) +
+                " · " +
+                esc(t.traits.Signature) +
+                "</div></div></button>"
+              );
+            })
+            .join("");
+          $("empty").hidden = list.length > 0;
+          $("counts").innerHTML =
+            "<span><b>" +
+            list.length +
+            "</b> of " +
+            tokens.length +
+            " tokens</span>" +
+            "<span><b>" +
+            C.families.length +
+            "</b> families</span>" +
+            "<span>recipe <b>v" +
+            C.recipe +
+            "</b></span>" +
+            "<span>generated <b>" +
+            esc(C.generated) +
+            "</b></span>";
+        }
+
+        var current = [];
+        function render() {
+          current = visible();
+          renderRail(current);
+          renderGrid(current);
+        }
+
+        // ---- drawer ----
+        function openToken(id, pushHistory) {
+          var t = byId[id];
+          if (!t) return;
+          state.open = id;
+          state.live = false;
+          $("d-id").textContent = "#" + t.id + " of " + tokens.length + " · " + t.scene + " · 0x" + t.seed;
+          $("d-name").textContent =
+            t.family +
+            (t.traits.Variant && t.traits.Variant !== "—"
+              ? " · " + t.traits.Variant
+              : "");
+          $("d-desc").textContent = t.description;
+          var rows = [
+            ["Family", t.family],
+            ["Temperament", t.traits.Temperament],
+            ["Signature", t.traits.Signature],
+          ];
+          if (t.traits.Variant && t.traits.Variant !== "—")
+            rows.push(["Variant", t.traits.Variant]);
+          rows = rows.concat([
+            ["Palette", t.traits.Palette],
+            ["Channel", t.traits.Channel],
+            ["Exposure", t.traits.Exposure],
+            ["Spin", t.traits.Spin],
+            ["Doppler", t.traits.Doppler],
+            ["Seed", "0x" + t.seed, "mono"],
+            ["Preview luminance", t.lum.toFixed(3), "mono"],
+          ]);
+          $("d-traits").innerHTML = rows
+            .map(function (r) {
+              return (
+                "<div><dt>" +
+                esc(r[0]) +
+                '</dt><dd class="' +
+                (r[2] || "") +
+                '">' +
+                esc(r[1]) +
+                "</dd></div>"
+              );
+            })
+            .join("");
+          $("a-open").href = liveUrl(t);
+          $("a-gallery").href = liveUrl(t, "gallery=1");
+          $("d-fine").textContent = "hash " + t.hash + " · " + t.name;
+          showStill(t);
+          var drawer = $("drawer");
+          drawer.classList.add("open");
+          drawer.setAttribute("aria-hidden", "false");
+          $("scrim").classList.add("on");
+          document.querySelectorAll(".card").forEach(function (c) {
+            c.classList.toggle("active", +c.dataset.id === id);
+          });
+          if (pushHistory !== false) {
+            try {
+              history.replaceState(null, "", "#id=" + id);
+            } catch (e) {}
+          }
+        }
+        function showStill(t) {
+          var stage = $("stage");
+          var fr = stage.querySelector("iframe");
+          if (fr) fr.remove();
+          var note = stage.querySelector(".live-note");
+          if (note) note.remove();
+          var img = $("d-img");
+          img.hidden = false;
+          img.src = t.thumb;
+          img.alt = t.name;
+          $("d-live").textContent = "▶ live";
+        }
+        function toggleLive() {
+          var t = byId[state.open];
+          if (!t) return;
+          if (state.live) {
+            state.live = false;
+            showStill(t);
+            return;
+          }
+          state.live = true;
+          var stage = $("stage");
+          $("d-img").hidden = true;
+          var fr = document.createElement("iframe");
+          fr.src = liveUrl(t, "intro=0");
+          fr.allow = "fullscreen";
+          fr.title = t.name;
+          stage.appendChild(fr);
+          var note = document.createElement("div");
+          note.className = "live-note";
+          note.textContent = "live · the piece is running in this frame";
+          stage.appendChild(note);
+          $("d-live").textContent = "■ still";
+        }
+        function closeDrawer() {
+          state.open = null;
+          state.live = false;
+          var drawer = $("drawer");
+          drawer.classList.remove("open");
+          drawer.setAttribute("aria-hidden", "true");
+          $("scrim").classList.remove("on");
+          var fr = $("stage").querySelector("iframe");
+          if (fr) fr.remove();
+          document.querySelectorAll(".card.active").forEach(function (c) {
+            c.classList.remove("active");
+          });
+          try {
+            history.replaceState(null, "", location.pathname + location.search);
+          } catch (e) {}
+        }
+        function step(dir) {
+          if (state.open == null) return;
+          var idx = current.findIndex(function (t) {
+            return t.id === state.open;
+          });
+          if (idx < 0) return;
+          var n = current[(idx + dir + current.length) % current.length];
+          openToken(n.id);
+        }
+        function toast(msg) {
+          var el = $("toast");
+          el.textContent = msg;
+          el.classList.add("show");
+          clearTimeout(toast._t);
+          toast._t = setTimeout(function () {
+            el.classList.remove("show");
+          }, 1400);
+        }
+
+        // ---- events ----
+        document.addEventListener("click", function (e) {
+          var fam = e.target.closest("[data-fam]");
+          if (fam) {
+            state.family =
+              state.family === fam.dataset.fam ? null : fam.dataset.fam;
+            render();
+            return;
+          }
+          var chip = e.target.closest(".chip[data-k]");
+          if (chip) {
+            var k = chip.dataset.k;
+            state.filters[k] =
+              state.filters[k] === chip.dataset.v ? null : chip.dataset.v;
+            render();
+            return;
+          }
+          var card = e.target.closest(".card[data-id]");
+          if (card) {
+            openToken(+card.dataset.id);
+            return;
+          }
+        });
+        $("q").addEventListener("input", function (e) {
+          state.q = e.target.value;
+          render();
+        });
+        $("sort").addEventListener("change", function (e) {
+          state.sort = e.target.value;
+          render();
+        });
+        $("reset").addEventListener("click", function () {
+          state.family = null;
+          state.q = "";
+          $("q").value = "";
+          TRAITS.forEach(function (k) {
+            state.filters[k] = null;
+          });
+          render();
+        });
+        $("d-close").addEventListener("click", closeDrawer);
+        $("scrim").addEventListener("click", closeDrawer);
+        $("d-prev").addEventListener("click", function () {
+          step(-1);
+        });
+        $("d-next").addEventListener("click", function () {
+          step(1);
+        });
+        $("d-live").addEventListener("click", toggleLive);
+        $("a-copy").addEventListener("click", function () {
+          var t = byId[state.open];
+          if (!t) return;
+          var url = liveUrl(t);
+          try {
+            var abs = new URL(url, location.href).href;
+            navigator.clipboard.writeText(abs).then(
+              function () {
+                toast("copied " + abs);
+              },
+              function () {
+                toast(abs);
+              },
+            );
+          } catch (e) {
+            toast(url);
+          }
+        });
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "/" && document.activeElement !== $("q")) {
+            e.preventDefault();
+            $("q").focus();
+            return;
+          }
+          if (e.key === "Escape") {
+            if (state.open != null) closeDrawer();
+            else if (document.activeElement === $("q")) $("q").blur();
+            return;
+          }
+          if (state.open != null && document.activeElement !== $("q")) {
+            if (e.key === "ArrowLeft") step(-1);
+            if (e.key === "ArrowRight") step(1);
+            if (e.key.toLowerCase() === "l") toggleLive();
+          }
+        });
+
+        $("foot").textContent =
+          "source docs/active/token-metadata-v1.json · previews dist/metadata/previews · bundle " +
+          (C.bundleSha256 ? C.bundleSha256.slice(0, 16) + "…" : "unbuilt") +
+          " · live base " +
+          C.liveBase;
+
+        render();
+        if (state.open != null) openToken(state.open, false);
+      })();
+    </script>
+  </body>
+</html>

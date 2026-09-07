@@ -265,6 +265,18 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   profile boots at the stored verdict, and one step followed by 50 s of
   the director frames the token normally. `tools/film-strip.mjs --hold`
   keeps a run alive after the film ends and writes an end frame.
+- **Collection viewer** — `collection.html`, one self-contained page
+  (3.4 MB, JPEG thumbnails inlined) built by `tools/build-collection.py`
+  from the identity table, the generated metadata and the previews:
+  family list with counts and bars, palette / temperament / signature /
+  spin / doppler / exposure chips with live counts, search by id, family
+  or seed, sort by id, family, brightness or palette, and a drawer per
+  token with the preview, description, every trait, the seed, "Open
+  live", "Gallery mode", "Copy link", prev / next (arrow keys) and a
+  "live" toggle that runs the piece in the frame. Live links are
+  `./index.html?id=N` next to the app (folder, gateway or the site);
+  `--live-base` points them elsewhere and `--artifact` writes the
+  body-only copy claude.ai hosts. Opens with `#id=N` to land on a token.
 - **Token mode on phones, and a gallery mode** (launch board p1-mobile,
   p1-gallery). Under `(max-width: 640px)` or a coarse pointer the token
   bar spans the bottom and wraps into touch-sized rows (min 40 px), the
