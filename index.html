@@ -1640,6 +1640,9 @@
       // Density level → TEX_SIZE. Mutable so the user can resize live.
       // See BODY_COUNT.md. MAX_BODIES is always TEX_SIZE².
       const DENSITY_LEVELS = {
+        // Phone tiers (the bodies toggle cycles 1k → 2k → 4k there).
+        micro: { texSize: 32, label: "micro", shortCount: "1k" },
+        mini: { texSize: 45, label: "mini", shortCount: "2k" },
         lite: { texSize: 64, label: "lite", shortCount: "4k" },
         standard: { texSize: 128, label: "standard", shortCount: "16k" },
         dense: { texSize: 181, label: "dense", shortCount: "33k" },
@@ -1664,6 +1667,8 @@
         },
       };
       const DENSITY_ORDER = [
+        "micro",
+        "mini",
         "lite",
         "standard",
         "dense",
@@ -14970,8 +14975,16 @@
       // universe from its seed (same as Return), so the hint says so.
       // A manual pick is stored and the watchdog stops stepping the tier
       // (its render-scale and lean levers still apply).
+      // Phones cycle 1k → 2k → 4k (fill-bound; 16k and up is a slideshow
+      // there, INTERACTIVE_NFT.md §8.3); desktops toggle 33k ↔ 65k.
+      function tokenBodiesCycle() {
+        return isMobileDevice()
+          ? ["micro", "mini", "lite"]
+          : ["dense", "lush"];
+      }
       function tokenBodiesPair() {
-        return isMobileDevice() ? ["lite", "standard"] : ["dense", "lush"];
+        const c = tokenBodiesCycle();
+        return [c[0], c[c.length - 1]];
       }
       function tokenBodiesLabel() {
         const lvl = DENSITY_LEVELS[currentDensityKey];
@@ -14986,8 +14999,10 @@
       }
       function tokenBodiesToggle() {
         if (rebuildingPipeline) return;
-        const pair = tokenBodiesPair();
-        const next = currentDensityKey === pair[1] ? pair[0] : pair[1];
+        const cycle = tokenBodiesCycle();
+        const i = cycle.indexOf(currentDensityKey);
+        // Off the cycle (a watchdog verdict, ?objects=) → its lightest step.
+        const next = i < 0 ? cycle[0] : cycle[(i + 1) % cycle.length];
         const perf = loadTokenPerf() || {};
         perf.tier = next;
         perf.manual = true;

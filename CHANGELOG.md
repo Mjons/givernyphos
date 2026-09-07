@@ -340,6 +340,12 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   lean levers still apply. Verified headless: 65k → 33k → 65k in under
   five seconds, no errors. The site's two live frames now run at 33k
   (`objects=dense`), the homepage default.
+- **Phones: bodies cycle 1k → 2k → 4k.** Two new tiers below lite —
+  micro (32², 1k) and mini (45², 2k) — and on a phone the bodies button
+  cycles 4k → 1k → 2k → 4k instead of toggling into 16k, which a phone
+  cannot run. Desktops keep 33k ↔ 65k. The watchdog's floor on a phone
+  is now 1k. Verified with an iPhone user agent: labels 4k, 1k, 2k, 4k
+  and the HUD's 4.1k, 1.0k, 2.0k, 4.1k bodies, no errors.
 - **Site: a "Next" cue.** The chapter rail on the right is easy to
   miss, so a pill sits at the bottom centre once you have entered —
   "Next · Not a rendering" with a bobbing chevron — naming the chapter
