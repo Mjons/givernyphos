@@ -5719,7 +5719,12 @@
           return;
         }
         try {
-          const adapter = await navigator.gpu.requestAdapter();
+          // Ask for the discrete GPU: on laptops and multi-GPU desktops
+          // the default adapter can be the integrated one
+          // (PERFORMANCE_NEXT.md, housekeeping).
+          const adapter = await navigator.gpu.requestAdapter({
+            powerPreference: "high-performance",
+          });
           if (!adapter) {
             wgpuSim.reason = "no adapter";
             return;
