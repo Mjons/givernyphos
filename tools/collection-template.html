@@ -697,6 +697,10 @@
           var sep = base.indexOf("?") >= 0 ? "&" : "?";
           return base + sep + "id=" + t.id + (extra ? "&" + extra : "");
         }
+        // A hosted copy cannot open file:// links (browsers block it):
+        // then the live buttons become "copy the local link".
+        var LOCAL_ONLY =
+          /^file:/i.test(C.liveBase) && !/^file:/i.test(location.protocol);
 
         function visible() {
           var q = state.q.trim().toLowerCase();
@@ -910,6 +914,11 @@
             .join("");
           $("a-open").href = liveUrl(t);
           $("a-gallery").href = liveUrl(t, "gallery=1");
+          $("a-open").hidden = LOCAL_ONLY;
+          $("a-gallery").hidden = LOCAL_ONLY;
+          $("d-live").hidden = LOCAL_ONLY;
+          $("a-copy").textContent = LOCAL_ONLY ? "Copy local link" : "Copy link";
+          $("a-copy").classList.toggle("primary", LOCAL_ONLY);
           $("d-fine").textContent = "hash " + t.hash + " · " + t.name;
           showStill(t);
           var drawer = $("drawer");
@@ -1083,7 +1092,10 @@
           "source docs/active/token-metadata-v1.json · previews dist/metadata/previews · bundle " +
           (C.bundleSha256 ? C.bundleSha256.slice(0, 16) + "…" : "unbuilt") +
           " · live base " +
-          C.liveBase;
+          C.liveBase +
+          (LOCAL_ONLY
+            ? " · this copy is hosted, so live links are copied, not opened — run collection.html from the app folder to open them"
+            : "");
 
         render();
         if (state.open != null) openToken(state.open, false);
