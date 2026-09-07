@@ -21693,7 +21693,26 @@
 
       // -------- Title overlay helpers --------
       let _titleHideTimer = null;
+      // ?bare=1 — the piece with none of its chrome and none of its own
+      // music: for the collection site's live frames, where the shell
+      // carries the titles and the soundtrack. Hides HUD, rail, toasts,
+      // film and tour title cards, the token bar and hint; film music
+      // events are ignored.
+      let bareMode = false;
+      function installBareMode() {
+        bareMode = true;
+        document.body.classList.add("bare");
+        const st = document.createElement("style");
+        st.textContent = `
+          body.bare #hud, body.bare #rail, body.bare #panel, body.bare #toast,
+          body.bare #film-title, body.bare #token-bar, body.bare #token-hint,
+          body.bare #token-features, body.bare #fps-display, body.bare #scene-browser,
+          body.bare #density-modal, body.bare #density-revert-banner,
+          body.bare #flash { display: none !important; }`;
+        document.head.appendChild(st);
+      }
       function showFilmTitle(main, sub, holdMs = 2500, style) {
+        if (bareMode) return;
         const el = $("#film-title");
         if (!el) return;
         el.classList.toggle("lower", style === "lower");
@@ -23324,6 +23343,7 @@
       // -------- Music event helper --------
       let _musicFadeTimer = null;
       function handleFilmMusicEvent(ev) {
+        if (bareMode) return; // the host page owns the soundtrack
         // Film volume changes are transient — write audio.volume directly
         // rather than going through music.setVolume(), which persists to
         // localStorage. A film that fades to 0 must not leave the user's
@@ -26638,6 +26658,7 @@
         loop();
         // Token mode opens with its generated tour (TOKEN_EXPERIENCE.md §1).
         if (TOKEN.active && !TOKEN.preview) tokenStartTour();
+        if (url.searchParams.get("bare") === "1") installBareMode();
         // ?film=<key> starts a movie straight away (the intro is skipped).
         if (!TOKEN.active) {
           const fk = url.searchParams.get("film");

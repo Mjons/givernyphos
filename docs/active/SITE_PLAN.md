@@ -1,5 +1,5 @@
 ---
-status: contract for the collection site build, 2026-09-07 — three agents in parallel, then integration
+status: built 2026-09-07 — the contract below was followed; site/README.md documents the content and assets; open site/index.html
 last-updated: 2026-09-07
 ---
 

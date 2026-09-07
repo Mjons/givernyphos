@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PhosAudio · test shell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="audio.css" />
+<style>
+  :root {
+    --ground: #07090f; --ink: #e6eaf5; --muted: #8b93ad; --line: #1c2338; --accent: #8ab4ff;
+  }
+  html, body { background: var(--ground); color: var(--ink); margin: 0; }
+  body {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif; font-size: 13px; line-height: 1.5;
+    padding: 28px 24px 120px; max-width: 900px;
+  }
+  h1 { font-weight: 400; font-size: 18px; letter-spacing: 0.12em; font-variant: small-caps; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 22px; }
+  section { margin: 0 0 18px; }
+  h2 { font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--muted); font-weight: 500; margin: 0 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  button, select {
+    appearance: none; background: transparent; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 12px; font: inherit; font-size: 12px; cursor: pointer; min-height: 32px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--ground); border-color: var(--accent); }
+  select { padding-right: 24px; }
+  pre {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; color: var(--ink);
+    background: rgba(255,255,255,0.03); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto;
+  }
+  #log { color: var(--muted); }
+  #log b { color: var(--ink); font-weight: 500; }
+  .note { color: var(--muted); font-size: 11px; margin-top: 6px; }
+  /* the gate the real shell would show over everything */
+  #gate {
+    position: fixed; inset: 0; background: var(--ground); display: grid; place-items: center; z-index: 100;
+    transition: opacity 500ms ease;
+  }
+  #gate.gone { opacity: 0; pointer-events: none; }
+  #gate .box { text-align: center; }
+  #gate h1 { font-size: 22px; letter-spacing: 0.28em; }
+  #gate .row { justify-content: center; margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="box">
+    <h1>Giverny Phos</h1>
+    <p class="sub">test shell for <code>window.PhosAudio</code></p>
+    <div class="row">
+      <button id="enter" class="primary">Enter with sound</button>
+      <button id="enter-silent">Enter silent</button>
+    </div>
+  </div>
+</div>
+
+<h1>PhosAudio · test shell</h1>
+<p class="sub">A fake shell: chapters, mute, next, duck, per-track play, idle. State prints below on every event.</p>
+
+<section>
+  <h2>Chapters</h2>
+  <div class="row" id="chapters"></div>
+  <div class="note">Entering a chapter crossfades (2.5 s, after a 300 ms debounce) if its track differs. <code>nomap</code> has no mapping: it keeps whatever is playing.</div>
+</section>
+
+<section>
+  <h2>Player</h2>
+  <div class="row">
+    <button id="mute">Mute</button>
+    <button id="next">Next</button>
+    <button id="duck">Duck</button>
+    <button id="idle">body.idle</button>
+    <select id="track"></select>
+    <button id="play">playTrack(title)</button>
+  </div>
+</section>
+
+<section>
+  <h2>state()</h2>
+  <pre id="state">—</pre>
+</section>
+
+<section>
+  <h2>events</h2>
+  <pre id="log"></pre>
+</section>
+
+<script src="audio.js"></script>
+<script>
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var logEl = $("log"), stateEl = $("state");
+    var t0 = performance.now();
+    function log(kind, x) {
+      var t = ((performance.now() - t0) / 1000).toFixed(2);
+      logEl.innerHTML = "<b>" + t + "s " + kind + "</b> " + (x == null ? "" : JSON.stringify(x)) + "\n" + logEl.innerHTML;
+    }
+    function show() {
+      var s = PhosAudio.state();
+      stateEl.textContent = JSON.stringify(s, null, 2);
+      $("mute").classList.toggle("on", s.muted);
+      $("mute").textContent = s.muted ? "Unmute" : "Mute";
+      $("duck").classList.toggle("on", s.ducked);
+      Array.prototype.forEach.call(document.querySelectorAll("#chapters button"), function (b) {
+        b.classList.toggle("on", b.dataset.key === s.chapter);
+      });
+    }
+
+    PhosAudio.init({ base: "../ssi_tracks/", chapters: PhosAudio.defaultChapters, volume: 0.6 });
+    PhosAudio.on("track", function (t) { log("track", t); show(); });
+    PhosAudio.on("state", function (s) { log("state", { playing: s.playing, muted: s.muted, ducked: s.ducked, chapter: s.chapter, reason: s.reason }); show(); });
+
+    var keys = ["enter", "piece", "families", "hundred", "mint", "music", "credits", "nomap"];
+    keys.forEach(function (k) {
+      var b = document.createElement("button");
+      b.textContent = k; b.dataset.key = k;
+      b.addEventListener("click", function () { PhosAudio.setChapter(k); });
+      $("chapters").appendChild(b);
+    });
+    PhosAudio.catalogue.forEach(function (t) {
+      var o = document.createElement("option");
+      o.value = t.title; o.textContent = t.title;
+      $("track").appendChild(o);
+    });
+
+    function enter(silent) {
+      if (silent) PhosAudio.setMuted(true);
+      $("gate").classList.add("gone");
+      return PhosAudio.enter().then(function (s) { log("enter resolved", s); show(); return s; });
+    }
+    $("enter").addEventListener("click", function () { enter(false); });
+    $("enter-silent").addEventListener("click", function () { enter(true); });
+    $("mute").addEventListener("click", function () { PhosAudio.toggleMute(); });
+    $("next").addEventListener("click", function () { PhosAudio.next(); });
+    $("duck").addEventListener("click", function () { PhosAudio.duck(!PhosAudio.state().ducked); });
+    $("idle").addEventListener("click", function () {
+      document.body.classList.toggle("idle");
+      this.classList.toggle("on", document.body.classList.contains("idle"));
+    });
+    $("play").addEventListener("click", function () {
+      $("gate").classList.add("gone");
+      PhosAudio.playTrack($("track").value).then(function (ok) { log("playTrack →", ok); show(); });
+    });
+    show();
+  })();
+</script>
+</body>
+</html>

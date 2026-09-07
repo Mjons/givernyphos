@@ -698,6 +698,8 @@
             10,
           );
           if (openId >= 1 && byId[openId]) state.open = openId;
+          var famHash = (u.hash.match(/^#family=([\w-]+)/) || [])[1];
+          if (famHash) state.family = famHash; // the site's family links
         } catch (e) {}
 
         var $ = function (id) {

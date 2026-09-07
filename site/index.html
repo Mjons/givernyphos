@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <title>Giverny Phos · The Hundred</title>
+    <meta
+      name="description"
+      content="A hundred living galaxies. Each token is a seed; every viewing is a performance."
+    />
+    <meta name="theme-color" content="#07090f" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Giverny Phos" />
+    <meta property="og:title" content="Giverny Phos · The Hundred" />
+    <meta
+      property="og:description"
+      content="A hundred living galaxies. Each token is a seed; every viewing is a performance."
+    />
+    <meta property="og:image" content="assets/og.jpg" />
+    <meta property="og:url" content="https://six-windows-tym8.vercel.app/work/giverny-phos" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@unrealape" />
+    <meta name="twitter:title" content="Giverny Phos · The Hundred" />
+    <meta name="twitter:image" content="assets/og.jpg" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500&display=swap"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <link rel="stylesheet" href="audio.css" />
+  </head>
+  <body class="pre">
+    <!-- The gate: the hero with the lights off. Same masthead geometry as
+         the hero below it, so Enter dissolves the ground and the title
+         stays put while the live sky arrives underneath. -->
+    <div id="gate" role="dialog" aria-modal="true" aria-labelledby="gate-name">
+      <img class="poster" alt="" aria-hidden="true" />
+      <div class="grid stage">
+        <div class="masthead text">
+          <h1 class="name" id="gate-name">Giverny Phos</h1>
+          <p class="sub" id="gate-sub">The Hundred</p>
+          <p class="line" id="gate-line">
+            A hundred living galaxies. Each token is a seed; every viewing is a performance.
+          </p>
+          <div class="actions">
+            <button type="button" class="enter" id="enter-sound">Enter with sound</button>
+            <button type="button" class="enter quiet" id="enter-silent">Enter silent</button>
+          </div>
+          <div class="notice" id="notice" hidden></div>
+        </div>
+      </div>
+    </div>
+
+    <nav id="rail" aria-label="Chapters"></nav>
+    <main id="chapters"></main>
+
+    <script src="content.js"></script>
+    <script src="audio.js"></script>
+    <script src="site.js"></script>
+  </body>
+</html>

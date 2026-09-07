@@ -1,0 +1,897 @@
+/* site.css — the collection site shell (agent A). Single dark theme,
+   painted explicitly. Palette, faces and the small-caps tracking come
+   from the app (root index.html) and docs/active/SITE_PLAN.md §4. */
+
+:root {
+  color-scheme: dark;
+  --ground: #07090f;
+  --ink: #e6eaf5;
+  --muted: #8b93ad;
+  --line: #1c2338;
+  --accent: #8ab4ff;
+  --well: #0b0e17;                 /* the second plane: sheet cells, strip images */
+  --hair: rgba(230, 234, 245, 0.22); /* a hairline that reads on the ground */
+  --serif: "Cormorant Garamond", "Cormorant", Georgia, "Times New Roman", serif;
+  --sans: "Inter", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --gutter: clamp(20px, 6vw, 104px);
+  --measure: 32rem;
+  --masthead-top: 44vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+html {
+  background: var(--ground);
+  color: var(--ink);
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 17px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+body.pre {
+  overflow: hidden;
+  height: 100vh;
+}
+::selection {
+  background: rgba(138, 180, 255, 0.32);
+}
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button {
+  font: inherit;
+  color: inherit;
+}
+img {
+  max-width: 100%;
+}
+
+/* ---- the app's voice: small caps, wide tracking ---- */
+.sc {
+  font-family: var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+}
+
+/* ---- the twelve-column stage ---- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: 24px;
+  padding-inline: var(--gutter);
+}
+.text {
+  grid-column: 2 / span 6;
+  min-width: 0;
+}
+.wide {
+  grid-column: 2 / span 10;
+  min-width: 0;
+}
+
+/* ---- gate ---- */
+#gate {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--ground);
+  overflow: hidden;
+}
+#gate .poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.34;
+  filter: saturate(0.85);
+}
+#gate .poster:not([src]) {
+  display: none;
+}
+#gate .stage {
+  position: relative;
+  z-index: 1;
+}
+#gate .actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px 26px;
+  margin-top: 40px;
+  transition: opacity 500ms var(--ease);
+}
+.enter {
+  cursor: pointer;
+  padding: 15px 24px 14px;
+  border: 1px solid rgba(230, 234, 245, 0.5);
+  border-radius: 2px;
+  background: rgba(7, 9, 15, 0.35);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 500;
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+  transition:
+    border-color 200ms var(--ease),
+    background 200ms var(--ease),
+    color 200ms var(--ease);
+}
+.enter:hover {
+  border-color: var(--ink);
+  background: rgba(230, 234, 245, 0.08);
+}
+.enter.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding-inline: 4px;
+}
+.enter.quiet:hover {
+  color: var(--ink);
+  background: transparent;
+}
+#gate.leaving .actions,
+#gate.leaving .line {
+  opacity: 0;
+}
+#gate.leaving {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 1600ms var(--ease) 350ms;
+}
+#gate.gone {
+  display: none;
+}
+
+/* ---- masthead: shared by the gate and the hero so the dissolve keeps
+        the title still while the sky arrives under it ---- */
+.stage {
+  min-height: 100vh;
+  min-height: 100svh;
+  align-content: start;
+  padding-top: var(--masthead-top);
+  padding-bottom: 10vh;
+}
+.masthead {
+  position: relative;
+  z-index: 2;
+  pointer-events: none;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.7),
+    0 2px 28px rgba(0, 0, 0, 0.55);
+}
+.masthead a,
+.masthead button {
+  pointer-events: auto;
+}
+.masthead .name {
+  margin: 0;
+  font: 500 clamp(26px, 3.6vw, 52px) / 1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.32em;
+  color: var(--ink);
+}
+.masthead .sub {
+  margin: 16px 0 0;
+  font: 400 11px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.42em;
+  color: var(--ink);
+  opacity: 0.78;
+}
+.masthead .line {
+  margin: 30px 0 0;
+  max-width: 21em;
+  font: italic 400 clamp(20px, 2.1vw, 29px) / 1.32 var(--serif);
+  color: var(--ink);
+  transition: opacity 500ms var(--ease);
+}
+.masthead .body {
+  margin-top: 22px;
+  max-width: 28rem;
+  font-size: 15px;
+  color: var(--muted);
+}
+.masthead .body p {
+  margin: 0 0 0.9em;
+}
+
+/* the "content.js not loaded" notice */
+.notice {
+  margin-top: 28px;
+  max-width: 34rem;
+  padding: 16px 20px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: rgba(7, 9, 15, 0.8);
+  font: 400 13px/1.6 var(--mono);
+  color: var(--ink);
+  pointer-events: auto;
+}
+.notice b {
+  font-weight: 500;
+  color: var(--accent);
+}
+
+/* ---- chapters ---- */
+.chapter {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100svh;
+}
+.chapter.flat {
+  padding-top: 12vh;
+  padding-bottom: 12vh;
+}
+.chapter.flat > .grid {
+  align-content: start;
+}
+.chapter.live > .grid {
+  position: relative;
+  z-index: 2;
+  min-height: 100vh;
+  min-height: 100svh;
+  align-content: end;
+  padding-bottom: 14vh;
+  pointer-events: none;
+}
+.chapter.live .text a,
+.chapter.live .text button {
+  pointer-events: auto;
+}
+.chapter.live .text {
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.7),
+    0 2px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* title card: a hairline draws in, the text fades */
+.rule {
+  display: block;
+  width: 0;
+  height: 1px;
+  margin-bottom: 26px;
+  background: var(--hair);
+  transition: width 1400ms var(--ease);
+}
+.chapter.seen .rule {
+  width: 100%;
+}
+.card {
+  opacity: 0;
+  transition: opacity 1100ms var(--ease) 250ms;
+}
+.chapter.seen .card {
+  opacity: 1;
+}
+.kicker {
+  margin: 0 0 12px;
+  font: italic 400 clamp(18px, 1.7vw, 23px) / 1.35 var(--serif);
+  color: var(--muted);
+}
+.title {
+  margin: 0 0 30px;
+  font: 300 clamp(40px, 6vw, 88px) / 0.98 var(--serif);
+  letter-spacing: -0.005em;
+  color: var(--ink);
+}
+.body p {
+  margin: 0 0 1.15em;
+  max-width: var(--measure);
+}
+.body p:last-child {
+  margin-bottom: 0;
+}
+.chapter.live .body {
+  font-size: 16px;
+}
+
+/* the sky behind a live chapter */
+.sky {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--ground);
+}
+.sky .poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.92;
+}
+.sky .poster:not([src]) {
+  display: none;
+}
+.sky .live-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
+  opacity: 0;
+  transition: opacity 1200ms var(--ease);
+}
+.sky .live-frame.on {
+  opacity: 1;
+}
+.sky::after {
+  /* a soft scrim under the text column only; the sim stays interactive */
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 48%;
+  background: linear-gradient(to top, rgba(7, 9, 15, 0.72), rgba(7, 9, 15, 0));
+  pointer-events: none;
+}
+.scene-data {
+  position: absolute;
+  right: var(--gutter);
+  bottom: 5vh;
+  z-index: 3;
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  font: 400 11px/1 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-shadow: 0 1px 4px #000;
+  transition: opacity 600ms var(--ease);
+}
+.scene-data .live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  vertical-align: 1px;
+}
+.scene-data a {
+  color: var(--muted);
+  border-bottom: 1px solid var(--hair);
+  padding-bottom: 2px;
+}
+.scene-data a:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.open-live {
+  display: inline-block;
+  padding: 13px 20px 12px;
+  border: 1px solid rgba(230, 234, 245, 0.5);
+  border-radius: 2px;
+  background: rgba(7, 9, 15, 0.5);
+  color: var(--ink) !important;
+  font: 500 11px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+  border-bottom-width: 1px !important;
+}
+.open-live:hover {
+  background: var(--ink);
+  color: var(--ground) !important;
+}
+
+/* ---- progress rail ---- */
+#rail {
+  position: fixed;
+  right: 22px;
+  top: 50%;
+  z-index: 40;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  transition: opacity 700ms var(--ease);
+}
+body.pre #rail {
+  opacity: 0;
+  pointer-events: none;
+}
+body.idle #rail {
+  opacity: 0.3;
+}
+#rail button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  font: 400 10px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+  text-shadow: 0 1px 4px #000;
+  transition: color 300ms var(--ease);
+}
+#rail button i {
+  display: block;
+  width: 14px;
+  height: 1px;
+  background: currentColor;
+  transition:
+    width 400ms var(--ease),
+    background 400ms var(--ease);
+}
+#rail button:hover {
+  color: var(--ink);
+}
+#rail button.current {
+  color: var(--ink);
+}
+#rail button.current i {
+  width: 30px;
+  background: var(--accent);
+}
+
+/* ---- families: the filmstrip ---- */
+.strip-head {
+  display: flex;
+  justify-content: flex-end;
+  gap: 22px;
+  margin: 36px 0 14px;
+}
+.strip-head button {
+  border: 0;
+  background: none;
+  padding: 6px 0;
+  cursor: pointer;
+  color: var(--muted);
+  font: 400 11px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+}
+.strip-head button:hover {
+  color: var(--ink);
+}
+.strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: min(78vw, 400px);
+  gap: 28px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  padding-inline: var(--gutter);
+  scroll-padding-inline: var(--gutter);
+  padding-bottom: 8px;
+  scrollbar-width: none;
+}
+.strip::-webkit-scrollbar {
+  display: none;
+}
+.strip figure {
+  margin: 0;
+  scroll-snap-align: start;
+  min-width: 0;
+}
+.strip .fam-img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: var(--well);
+  transition: filter 400ms var(--ease);
+}
+.strip figure:hover .fam-img {
+  filter: brightness(1.12);
+}
+.strip figcaption {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.fam-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+.fam-name {
+  font: 500 15px/1.2 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+.fam-name:hover {
+  color: var(--accent);
+}
+.fam-meta {
+  font: 400 11px/1.6 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.fam-meta.rare {
+  color: var(--ink);
+}
+.fam-sentence {
+  margin: 8px 0 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.fam-links {
+  margin-top: 12px;
+  font: 400 10px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.26em;
+  color: var(--muted);
+}
+.fam-links a {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 3px;
+}
+.fam-links a:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+/* ---- the hundred: a contact sheet ---- */
+.sheet {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 3px;
+  margin: 40px var(--gutter) 0;
+}
+.sheet a {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: var(--well);
+}
+.sheet img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.84;
+  transition: opacity 300ms var(--ease);
+}
+.sheet a:hover img,
+.sheet a:focus-visible img {
+  opacity: 1;
+}
+.sheet .id {
+  position: absolute;
+  left: 7px;
+  bottom: 5px;
+  font: 400 10px/1 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  text-shadow: 0 1px 3px #000;
+  opacity: 0;
+  transition: opacity 200ms var(--ease);
+}
+.sheet a:hover .id,
+.sheet a:focus-visible .id {
+  opacity: 1;
+}
+.sheet-note {
+  margin: 16px var(--gutter) 0;
+  font: 400 11px/1.6 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* ---- mint ---- */
+.question {
+  margin: 12vh 0 0;
+  grid-column: 2 / span 10;
+  font: italic 400 clamp(32px, 5.2vw, 74px) / 1.08 var(--serif);
+  color: var(--ink);
+  max-width: 14em;
+}
+.mint-cols {
+  grid-column: 2 / span 9;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 56px;
+  margin-top: 48px;
+  align-items: start;
+}
+.mint-cols .detail {
+  margin: 0 0 1.1em;
+  max-width: var(--measure);
+  color: var(--ink);
+}
+.mint-cols .rule-text {
+  margin: 0;
+  max-width: var(--measure);
+  color: var(--muted);
+}
+.facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font: 400 12px/1.5 var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.facts li {
+  padding: 11px 0;
+  border-top: 1px solid var(--line);
+}
+.facts li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+.cta {
+  display: inline-block;
+  margin-top: 30px;
+  padding: 15px 26px 14px;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  color: var(--ink);
+  font: 500 12px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+  transition:
+    background 200ms var(--ease),
+    color 200ms var(--ease);
+}
+.cta:hover {
+  background: var(--ink);
+  color: var(--ground);
+}
+
+/* ---- soundtrack ---- */
+.tracks {
+  grid-column: 2 / span 10;
+  list-style: none;
+  margin: 44px 0 0;
+  padding: 0;
+  columns: 3;
+  column-gap: 48px;
+}
+.tracks li {
+  break-inside: avoid;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+  font-size: 15px;
+  color: var(--ink);
+}
+.tracks .n {
+  flex: 0 0 2.2ch;
+  font: 400 11px/1 var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.tracks .t {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tracks .play {
+  border: 0;
+  background: none;
+  padding: 4px 0;
+  cursor: pointer;
+  color: var(--muted);
+  font: 400 10px/1 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.26em;
+  opacity: 0;
+  transition:
+    opacity 200ms var(--ease),
+    color 200ms var(--ease);
+}
+.tracks li:hover .play,
+.tracks .play:focus-visible {
+  opacity: 1;
+}
+.tracks .play:hover {
+  color: var(--ink);
+}
+.tracks li.now .t {
+  color: var(--accent);
+}
+.tracks li.now .play {
+  opacity: 1;
+  color: var(--accent);
+}
+.tracks-note {
+  grid-column: 2 / span 10;
+  margin: 18px 0 0;
+  font: 400 11px/1.6 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* ---- credits ---- */
+.credits-list {
+  display: grid;
+  grid-template-columns: 9em minmax(0, 1fr);
+  gap: 14px 28px;
+  margin: 48px 0 0;
+  padding-top: 28px;
+  border-top: 1px solid var(--line);
+  max-width: 40rem;
+}
+.credits-list dt {
+  font: 400 11px/1.9 var(--sans);
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+}
+.credits-list dd {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+}
+.credits-list a {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 2px;
+}
+.credits-list a:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.credits-list .tech {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.credits-list .tech li {
+  padding: 3px 0;
+  border-top: 1px solid var(--line);
+}
+.credits-list .tech li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.credits-list .sep {
+  color: var(--muted);
+  margin: 0 8px;
+}
+.signoff {
+  grid-column: 2 / span 8;
+  margin: 18vh 0 0;
+  font: italic 400 clamp(26px, 3.2vw, 44px) / 1.2 var(--serif);
+  color: var(--ink);
+}
+
+/* ---- responsive ---- */
+@media (max-width: 1100px) {
+  .text {
+    grid-column: 1 / span 8;
+  }
+  .wide,
+  .tracks,
+  .tracks-note,
+  .question,
+  .mint-cols,
+  .signoff {
+    grid-column: 1 / span 12;
+  }
+  .tracks {
+    columns: 2;
+  }
+}
+@media (max-width: 720px) {
+  :root {
+    --gutter: 20px;
+    --masthead-top: 36vh;
+  }
+  body {
+    font-size: 16px;
+  }
+  .grid {
+    display: block;
+  }
+  .chapter.live > .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .masthead .name {
+    letter-spacing: 0.28em;
+  }
+  .masthead .body p + p {
+    display: none;
+  }
+  .mint-cols {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 36px;
+  }
+  .tracks {
+    columns: 1;
+  }
+  .sheet {
+    grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+    gap: 2px;
+  }
+  .sheet .id {
+    display: none;
+  }
+  .tracks .play {
+    opacity: 1;
+  }
+  .credits-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px 0;
+  }
+  .credits-list dd {
+    margin-bottom: 14px;
+  }
+  .scene-data {
+    left: var(--gutter);
+    right: auto;
+    bottom: 4vh;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+  }
+  .chapter.live > .grid {
+    padding-bottom: 16vh;
+  }
+  #rail {
+    right: 12px;
+    gap: 8px;
+  }
+  #rail button span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  #rail button i {
+    width: 10px;
+  }
+  #rail button.current i {
+    width: 22px;
+  }
+  .strip-head {
+    justify-content: flex-start;
+    margin-top: 36px;
+  }
+}
+
+/* ---- motion preferences ---- */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    animation: none !important;
+  }
+  .rule {
+    width: 100%;
+  }
+  .card {
+    opacity: 1;
+  }
+}

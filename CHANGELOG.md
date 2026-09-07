@@ -287,6 +287,27 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   profile boots at the stored verdict, and one step followed by 50 s of
   the director frames the token normally. `tools/film-strip.mjs --hold`
   keeps a run alive after the film ends and writes an end frame.
+- **The collection site** (`site/`, docs/active/SITE_PLAN.md; three
+  agents in parallel — shell, audio, content — then integration). A
+  cinematic scroll-driven page next to the app: an Enter gate ("with
+  sound" / "silent") that dissolves onto the live simulation (token #63
+  in gallery mode) under the masthead; seven chapters — the piece (the
+  Rewind film running live), seventeen families as a filmstrip of
+  heroes, the hundred as a contact sheet linking into the viewer, the
+  question, the soundtrack (46 tracks, per-track play), a colophon — a
+  chapter rail, one live frame at a time (unmounted off-screen, posters
+  on touch and reduced-motion), and `PhosAudio`: two `<audio>` elements
+  crossfading 2.5 s on chapter changes with a mapping drawn from the
+  films (The Pair → Slow Weather → Long Shadow … → The Edge of Day),
+  ducking when a frame goes fullscreen, the ledger's error rules, a
+  small player pill. Assets built by `tools/build-site-assets.py` from
+  the previews (6.5 MB). Verified headless at 1600×900 and 390×844:
+  every chapter, the frame handoff, the track handoffs, zero console
+  errors. Open `site/index.html` from the app folder or the site.
+- **`?bare=1`** — the piece with none of its chrome and none of its own
+  music (HUD, rail, toasts, film and tour title cards, token bar and
+  hint hidden; film music events ignored) for the site's live frames.
+  The viewer also accepts `#family=<scene>` to open filtered.
 - **Time, in the holder's hands** (token bar "Time"): ½× · 1× · 2× · 3×
   forward or rewind at 1×, cycled by the button, stepped with `[` `]`,
   flipped with `\` (or `t`); the hint line names the state ("time ×2",
