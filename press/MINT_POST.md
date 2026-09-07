@@ -57,8 +57,16 @@ follow one star through a merger, bend the light.
 **6/**
 Ethereum, 100 tokens, one hundred seeds, no more.
 
-I'm not setting a date. I'm opening a list. Reply or DM if you'd want
-one. When it reaches 100 names, it drops.
+I'm not setting a date and I'm not taking DMs. I'm opening a list, and
+the way onto it is a comment that connects:
+
+Tell me the last time the sky stopped you. Where you were, what you
+saw, what it did to you. Two sentences is plenty.
+
+**7/**
+Why: these pieces are made to be *watched*, and I'd rather they go to
+people who watch. Every comment that answers the question gets a reply
+from me and a place on the list. When it reaches 100, it drops.
 
 The still is the token's first moments. The live piece is what it
 becomes.
@@ -98,18 +106,63 @@ the controls when you do: orbit, zoom, follow a single star through a
 merger, bend the light around the core. Ten families are common, six are
 uncommon, two are rare. A hundred seeds, on Ethereum, and no more.
 
-I'm not announcing a date. I'm opening a list. If you'd want one, say so
-here or in my DMs. When the list has a hundred names, it drops.
+I'm not announcing a date, and there's no form. There's a question.
+
+**Tell me the last time the sky stopped you.** Where you were, what you
+saw, what it did to you. Two sentences is plenty; a paragraph is
+welcome. If you'd rather, tell me which of the families above you'd want
+to live inside and why — a spiral you can fall into, a collision you can
+ride, a crystal at the moment it gives way.
+
+These pieces are made to be watched, and I'd rather they go to people
+who watch. Every comment that actually answers gets a reply from me and
+a place on the list, in the order they arrive. When the list has a
+hundred names, it drops. Nothing else gets you on it — not a wallet
+address, not "gm", not a repost.
 
 ---
 
 ## One-liner
 
 A hundred galaxies that actually run — 65k stars under real gravity in
-your browser, never the same twice. Ethereum, 100 seeds. Want one? Reply.
-The list fills to 100, then it drops.
+your browser, never the same twice. Ethereum, 100 seeds. Want one? Tell
+me the last time the sky stopped you. A hundred real answers, then it
+drops.
 
 ---
+
+## The ask — prompts that make a comment connect
+
+One prompt per post; rotate if you repost. Each is answerable by anyone,
+impossible to answer with "gm", and tied to what the work is.
+
+1. **The sky.** "Tell me the last time the sky stopped you — where you
+   were, what you saw, what it did to you." Universal, personal, and it
+   is the piece's subject.
+2. **The family.** "Which of these would you live inside, and why: a
+   spiral you can fall into, a head-on collision you can ride, a
+   crystal at the moment it gives way, a black hole's disc?" Makes them
+   read the families, and tells you the distribution people want.
+3. **The watching.** "What's a piece you've kept open on a second screen
+   for an hour? What kept you there?" Selects for the collector this is
+   for.
+4. **The star.** "You can follow one star through a galaxy merger. Whose
+   name does it carry?" Sentimental, short, and it seeds the Follow
+   feature's story later.
+
+How to run it, so the list stays honest:
+
+- State the rule once, in the post: one comment that answers the
+  question earns a reply and a place; order of arrival; nothing else
+  counts (no wallets, no "gm", no reposts).
+- Reply to every qualifying comment with one line back — that's the
+  receipt, and it doubles the thread's reach.
+- Keep the list in a plain sheet: handle, date, the sentence you liked.
+  It becomes the allowlist and, later, the mint-day thank-you thread.
+- When the count nears 100, say so publicly ("87 answers — 13 to go").
+  Close it at 100 and post the drop date within the week.
+- If the best answers exceed 100, keep the overflow as the waitlist for
+  unclaimed mints.
 
 ## Notes for posting
 
