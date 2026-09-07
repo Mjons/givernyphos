@@ -9983,7 +9983,9 @@
       composer.addPass(preBloomClampPass);
       try {
         // Harness hook: ?bloomcap=N to compare caps on the same still.
-        const bc = parseFloat(new URL(location.href).searchParams.get("bloomcap"));
+        const bc = parseFloat(
+          new URL(location.href).searchParams.get("bloomcap"),
+        );
         if (isFinite(bc) && bc > 0) preBloomClampPass.uniforms.uCap.value = bc;
       } catch (_) {}
       if (typeof window !== "undefined") {
@@ -14512,7 +14514,8 @@
         c[3] += off.x;
         c[4] += off.y;
         c[5] += off.z;
-        if (tokenFrame.last) tokenFrame.last.copy(velVar.material.uniforms.uCom.value);
+        if (tokenFrame.last)
+          tokenFrame.last.copy(velVar.material.uniforms.uCom.value);
         const dist = camera.position.distanceTo(controls.target);
         const fwd = new THREE.Vector3();
         camera.getWorldDirection(fwd);
@@ -14682,6 +14685,7 @@
           tokenWatchdog.windowMs = 2000;
         }
         const stored = loadTokenPerf();
+        if (stored && stored.manual) tokenWatchdog.manualTier = true;
         if (stored && !tokenWatchdog.test) {
           console.info(
             `[token] watchdog: stored verdict → tier ${stored.tier || "-"}, scale ${stored.scale ?? "-"}, lean ${!!stored.lean} (density now ${currentDensityKey})`,
@@ -14743,7 +14747,10 @@
         } else {
           const idx = DENSITY_ORDER.indexOf(currentDensityKey);
           const down = idx > 0 ? DENSITY_ORDER[idx - 1] : null;
-          if (!down) {
+          if (w.manualTier) {
+            w.enabled = false; // the holder chose the tier; leave it
+            lever = "holder's tier";
+          } else if (!down) {
             w.enabled = false; // the floor: nothing left to give
             lever = "floor";
           } else {
@@ -14928,10 +14935,50 @@
         tokenFrame.last.copy(com);
       }
 
+      // ---- Bodies: 33k ↔ 65k, the holder's call ----------------------
+      // The device picks the tier and the watchdog steps it down; this
+      // lets the holder choose between the two tiers that read as the
+      // same piece (dense 33k, lush 65k). A tier change regrows the
+      // universe from its seed (same as Return), so the hint says so.
+      // A manual pick is stored and the watchdog stops stepping the tier
+      // (its render-scale and lean levers still apply).
+      function tokenBodiesLabel() {
+        const lvl = DENSITY_LEVELS[currentDensityKey];
+        return lvl ? lvl.shortCount : "";
+      }
+      function tokenBodiesReflect() {
+        const b = document.querySelector('#token-bar [data-id="bodies"]');
+        if (!b) return;
+        const l = tokenBodiesLabel();
+        if (b.textContent !== l) b.textContent = l;
+        b.classList.toggle("on", currentDensityKey === "lush");
+      }
+      function tokenBodiesToggle() {
+        if (rebuildingPipeline) return;
+        const next = currentDensityKey === "lush" ? "dense" : "lush";
+        const perf = loadTokenPerf() || {};
+        perf.tier = next;
+        perf.manual = true;
+        perf.at = Date.now();
+        saveTokenPerf(perf);
+        tokenWatchdog.manualTier = true;
+        tokenNote = {
+          text:
+            "regrowing from the seed with " +
+            DENSITY_LEVELS[next].shortCount +
+            " bodies",
+          until: performance.now() + 4000,
+        };
+        tokenWatchdogStepTier(next);
+      }
+
       // Hint copy differs for touch (pinch / tap) — decided once.
       const TOKEN_COARSE_POINTER = (() => {
         try {
-          return !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+          return (
+            !!window.matchMedia &&
+            window.matchMedia("(pointer: coarse)").matches
+          );
         } catch (_) {
           return false;
         }
@@ -15010,6 +15057,7 @@
             if (fol.textContent !== txt) fol.textContent = txt;
           }
           tokenTimeReflect();
+          tokenBodiesReflect();
         }
       }
       // Deterministic still (INTERACTIVE_NFT.md §5.4): director off, no
@@ -15234,6 +15282,12 @@
           "time",
         );
         mk(
+          tokenBodiesLabel() || "65k",
+          "Bodies — toggle 33k / 65k (the universe regrows from its seed)",
+          tokenBodiesToggle,
+          "bodies",
+        );
+        mk(
           "Return",
           "Rebuild this token's universe from its seed (R)",
           tokenReturn,
@@ -15273,9 +15327,14 @@
         );
         mk("⛶", "Fullscreen", () => {
           const root = document.documentElement;
-          const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+          const fsEl =
+            document.fullscreenElement || document.webkitFullscreenElement;
           if (fsEl) {
-            (document.exitFullscreen || document.webkitExitFullscreen || (() => {})).call(document);
+            (
+              document.exitFullscreen ||
+              document.webkitExitFullscreen ||
+              (() => {})
+            ).call(document);
             return;
           }
           // Inside an iframe (the collection viewer's live drawer) this
@@ -15285,7 +15344,10 @@
           if (!req) return;
           try {
             const p = req.call(root);
-            if (p && p.catch) p.catch((e) => console.warn("[token] fullscreen refused:", e && e.message));
+            if (p && p.catch)
+              p.catch((e) =>
+                console.warn("[token] fullscreen refused:", e && e.message),
+              );
           } catch (e) {
             console.warn("[token] fullscreen refused:", e && e.message);
           }

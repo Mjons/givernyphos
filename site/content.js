@@ -223,7 +223,7 @@
       music: "The Pair",
       scene: {
         kind: "live",
-        url: "index.html?id=63&gallery=1&bare=1&intro=0",
+        url: "index.html?id=63&gallery=1&bare=1&intro=0&objects=dense",
         poster: "assets/posters/enter.jpg",
       },
     },
@@ -239,7 +239,7 @@
       music: "Slow Weather",
       scene: {
         kind: "live",
-        url: "index.html?film=rewind&bare=1&intro=0",
+        url: "index.html?film=rewind&bare=1&intro=0&objects=dense",
         poster: "assets/posters/piece.jpg",
       },
     },

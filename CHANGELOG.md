@@ -304,6 +304,14 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   the previews (6.5 MB). Verified headless at 1600×900 and 390×844:
   every chapter, the frame handoff, the track handoffs, zero console
   errors. Open `site/index.html` from the app folder or the site.
+- **Bodies, the holder's call** (token bar "65k" / "33k"): toggles
+  between the two tiers that read as the same piece — lush 65k and
+  dense 33k — regrowing the universe from its seed (the hint says so).
+  The pick is stored per device (`phos.token.perf.manual`) and the
+  watchdog stops stepping the tier afterwards; its render-scale and
+  lean levers still apply. Verified headless: 65k → 33k → 65k in under
+  five seconds, no errors. The site's two live frames now run at 33k
+  (`objects=dense`), the homepage default.
 - **Site: scroll above the fold.** The live frame swallowed every wheel
   event over the hero, so the page could not be scrolled from the top.
   The sky is now split: the left half belongs to the page (wheel and
