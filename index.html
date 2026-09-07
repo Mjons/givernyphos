@@ -1621,7 +1621,9 @@
         // render at `standard` so every capture machine takes one path.
         if (TOKEN.active) {
           try {
-            const raw = (new URL(location.href).searchParams.get("objects") || "")
+            const raw = (
+              new URL(location.href).searchParams.get("objects") || ""
+            )
               .toLowerCase()
               .trim();
             if (raw && DENSITY_LEVELS[raw]) return raw;
@@ -5310,7 +5312,14 @@
         // the WebGL renderer can sample stale-but-recent DataTextures
         // instead of stalling on a 16+ MB mapAsync every frame.
         wgpuSim.frameTick = ((wgpuSim.frameTick | 0) + 1) | 0;
-        const stride = currentReadbackStride();
+        // M9: while the WebGPU render path draws the bodies straight from
+        // the buffers (section 6b), the mirror only feeds the CPU
+        // consumers — stats, barycenter, picking, the movie's subject
+        // finder — and drops to every wgpuRender.mirrorEvery frames
+        // regardless of tier. wgpuForceMirror() refreshes it on demand.
+        const stride = wgpuRender.active
+          ? Math.max(1, wgpuRender.mirrorEvery | 0)
+          : currentReadbackStride();
         if (stride > 1 && wgpuSim.frameTick % stride !== 0) return;
         if (wgpuSim.readbackBusy) return;
         // Velocity cadence: positions must be fresh every readback (they
@@ -5318,14 +5327,25 @@
         // inputs (kind/age in .w, doppler tint, speed channel). Reading
         // them back every velStrideMul-th readback cuts bridge traffic
         // without visible lag. forceVelRead (set by wgpuUploadState)
-        // punches through so scene rewrites recolor immediately.
+        // punches through so scene rewrites recolor immediately. On the
+        // WebGPU render path the mirror is rare and CPU-only, so it
+        // always carries velocities.
         const velMul = currentVelStrideMul();
         wgpuSim.readTick = ((wgpuSim.readTick | 0) + 1) | 0;
         const wantVel =
+          wgpuRender.active ||
           velMul <= 1 ||
           wgpuSim.readTick % velMul === 0 ||
           !!wgpuSim.forceVelRead;
         wgpuSim.forceVelRead = false;
+        wgpuIssueMirror(wantVel);
+      }
+
+      // Copy the current ping-pong side into frameStaging and map it into
+      // the DataTextures (the CPU mirror). One in flight at a time
+      // (wgpuSim.readbackBusy). Resolves true when the mirror landed,
+      // false when it was dropped (epoch changed, buffers destroyed).
+      function wgpuIssueMirror(wantVel) {
         wgpuSim.readbackBusy = true;
         const device = wgpuSim.device;
         const N = wgpuSim.capacity;
@@ -5348,13 +5368,13 @@
         device.queue.submit([enc.finish()]);
         const maps = [fs[0].mapAsync(GPUMapMode.READ)];
         if (wantVel) maps.push(fs[1].mapAsync(GPUMapMode.READ));
-        Promise.all(maps)
+        return Promise.all(maps)
           .then(() => {
             if ((wgpuSim.epoch | 0) !== myEpoch) {
               // Buffers were swapped — drop this readback. fs[0]/fs[1]
               // were destroyed by wgpuAllocateBuffers; getMappedRange
               // would throw, so do nothing.
-              return;
+              return false;
             }
             const posSrc = new Float32Array(fs[0].getMappedRange());
             wgpuSim.posTex.image.data.set(posSrc);
@@ -5368,11 +5388,12 @@
             }
             wgpuSim.timing.readMs = performance.now() - t0;
             wgpuSim.readbackBusy = false;
+            return true;
           })
           .catch((e) => {
             // Density rebuild destroying buffers mid-flight is the
             // expected source of AbortError here — quiet that case.
-            if ((wgpuSim.epoch | 0) !== myEpoch) return;
+            if ((wgpuSim.epoch | 0) !== myEpoch) return false;
             console.warn("[wgpu] frame readback failed:", e);
             // Defensive: try to unmap in case one mapAsync succeeded
             // and the other rejected, leaving its partner stuck mapped.
@@ -5383,7 +5404,31 @@
               fs[1].unmap();
             } catch (_) {}
             wgpuSim.readbackBusy = false;
+            return false;
           });
+      }
+
+      // One fresh mirror on demand — click-to-follow picks, render-path
+      // switches, the ?freeze harness. Waits for an in-flight readback,
+      // then issues its own (works while paused, when wgpuFrameStep
+      // never runs). Resolves once the DataTextures hold the current
+      // buffers, so a synchronous pick right after `await` is exact.
+      async function wgpuForceMirror() {
+        if (!wgpuSim.active || !wgpuSim.buffers || rebuildingPipeline) {
+          return false;
+        }
+        let waited = 0;
+        while (wgpuSim.readbackBusy && waited < 500) {
+          await new Promise((r) => setTimeout(r, 4));
+          waited += 4;
+        }
+        if (wgpuSim.readbackBusy || !wgpuSim.buffers || rebuildingPipeline) {
+          return false;
+        }
+        return wgpuIssueMirror(true);
+      }
+      if (typeof window !== "undefined") {
+        window.__wgpuForceMirror = wgpuForceMirror;
       }
 
       // Snapshot live WebGL state into WebGPU posA/velA (which=0), do
@@ -5444,6 +5489,13 @@
         showToast("WebGPU", "active");
         bhAutoApply();
         console.info("[wgpu] activated");
+        // M9: the WebGPU point path (section 6b) rides on this backend.
+        // Bring it up if it was asked for (?render=wgpu / __setRenderPath).
+        if (wgpuRender.wanted && !wgpuRender.active) {
+          wgpuRenderActivate().catch((e) =>
+            console.warn("[render] activate failed:", e),
+          );
+        }
         return true;
       }
 
@@ -5454,6 +5506,9 @@
           console.info("[wgpu] deactivate: not active");
           return true;
         }
+        // M9: the WebGPU point path reads these buffers — it goes first.
+        // (No mirror refresh: the snapshot below carries the state over.)
+        wgpuRenderDeactivate({ mirror: false });
         // Wait for any in-flight readback so the staging buffers are
         // safe to reuse for the snapshot.
         let waited = 0;
@@ -5546,6 +5601,49 @@
         } catch (_) {}
       }
       let computeBackendPref = loadComputeBackendPref();
+      // ----- M9 URL flags (BARNES_HUT_PLAN.md §7b) -------------------
+      //   ?render=wgpu|webgl   point-rendering path (section 6b). "wgpu"
+      //                        implies the WebGPU compute backend since it
+      //                        draws straight from the compute buffers.
+      //   ?compute=webgpu|webgl  compute backend for this load only (not
+      //                        persisted) — the headless harness starts
+      //                        from an empty profile.
+      //   ?freeze=<steps>      verification harness: director/drift off,
+      //                        <steps> substeps run synchronously once the
+      //                        backend has settled, then paused.
+      // None of these are saved; a user's stored preference is untouched.
+      const urlRenderPath = (() => {
+        try {
+          const v = (new URL(location.href).searchParams.get("render") || "")
+            .toLowerCase()
+            .trim();
+          if (v === "wgpu" || v === "webgpu") return "wgpu";
+          if (v === "webgl") return "webgl";
+        } catch (_) {}
+        return null;
+      })();
+      const urlComputePref = (() => {
+        try {
+          const v = (new URL(location.href).searchParams.get("compute") || "")
+            .toLowerCase()
+            .trim();
+          if (v === "webgpu" || v === "wgpu") return "webgpu";
+          if (v === "webgl") return "webgl";
+        } catch (_) {}
+        return null;
+      })();
+      const freezeRun = (() => {
+        try {
+          const raw = new URL(location.href).searchParams.get("freeze");
+          if (raw == null) return null;
+          const v = parseInt(raw, 10);
+          if (isFinite(v) && v >= 0)
+            return { steps: v, state: "wait", waited: 0 };
+        } catch (_) {}
+        return null;
+      })();
+      if (urlComputePref) computeBackendPref = urlComputePref;
+      else if (urlRenderPath === "wgpu") computeBackendPref = "webgpu";
       // List of pill-pair refresh callbacks the panel registers so
       // applyComputeBackend can update their .active class after a
       // successful activate/deactivate. Cleared on panel rebuild.
@@ -7248,8 +7346,14 @@
           sz[i] = rand() < 0.025 ? 2.0 + rand() * 1.4 : 0.7 + rand() * 1.2;
         }
         if (!starfieldGeo) starfieldGeo = new THREE.BufferGeometry();
-        starfieldGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-        starfieldGeo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
+        starfieldGeo.setAttribute(
+          "position",
+          new THREE.BufferAttribute(pos, 3),
+        );
+        starfieldGeo.setAttribute(
+          "aPhase",
+          new THREE.BufferAttribute(phase, 1),
+        );
         starfieldGeo.setAttribute("aSize", new THREE.BufferAttribute(sz, 1));
       }
       {
@@ -7980,7 +8084,10 @@
       const _dbSize = new THREE.Vector2();
       function syncPointViewScale() {
         const h = renderer.getDrawingBufferSize(_dbSize).y || POINT_REF_HEIGHT;
-        pointMat.uniforms.uViewScale.value = Math.max(0.2, h / POINT_REF_HEIGHT);
+        pointMat.uniforms.uViewScale.value = Math.max(
+          0.2,
+          h / POINT_REF_HEIGHT,
+        );
         // Additive blending makes brightness ∝ body count. In token mode
         // the tier is a device concern, so lower tiers get a gain that
         // brings their integrated brightness to the lush look (√ because
@@ -7997,6 +8104,1028 @@
           syncPointViewScale();
           return POINT_REF_HEIGHT;
         };
+      }
+
+      // ===============================================================
+      // 6b. WEBGPU RENDER PATH  (BARNES_HUT_PLAN.md §7b — M9)
+      // ===============================================================
+      // With the WebGPU compute backend live, the bodies can be drawn on
+      // the WebGPU side straight from the ping-pong storage buffers — no
+      // per-frame readback, no 16–33 MB DataTexture re-upload. One
+      // instanced quad per body (WebGPU has no point sprites) is drawn
+      // additively into an offscreen canvas; WebGL imports that canvas
+      // with texImage2D (GPU-internal in Chrome) and composites it into
+      // the scene as a screen-space additive quad while `bodies` is
+      // hidden. RenderPass, bloom, trails, CA, vignette and every capture
+      // path are untouched: the composite lands in the WebGL canvas.
+      // The WGSL mirrors pointVert / pointFrag term for term.
+      //
+      // The seam (offscreen canvas → WebGL texture) may arrive as 8 bits
+      // per channel and this look is HDR (additive sums ≫ 1 feed the
+      // bloom), so three encodings are implemented behind one constant.
+      // Flip WGPU_RENDER_ENCODING to switch:
+      //   "float" — rgba16float canvas (alphaMode "opaque", toneMapping
+      //             "extended") imported into an RGBA16F texture with
+      //             texSubImage2D(RGBA, HALF_FLOAT, canvas). DEFAULT: the
+      //             seam experiment (tools/seam-test.html, Chrome 152 on
+      //             the 4090) recovered values up to 16 within ½ f16 ulp,
+      //             same-task freshness, 0.5–0.8 ms/frame at 2560×1440.
+      //             Importing into RGBA8 would clamp at 1.0 — never ask
+      //             for UnsignedByteType here.
+      //   "pack2" — rgba8unorm canvas 2× wide; the r, g, b halves of an
+      //             rgba16float intermediate are split into six bytes
+      //             over two texels' rgb (alpha unused, so it survives an
+      //             opaque canvas). Exactly invertible; decoded with
+      //             unpackHalf2x16 in GLSL. Fallback for browsers whose
+      //             float canvas import is lossy (Safari/Firefox untested).
+      //   "rgbm"  — rgba8unorm, rgb/M with M in alpha, range 0–16.
+      //             Lossy, needs the alpha byte to survive the import
+      //             ("premultiplied" canvas + premultiplyAlpha=true, so
+      //             the copy is a no-op) — unverified; last resort.
+      // Flags: ?render=wgpu|webgl, window.__setRenderPath(mode). The
+      // default stays "webgl" until the look gate passes. Token previews
+      // (TOKEN.preview) always take the WebGL path.
+      const WGPU_RENDER_ENCODING = "float"; // "float" | "pack2" | "rgbm"
+      // Canvas alpha mode per encoding. "opaque" reads alpha back as 1 and
+      // leaves rgb untouched (verified for float); only rgbm carries data
+      // in alpha and needs the premultiplied no-op copy instead.
+      function wgpuRenderAlphaMode(enc) {
+        return enc === "rgbm" ? "premultiplied" : "opaque";
+      }
+      // Uniform block: 24 vec4 slots of scalars/matrices + 8 palette
+      // stops + NUM_KINDS kind tints, all vec4-aligned (see RU in WGSL).
+      const WGPU_RENDER_UNIFORM_FLOATS = 64 + 8 * 4 + NUM_KINDS * 4;
+
+      const wgpuRender = {
+        wanted: urlRenderPath === "wgpu",
+        active: false,
+        failed: null, // reason string; __setRenderPath("wgpu") clears it
+        encoding: WGPU_RENDER_ENCODING,
+        mirrorEvery: 30, // wgpuFrameStep readback cadence on this path
+        canvas: null,
+        ctx: null,
+        canvasFormat: null,
+        w: 0, // drawing-buffer size the canvas is sized for
+        h: 0,
+        pipeline: null,
+        bindLayout: null,
+        uniformBuf: null,
+        groups: [null, null], // per ping-pong side, keyed by wgpuSim.epoch
+        groupsEpoch: -1,
+        encodePipeline: null,
+        encodeLayout: null,
+        encodeGroup: null,
+        hdrTex: null, // rgba16float intermediate (pack2 / rgbm only)
+        hdrView: null,
+        texture: null, // THREE.Texture wrapping the canvas
+        quad: null,
+        quadMat: null,
+        frames: 0,
+        validateFrames: 0, // frames left to wrap in an error scope
+        importChecks: 0, // uploads left to follow with gl.getError()
+        timing: { submitMs: NaN, importMs: NaN, composeMs: NaN },
+        _renderT0: 0,
+        _activating: null,
+        _uni: new Float32Array(WGPU_RENDER_UNIFORM_FLOATS),
+      };
+      if (typeof window !== "undefined") {
+        window.__wgpuRender = wgpuRender;
+        window.__pointMat = pointMat; // devtools / harness probing
+      }
+
+      // Vertex: one instance per body, six vertices per instance. Mirrors
+      // pointVert: same size law, caps, channel/palette/tint/highlight/
+      // doppler/follow math; the quad corners replace gl_PointSize and the
+      // quad uv replaces gl_PointCoord. Bodies behind the camera or
+      // outside the near/far range are dropped the way GL drops a point
+      // whose centre leaves the clip volume (x/y are left to triangle
+      // clipping, matching ANGLE's point-sprite expansion).
+      const WGSL_RENDER_SHADER = /* wgsl */ `
+        struct RU {
+          view : mat4x4<f32>,
+          proj : mat4x4<f32>,
+          camPos : vec4<f32>,     // xyz = camera world position
+          vp : vec4<f32>,         // x,y = viewport (device px), z = texSize, w = N
+          s0 : vec4<f32>,         // pointScale, channel, channel2, channelMix
+          s1 : vec4<f32>,         // paletteStops, showHalo, time, bhHighlight
+          s2 : vec4<f32>,         // speedMax, doppler, followPulse, pointMax
+          s3 : vec4<f32>,         // pointMaxBH, viewScale, tierGain, maxAge
+          s4 : vec4<f32>,         // followIndex (-1 = none), planetRadius, glPointMin, glPointMax
+          planetPos : vec4<f32>,
+          palette : array<vec4<f32>, 8>,
+          kindTints : array<vec4<f32>, ${NUM_KINDS}>,
+        };
+        @group(0) @binding(0) var<storage, read> positions : array<vec4<f32>>;
+        @group(0) @binding(1) var<storage, read> velocities : array<vec4<f32>>;
+        @group(0) @binding(2) var<uniform> u : RU;
+
+        struct VSOut {
+          @builtin(position) clip : vec4<f32>,
+          @location(0) color : vec3<f32>,
+          @location(1) alpha : f32,
+          @location(2) uv : vec2<f32>,
+        };
+
+        fn samplePalette(tIn : f32) -> vec3<f32> {
+          let t = clamp(tIn, 0.0, 0.9999);
+          let stops = max(u.s1.x, 2.0);
+          let f = t * (stops - 1.0);
+          let i = clamp(i32(floor(f)), 0, 7);
+          var j = i + 1;
+          if (j > i32(stops) - 1) { j = i32(stops) - 1; }
+          j = clamp(j, 0, 7);
+          let m = f - f32(i);
+          return mix(u.palette[i].xyz, u.palette[j].xyz, m);
+        }
+
+        // Tiny 2D hash for cheap stochastic density (same as the GLSL).
+        fn hash22(p : vec2<f32>, seed : f32) -> vec2<f32> {
+          var p3 = fract(vec3<f32>(p.x, p.y, p.x) * vec3<f32>(0.1031, 0.1030, 0.0973) + seed * 0.173);
+          p3 = p3 + dot(p3, p3.yzx + 19.19);
+          return fract((p3.xx + p3.yz) * p3.zy);
+        }
+
+        fn evalChannel(ch : f32, mass : f32, speed : f32, kindI : i32,
+                       wpos : vec3<f32>, aref : vec2<f32>, ageNorm : f32) -> f32 {
+          if (ch < 0.5) {
+            return clamp(log2(max(mass, 0.01) + 1.0) / 7.0, 0.0, 1.0);
+          } else if (ch < 1.5) {
+            return clamp(log2(1.0 + speed) / log2(1.0 + u.s2.x), 0.0, 1.0);
+          } else if (ch < 2.5) {
+            return f32(kindI) / ${(NUM_KINDS - 1).toFixed(1)};
+          } else if (ch < 3.5) {
+            // texture2D(uPos, rn) on a nearest-filtered TEX_SIZE² texture
+            // → texel floor(rn * texSize), body = y * texSize + x.
+            var rho = 0.0;
+            let texSize = u.vp.z;
+            let ts = i32(texSize);
+            let n = i32(u.vp.w);
+            for (var s = 0; s < 4; s++) {
+              let rn = hash22(aref * 93.1 + f32(s) * 5.3, u.s1.z * 0.01 + 0.2);
+              let ix = clamp(i32(floor(rn.x * texSize)), 0, ts - 1);
+              let iy = clamp(i32(floor(rn.y * texSize)), 0, ts - 1);
+              let idx = clamp(iy * ts + ix, 0, n - 1);
+              let pB = positions[idx];
+              if (pB.w <= 0.0) { continue; }
+              let d = pB.xyz - wpos;
+              let r2 = dot(d, d);
+              rho = rho + 1.0 / (1.0 + r2 * 0.01);
+            }
+            return clamp(rho * 0.3, 0.0, 1.0);
+          }
+          return ageNorm;
+        }
+
+        @vertex
+        fn vs(@builtin(vertex_index) vi : u32,
+              @builtin(instance_index) ii : u32) -> VSOut {
+          var o : VSOut;
+          // Degenerate quad (all six corners on one clip-space point
+          // outside the volume) for anything that doesn't draw.
+          o.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+          o.color = vec3<f32>(0.0);
+          o.alpha = 0.0;
+          o.uv = vec2<f32>(0.5);
+          let n = u32(u.vp.w);
+          if (ii >= n) { return o; }
+          let pos = positions[ii];
+          let vel = velocities[ii];
+          let mass = pos.w;
+          if (mass <= 0.0) { return o; }
+
+          let kindPacked = vel.w;
+          let kindF = floor(kindPacked + 0.001);
+          let ageNorm = kindPacked - kindF;
+          let kindI = i32(kindF);
+          let speed = length(vel.xyz);
+
+          let isHalo = (kindI == 4);
+          if (isHalo && u.s1.y < 0.5) { return o; }
+
+          let mv = u.view * vec4<f32>(pos.xyz, 1.0);
+          let clip = u.proj * mv;
+          if (clip.w <= 0.0 || clip.z < -clip.w || clip.z > clip.w) { return o; }
+
+          // Base size by mass, kind factors, distance, view scale, caps
+          // (see pointVert for the history of each term).
+          var sz = u.s0.x * (0.8 + pow(mass, 0.33) * 2.0);
+          if (kindI == 2) { sz = sz * 5.0; }
+          if (kindI == 3) { sz = sz * 0.45; }
+          if (isHalo) { sz = sz * 0.4; }
+          let rawSz = sz * (320.0 / -mv.z) * u.s3.y;
+          var capSz = min(rawSz, select(u.s2.w, u.s3.x, kindI == 2));
+
+          // aRef of this body: texel-centre uv in the TEX_SIZE² layout.
+          let texSize = u.vp.z;
+          let tsU = u32(texSize);
+          let aref = vec2<f32>((f32(ii % tsU) + 0.5) / texSize,
+                              (f32(ii / tsU) + 0.5) / texSize);
+
+          var t = evalChannel(u.s0.y, mass, speed, kindI, pos.xyz, aref, ageNorm);
+          if (u.s0.w > 0.001) {
+            let t2 = evalChannel(u.s0.z, mass, speed, kindI, pos.xyz, aref, ageNorm);
+            t = mix(t, t2, u.s0.w);
+          }
+          var c = samplePalette(t);
+
+          let tint = u.kindTints[clamp(kindI, 0, ${NUM_KINDS - 1})];
+          c = c * tint.xyz;
+
+          if (kindI == 2) { c = mix(c, vec3<f32>(1.6, 0.9, 0.35), 0.75 * u.s1.w); }
+
+          // Astrophage lifecycle fade (PETROVA_LINE.md §8.2), kind 7 only.
+          if (kindI == 7 && u.s4.y > 0.0) {
+            let lifeS = ageNorm * u.s3.w;
+            let ramp = smoothstep(0.0, 1.0, lifeS);
+            let dP = length(pos.xyz - u.planetPos.xyz);
+            let fade = mix(0.2, 1.0, smoothstep(u.s4.y, u.s4.y * 2.5, dP));
+            c = c * (ramp * fade);
+          }
+
+          // Doppler beaming (skipped for black holes and halo).
+          if (u.s2.y > 0.001 && kindI != 2 && !isHalo) {
+            let toCam = normalize(u.camPos.xyz - pos.xyz);
+            let beta = dot(vel.xyz, toCam) / max(u.s2.x, 0.1);
+            let b = clamp(1.0 + u.s2.y * beta, 0.15, 2.5);
+            c = c * (b * b * b);
+          }
+
+          var alpha = select(1.0, 0.32, isHalo);
+          let followIdx = i32(u.s4.x);
+          if (followIdx >= 0 && i32(ii) == followIdx) {
+            // Follow-cam highlight: bigger, whiter, always full alpha.
+            let bump = 1.6 + u.s2.z * 1.4;
+            capSz = capSz * bump;
+            c = mix(c, vec3<f32>(1.0, 1.0, 1.0), 0.45 + 0.35 * u.s2.z);
+            alpha = 1.0;
+          } else {
+            c = c * u.s3.z; // sizeBoost (1) × uTierGain
+          }
+
+          // GL clamps gl_PointSize to ALIASED_POINT_SIZE_RANGE (min 1 px on
+          // every driver) AFTER the shader — so a sub-pixel body still
+          // lights one fragment at full alpha. Far cores are thousands of
+          // ~0.6 px sprites; without this clamp they rendered at half the
+          // brightness of the WebGL points. s4.zw carries the WebGL
+          // context's actual range so both paths clamp identically.
+          capSz = clamp(capSz, u.s4.z, u.s4.w);
+
+          // Quad corner in [-0.5, 0.5]²; expand in clip space by the
+          // sprite size in device pixels (× clip.w keeps it screen-sized).
+          let v = vi % 6u;
+          let cx = select(-0.5, 0.5, v == 1u || v == 2u || v == 4u);
+          let cy = select(-0.5, 0.5, v == 2u || v == 4u || v == 5u);
+          let corner = vec2<f32>(cx, cy);
+          let off = corner * capSz * 2.0 / u.vp.xy * clip.w;
+          // z is only used for clipping here (no depth attachment); WebGPU
+          // clips to [0, w] where GL used [-w, w], so pin it mid-range.
+          o.clip = vec4<f32>(clip.xy + off, 0.5 * clip.w, clip.w);
+          o.uv = corner + 0.5;
+          o.color = c;
+          o.alpha = alpha;
+          return o;
+        }
+
+        @fragment
+        fn fs(in : VSOut) -> @location(0) vec4<f32> {
+          if (in.alpha <= 0.0) { discard; }
+          let c = in.uv - 0.5;
+          let d = length(c);
+          if (d > 0.5) { discard; }
+          // smoothstep(0.5, 0.0, d) as GLSL evaluates it (edges reversed).
+          let tt = clamp((0.5 - d) / 0.5, 0.0, 1.0);
+          var a = tt * tt * (3.0 - 2.0 * tt);
+          a = pow(a, 1.55);
+          return vec4<f32>(in.color * a * 1.35 * in.alpha, a * in.alpha);
+        }
+      `;
+
+      // Full-screen encode pass (pack2 / rgbm): rgba16float intermediate
+      // → rgba8unorm canvas. "float" renders straight into the canvas.
+      const WGSL_ENCODE_SHADER = /* wgsl */ `
+        @group(0) @binding(0) var hdrTex : texture_2d<f32>;
+
+        @vertex
+        fn evs(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4<f32> {
+          let x = f32(i32(vi & 1u) * 4 - 1);
+          let y = f32(i32(vi >> 1u) * 4 - 1);
+          return vec4<f32>(x, y, 0.5, 1.0);
+        }
+
+        // Canvas is 2× wide. The r, g, b halves (16 bits each, low byte
+        // first) fill the rgb of texel 2x = (r.lo, r.hi, g.lo) and texel
+        // 2x+1 = (g.hi, b.lo, b.hi); alpha is left at 1 so an opaque
+        // canvas carries it unchanged.
+        @fragment
+        fn efsPack2(@builtin(position) p : vec4<f32>) -> @location(0) vec4<f32> {
+          let px = i32(p.x);
+          let py = i32(p.y);
+          let src = textureLoad(hdrTex, vec2<i32>(px / 2, py), 0);
+          let r = pack2x16float(vec2<f32>(src.r, 0.0)) & 0xffffu;
+          let g = pack2x16float(vec2<f32>(src.g, 0.0)) & 0xffffu;
+          let b = pack2x16float(vec2<f32>(src.b, 0.0)) & 0xffffu;
+          var bytes : vec3<u32>;
+          if ((px & 1) == 0) {
+            bytes = vec3<u32>(r & 0xffu, r >> 8u, g & 0xffu);
+          } else {
+            bytes = vec3<u32>(g >> 8u, b & 0xffu, b >> 8u);
+          }
+          return vec4<f32>(vec3<f32>(bytes) / 255.0, 1.0);
+        }
+
+        // RGBM, range 0–16: M = max(rgb) / 16 quantised up so rgb/M ≤ 1.
+        @fragment
+        fn efsRgbm(@builtin(position) p : vec4<f32>) -> @location(0) vec4<f32> {
+          let src = textureLoad(hdrTex, vec2<i32>(i32(p.x), i32(p.y)), 0);
+          let rgb = max(src.rgb, vec3<f32>(0.0));
+          var m = clamp(max(max(rgb.r, rgb.g), rgb.b) / 16.0, 0.0, 1.0);
+          m = ceil(m * 255.0) / 255.0;
+          if (m <= 0.0) { return vec4<f32>(0.0); }
+          return vec4<f32>(clamp(rgb / (16.0 * m), vec3<f32>(0.0), vec3<f32>(1.0)), m);
+        }
+      `;
+
+      // WebGL composite quad: decode the imported canvas and add it to
+      // the scene render. texelFetch in device pixels, flipped (canvas
+      // row 0 is the top; gl_FragCoord.y = 0 is the bottom).
+      const compositeVert = /* glsl */ `
+        void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }
+      `;
+      const compositeFrag = /* glsl */ `
+        uniform sampler2D uTex;
+        uniform vec2 uSize; // drawing-buffer size, device px
+        void main() {
+          ivec2 p = ivec2(int(gl_FragCoord.x), int(uSize.y) - 1 - int(gl_FragCoord.y));
+          #if WGPU_ENC == 0
+            vec3 rgb = texelFetch(uTex, p, 0).rgb;
+          #elif WGPU_ENC == 1
+            vec4 t0 = texelFetch(uTex, ivec2(p.x * 2, p.y), 0);
+            vec4 t1 = texelFetch(uTex, ivec2(p.x * 2 + 1, p.y), 0);
+            uint r = uint(t0.x * 255.0 + 0.5) | (uint(t0.y * 255.0 + 0.5) << 8u);
+            uint g = uint(t0.z * 255.0 + 0.5) | (uint(t1.x * 255.0 + 0.5) << 8u);
+            uint b = uint(t1.y * 255.0 + 0.5) | (uint(t1.z * 255.0 + 0.5) << 8u);
+            vec3 rgb = vec3(unpackHalf2x16(r).x, unpackHalf2x16(g).x,
+                            unpackHalf2x16(b).x);
+          #else
+            vec4 e = texelFetch(uTex, p, 0);
+            vec3 rgb = e.rgb * e.a * 16.0;
+          #endif
+          // The canvas alpha is 1 (opaque) or M (rgbm), never coverage;
+          // nothing downstream reads scene alpha, but keep it sane.
+          gl_FragColor = vec4(rgb, clamp(max(rgb.r, max(rgb.g, rgb.b)), 0.0, 1.0));
+        }
+      `;
+
+      function wgpuRenderSyncVisibility(useWgpu) {
+        const on = !!useWgpu;
+        bodies.visible = !on;
+        if (wgpuRender.quad) wgpuRender.quad.visible = on;
+      }
+
+      function wgpuRenderFail(reason) {
+        wgpuRender.failed = String(reason);
+        console.warn(
+          "[render] " + wgpuRender.failed + " — falling back to WebGL points",
+        );
+        wgpuRenderDeactivate();
+        if (typeof showToast === "function") {
+          showToast("Render", "WebGPU path failed → WebGL");
+        }
+      }
+
+      // Canvas + context + pipelines + uniform buffer. Once per device;
+      // survives render-path toggles and density rebuilds (the bind
+      // groups are the only N-dependent objects, rebuilt per epoch).
+      async function wgpuRenderInitGPU() {
+        const device = wgpuSim.device;
+        const enc = wgpuRender.encoding;
+        if (enc !== "float" && enc !== "pack2" && enc !== "rgbm") {
+          throw new Error("unknown WGPU_RENDER_ENCODING " + enc);
+        }
+        let canvas = null;
+        let ctx = null;
+        if (typeof OffscreenCanvas !== "undefined") {
+          try {
+            canvas = new OffscreenCanvas(16, 16);
+            ctx = canvas.getContext("webgpu");
+          } catch (_) {
+            canvas = null;
+            ctx = null;
+          }
+        }
+        if (!ctx) {
+          canvas = document.createElement("canvas");
+          canvas.width = 16;
+          canvas.height = 16;
+          ctx = canvas.getContext("webgpu");
+        }
+        if (!ctx) throw new Error("no WebGPU canvas context");
+        const canvasFormat = enc === "float" ? "rgba16float" : "rgba8unorm";
+        const cfg = {
+          device,
+          format: canvasFormat,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+          alphaMode: wgpuRenderAlphaMode(enc),
+        };
+        // HDR canvas: "extended" keeps values > 1 (the seam-test setup).
+        if (canvasFormat === "rgba16float")
+          cfg.toneMapping = { mode: "extended" };
+        ctx.configure(cfg);
+        device.pushErrorScope("validation");
+        const bindLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: { type: "read-only-storage" },
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: { type: "read-only-storage" },
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+              buffer: { type: "uniform" },
+            },
+          ],
+        });
+        const module = device.createShaderModule({ code: WGSL_RENDER_SHADER });
+        const info = await module.getCompilationInfo();
+        for (const m of info.messages || []) {
+          if (m.type === "error") {
+            throw new Error(`WGSL ${m.lineNum}:${m.linePos} ${m.message}`);
+          }
+        }
+        // Three's non-premultiplied AdditiveBlending is
+        // blendFunc(SRC_ALPHA, ONE) — mirror it, colour and alpha.
+        const additive = {
+          color: { srcFactor: "src-alpha", dstFactor: "one", operation: "add" },
+          alpha: { srcFactor: "src-alpha", dstFactor: "one", operation: "add" },
+        };
+        const pipeline = await device.createRenderPipelineAsync({
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [bindLayout],
+          }),
+          vertex: { module, entryPoint: "vs" },
+          fragment: {
+            module,
+            entryPoint: "fs",
+            targets: [{ format: "rgba16float", blend: additive }],
+          },
+          primitive: { topology: "triangle-list", cullMode: "none" },
+        });
+        let encodePipeline = null;
+        let encodeLayout = null;
+        if (enc !== "float") {
+          encodeLayout = device.createBindGroupLayout({
+            entries: [
+              {
+                binding: 0,
+                visibility: GPUShaderStage.FRAGMENT,
+                texture: { sampleType: "unfilterable-float" },
+              },
+            ],
+          });
+          const emod = device.createShaderModule({ code: WGSL_ENCODE_SHADER });
+          const einfo = await emod.getCompilationInfo();
+          for (const m of einfo.messages || []) {
+            if (m.type === "error") {
+              throw new Error(
+                `WGSL(encode) ${m.lineNum}:${m.linePos} ${m.message}`,
+              );
+            }
+          }
+          encodePipeline = await device.createRenderPipelineAsync({
+            layout: device.createPipelineLayout({
+              bindGroupLayouts: [encodeLayout],
+            }),
+            vertex: { module: emod, entryPoint: "evs" },
+            fragment: {
+              module: emod,
+              entryPoint: enc === "pack2" ? "efsPack2" : "efsRgbm",
+              targets: [{ format: "rgba8unorm" }],
+            },
+            primitive: { topology: "triangle-list" },
+          });
+        }
+        const uniformBuf = device.createBuffer({
+          size: wgpuRender._uni.byteLength,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        const err = await device.popErrorScope();
+        if (err) throw new Error("validation: " + err.message);
+        wgpuRender.canvas = canvas;
+        wgpuRender.ctx = ctx;
+        wgpuRender.canvasFormat = canvasFormat;
+        wgpuRender.bindLayout = bindLayout;
+        wgpuRender.pipeline = pipeline;
+        wgpuRender.encodeLayout = encodeLayout;
+        wgpuRender.encodePipeline = encodePipeline;
+        wgpuRender.uniformBuf = uniformBuf;
+        if (!wgpuRender._errListener) {
+          wgpuRender._errListener = true;
+          let logged = 0;
+          device.addEventListener("uncapturederror", (ev) => {
+            if (logged++ < 5) {
+              console.warn(
+                "[wgpu] uncaptured GPU error:",
+                ev.error && ev.error.message,
+              );
+            }
+          });
+        }
+        console.info(
+          `[render] pipelines compiled (encoding=${enc}, canvas=${canvasFormat})`,
+        );
+      }
+
+      // The WebGL side: a THREE.Texture over the canvas and the
+      // screen-space quad that adds it to the scene.
+      function wgpuRenderMakeComposite() {
+        const enc = wgpuRender.encoding;
+        const tex = new THREE.Texture(wgpuRender.canvas);
+        tex.flipY = false;
+        tex.colorSpace = THREE.NoColorSpace;
+        // Opaque canvas → plain copy with premultiplyAlpha=false (verified
+        // in the seam test); rgbm's premultiplied canvas needs the
+        // matching flag so the browser doesn't un-premultiply the data.
+        tex.premultiplyAlpha = wgpuRenderAlphaMode(enc) === "premultiplied";
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.format = THREE.RGBAFormat;
+        tex.type =
+          enc === "float" ? THREE.HalfFloatType : THREE.UnsignedByteType;
+        tex.onUpdate = wgpuRenderOnImport;
+        const mat = new THREE.ShaderMaterial({
+          uniforms: {
+            uTex: { value: tex },
+            uSize: { value: new THREE.Vector2(1, 1) },
+          },
+          defines: { WGPU_ENC: enc === "float" ? 0 : enc === "pack2" ? 1 : 2 },
+          vertexShader: compositeVert,
+          fragmentShader: compositeFrag,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+          // Straight add: the canvas already holds colour × alpha sums.
+          blending: THREE.CustomBlending,
+          blendEquation: THREE.AddEquation,
+          blendSrc: THREE.OneFactor,
+          blendDst: THREE.OneFactor,
+          blendSrcAlpha: THREE.OneFactor,
+          blendDstAlpha: THREE.OneFactor,
+        });
+        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+        quad.name = "wgpuComposite";
+        quad.frustumCulled = false;
+        quad.renderOrder = 1; // after the starfield (0)
+        quad.visible = false;
+        scene.add(quad);
+        wgpuRender.texture = tex;
+        wgpuRender.quadMat = mat;
+        wgpuRender.quad = quad;
+      }
+
+      // three calls this right after texImage2D/texSubImage2D of the
+      // canvas: importMs = composer.render start → upload issued (the
+      // starfield's draw calls sit in between; they are a few µs).
+      function wgpuRenderOnImport() {
+        wgpuRender.timing.importMs = performance.now() - wgpuRender._renderT0;
+        if (wgpuRender.importChecks > 0) {
+          wgpuRender.importChecks--;
+          try {
+            const gl = renderer.getContext();
+            const err = gl.getError();
+            if (err) {
+              wgpuRenderFail(
+                `texImage2D from the WebGPU canvas raised GL error 0x${err.toString(16)}`,
+              );
+            }
+          } catch (e) {
+            wgpuRenderFail("import check threw: " + ((e && e.message) || e));
+          }
+        }
+      }
+
+      // Keep the canvas (and the intermediate) at the drawing-buffer size.
+      function wgpuRenderResize(W, H) {
+        const device = wgpuSim.device;
+        const enc = wgpuRender.encoding;
+        wgpuRender.canvas.width = enc === "pack2" ? W * 2 : W;
+        wgpuRender.canvas.height = H;
+        wgpuRender.w = W;
+        wgpuRender.h = H;
+        if (enc !== "float") {
+          if (wgpuRender.hdrTex) wgpuRender.hdrTex.destroy();
+          wgpuRender.hdrTex = device.createTexture({
+            size: [W, H],
+            format: "rgba16float",
+            usage:
+              GPUTextureUsage.RENDER_ATTACHMENT |
+              GPUTextureUsage.TEXTURE_BINDING,
+          });
+          wgpuRender.hdrView = wgpuRender.hdrTex.createView();
+          wgpuRender.encodeGroup = device.createBindGroup({
+            layout: wgpuRender.encodeLayout,
+            entries: [{ binding: 0, resource: wgpuRender.hdrView }],
+          });
+        }
+        if (wgpuRender.quadMat)
+          wgpuRender.quadMat.uniforms.uSize.value.set(W, H);
+        // three allocated the GL texture with texStorage2D at the old
+        // size — drop it so the next upload re-allocates at the new one.
+        if (wgpuRender.texture) wgpuRender.texture.dispose();
+        wgpuRender.validateFrames = 2;
+        wgpuRender.importChecks = 1;
+        console.info(
+          `[render] canvas ${wgpuRender.canvas.width}×${wgpuRender.canvas.height} (${enc})`,
+        );
+      }
+
+      const _wrCamPos = new THREE.Vector3();
+      const _wrDbSize = new THREE.Vector2();
+      function wgpuRenderWriteUniforms(W, H) {
+        const u = wgpuRender._uni;
+        const pu = pointMat.uniforms;
+        camera.updateMatrixWorld();
+        u.set(camera.matrixWorldInverse.elements, 0);
+        u.set(camera.projectionMatrix.elements, 16);
+        camera.getWorldPosition(_wrCamPos);
+        u[32] = _wrCamPos.x;
+        u[33] = _wrCamPos.y;
+        u[34] = _wrCamPos.z;
+        u[35] = 0;
+        u[36] = W;
+        u[37] = H;
+        u[38] = TEX_SIZE;
+        u[39] = wgpuSim.capacity;
+        u[40] = pu.uPointScale.value;
+        u[41] = pu.uChannel.value;
+        u[42] = pu.uChannel2.value;
+        u[43] = pu.uChannelMix.value;
+        u[44] = pu.uPaletteStops.value;
+        u[45] = pu.uShowHalo.value;
+        u[46] = pu.uTime.value;
+        u[47] = pu.uBHHighlight.value;
+        u[48] = pu.uSpeedMax.value;
+        u[49] = pu.uDoppler.value;
+        u[50] = pu.uFollowPulse.value;
+        u[51] = pu.uPointMax.value;
+        u[52] = pu.uPointMaxBH.value;
+        u[53] = pu.uViewScale.value;
+        u[54] = pu.uTierGain.value;
+        u[55] = pu.uMaxAge.value;
+        // uFollowUV is the texel-centre uv of the followed body → index.
+        const fuv = pu.uFollowUV.value;
+        u[56] =
+          fuv.x >= 0
+            ? Math.floor(fuv.y * TEX_SIZE) * TEX_SIZE +
+              Math.floor(fuv.x * TEX_SIZE)
+            : -1;
+        u[57] = pu.uPlanetRadius.value;
+        // The WebGL driver's point-size clamp, mirrored (see the WGSL).
+        if (!wgpuRender.glPointRange) {
+          let r = null;
+          try {
+            const gl = renderer.getContext();
+            r = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
+          } catch (_) {}
+          wgpuRender.glPointRange =
+            r && r.length >= 2 && r[1] >= r[0] && r[0] > 0
+              ? [r[0], r[1]]
+              : [1, 1024];
+          console.info(
+            `[render] gl point-size range ${wgpuRender.glPointRange[0]}–${wgpuRender.glPointRange[1]} px`,
+          );
+        }
+        u[58] = wgpuRender.glPointRange[0];
+        u[59] = wgpuRender.glPointRange[1];
+        const pp = pu.uPlanetPos.value;
+        u[60] = pp.x;
+        u[61] = pp.y;
+        u[62] = pp.z;
+        u[63] = 0;
+        const pal = pu.uPalette.value;
+        for (let i = 0; i < 8; i++) {
+          const p = pal[i];
+          const o = 64 + i * 4;
+          u[o] = p.x;
+          u[o + 1] = p.y;
+          u[o + 2] = p.z;
+          u[o + 3] = 0;
+        }
+        const kt = pu.uKindTints.value;
+        for (let k = 0; k < NUM_KINDS; k++) {
+          const o = 96 + k * 4;
+          u[o] = kt[k * 3];
+          u[o + 1] = kt[k * 3 + 1];
+          u[o + 2] = kt[k * 3 + 2];
+          u[o + 3] = 1;
+        }
+        wgpuSim.device.queue.writeBuffer(
+          wgpuRender.uniformBuf,
+          0,
+          u.buffer,
+          u.byteOffset,
+          u.byteLength,
+        );
+      }
+
+      // Per frame, right before composer.render(): uniforms, the point
+      // pass (+ encode pass), submit, and mark the texture for re-import.
+      // Returns false when nothing was drawn (the quad keeps last frame).
+      function wgpuRenderFrame() {
+        if (!wgpuRender.active) return false;
+        if (!wgpuSim.active || !wgpuSim.buffers || rebuildingPipeline) {
+          return false;
+        }
+        const device = wgpuSim.device;
+        const t0 = performance.now();
+        const validate = wgpuRender.validateFrames > 0;
+        try {
+          const db = renderer.getDrawingBufferSize(_wrDbSize);
+          const W = Math.max(1, db.x | 0);
+          const H = Math.max(1, db.y | 0);
+          if (W !== wgpuRender.w || H !== wgpuRender.h) wgpuRenderResize(W, H);
+          if (validate) device.pushErrorScope("validation");
+          wgpuRenderWriteUniforms(W, H);
+          const which = wgpuSim.which | 0;
+          if (wgpuRender.groupsEpoch !== (wgpuSim.epoch | 0)) {
+            wgpuRender.groups = [null, null];
+            wgpuRender.groupsEpoch = wgpuSim.epoch | 0;
+          }
+          if (!wgpuRender.groups[which]) {
+            const b = wgpuSim.buffers;
+            wgpuRender.groups[which] = device.createBindGroup({
+              layout: wgpuRender.bindLayout,
+              entries: [
+                {
+                  binding: 0,
+                  resource: { buffer: which === 0 ? b.posA : b.posB },
+                },
+                {
+                  binding: 1,
+                  resource: { buffer: which === 0 ? b.velA : b.velB },
+                },
+                { binding: 2, resource: { buffer: wgpuRender.uniformBuf } },
+              ],
+            });
+          }
+          const enc = device.createCommandEncoder();
+          const canvasView = wgpuRender.ctx.getCurrentTexture().createView();
+          const direct = wgpuRender.encoding === "float";
+          const pass = enc.beginRenderPass({
+            colorAttachments: [
+              {
+                view: direct ? canvasView : wgpuRender.hdrView,
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                loadOp: "clear",
+                storeOp: "store",
+              },
+            ],
+          });
+          pass.setPipeline(wgpuRender.pipeline);
+          pass.setBindGroup(0, wgpuRender.groups[which]);
+          pass.draw(6, wgpuSim.capacity);
+          pass.end();
+          if (!direct) {
+            const ep = enc.beginRenderPass({
+              colorAttachments: [
+                {
+                  view: canvasView,
+                  clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                  loadOp: "clear",
+                  storeOp: "store",
+                },
+              ],
+            });
+            ep.setPipeline(wgpuRender.encodePipeline);
+            ep.setBindGroup(0, wgpuRender.encodeGroup);
+            ep.draw(3);
+            ep.end();
+          }
+          device.queue.submit([enc.finish()]);
+          if (validate) {
+            wgpuRender.validateFrames--;
+            device
+              .popErrorScope()
+              .then((err) => {
+                if (err) wgpuRenderFail("GPU validation: " + err.message);
+              })
+              .catch(() => {});
+          }
+          wgpuRender.texture.needsUpdate = true;
+          wgpuRender.timing.submitMs = performance.now() - t0;
+          wgpuRender.frames++;
+          return true;
+        } catch (e) {
+          wgpuRenderFail("frame threw: " + ((e && e.message) || e));
+          return false;
+        }
+      }
+
+      async function wgpuRenderActivate() {
+        if (wgpuRender.active) return true;
+        if (TOKEN.preview) {
+          wgpuRender.wanted = false;
+          return false;
+        }
+        if (wgpuRender.failed) return false;
+        if (!wgpuSim.active || !wgpuSim.device || !wgpuSim.buffers) {
+          return false;
+        }
+        if (wgpuRender._activating) return wgpuRender._activating;
+        wgpuRender._activating = (async () => {
+          // Yield first: on the fast path (pipelines already built) the
+          // body has no awaits and would run its `finally` before the
+          // assignment above lands, leaving a stale promise behind.
+          await null;
+          try {
+            if (!wgpuRender.pipeline) await wgpuRenderInitGPU();
+            if (!wgpuRender.quad) wgpuRenderMakeComposite();
+            if (!wgpuSim.active) return false; // backend left meanwhile
+            wgpuRender.w = 0; // force a (re)size on the first frame
+            wgpuRender.h = 0;
+            wgpuRender.groupsEpoch = -1;
+            wgpuRender.active = true;
+            wgpuRenderSyncVisibility(true);
+            console.info(
+              `[render] WebGPU point path active (encoding=${wgpuRender.encoding})`,
+            );
+            if (typeof showToast === "function") showToast("Render", "WebGPU");
+            return true;
+          } catch (e) {
+            wgpuRenderFail("init failed: " + ((e && e.message) || e));
+            return false;
+          } finally {
+            wgpuRender._activating = null;
+          }
+        })();
+        return wgpuRender._activating;
+      }
+
+      function wgpuRenderDeactivate(opts = {}) {
+        const was = wgpuRender.active;
+        wgpuRender.active = false;
+        wgpuRenderSyncVisibility(false);
+        if (!was) return;
+        // The DataTexture mirror may be mirrorEvery frames old — refresh
+        // it so the WebGL points don't jump back in time.
+        if (opts.mirror !== false && wgpuSim.active) wgpuForceMirror();
+        console.info("[render] WebGL point path");
+      }
+
+      if (typeof window !== "undefined") {
+        // "wgpu" | "webgl". Resolves to the path that is live afterwards.
+        window.__setRenderPath = async (mode) => {
+          const m = String(mode || "")
+            .toLowerCase()
+            .trim();
+          if (m === "wgpu" || m === "webgpu") {
+            if (TOKEN.preview) return "webgl";
+            wgpuRender.wanted = true;
+            wgpuRender.failed = null;
+            if (!wgpuSim.active && wgpuSim.available) {
+              await applyComputeBackend("webgpu"); // activation hook brings the path up
+            }
+            if (wgpuSim.active && !wgpuRender.active) {
+              await wgpuRenderActivate();
+            }
+          } else if (m === "webgl") {
+            wgpuRender.wanted = false;
+            wgpuRenderDeactivate();
+          }
+          return wgpuRender.active ? "wgpu" : "webgl";
+        };
+      }
+
+      // Single-body async reader for the render path: copies one body's
+      // pos (16 B) + vel (16 B) from the current side into a 32-byte
+      // staging buffer, mapAsync, one in flight. Consumers get a sample
+      // that is one frame old — the TexelReader contract — so follow-cam
+      // and track shots stay per-frame smooth without the full mirror.
+      class WgpuBodyReader {
+        constructor() {
+          this.buf = null;
+          this.busy = false;
+          this.fresh = false;
+          this.outIdx = -1;
+          this.out = new Float32Array(8); // pos xyzw, vel xyzw
+        }
+        request(idx) {
+          if (this.busy) return false;
+          if (!wgpuSim.active || !wgpuSim.buffers || rebuildingPipeline) {
+            return false;
+          }
+          if (!(idx >= 0 && idx < wgpuSim.capacity)) return false;
+          const device = wgpuSim.device;
+          if (!this.buf) {
+            this.buf = device.createBuffer({
+              size: 32,
+              usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+          }
+          const b = wgpuSim.buffers;
+          const which = wgpuSim.which | 0;
+          const posBuf = which === 0 ? b.posA : b.posB;
+          const velBuf = which === 0 ? b.velA : b.velB;
+          try {
+            const enc = device.createCommandEncoder();
+            enc.copyBufferToBuffer(posBuf, idx * 16, this.buf, 0, 16);
+            enc.copyBufferToBuffer(velBuf, idx * 16, this.buf, 16, 16);
+            device.queue.submit([enc.finish()]);
+          } catch (e) {
+            return false;
+          }
+          this.busy = true;
+          const buf = this.buf;
+          buf
+            .mapAsync(GPUMapMode.READ)
+            .then(() => {
+              this.out.set(new Float32Array(buf.getMappedRange()));
+              buf.unmap();
+              this.outIdx = idx;
+              this.fresh = true;
+              this.busy = false;
+            })
+            .catch(() => {
+              try {
+                buf.unmap();
+              } catch (_) {}
+              this.busy = false;
+            });
+          return true;
+        }
+        // True (and `out` valid) when an untaken sample for idx landed.
+        take(idx) {
+          if (!this.fresh || this.outIdx !== idx) return false;
+          this.fresh = false;
+          return true;
+        }
+        cancel() {
+          this.fresh = false;
+          this.outIdx = -1;
+        }
+      }
+
+      // ?freeze=<steps> harness tick (see the URL flags by
+      // computeBackendPref). Holds the sim while the backend settles —
+      // probe, WebGPU activation, render-path activation — then runs the
+      // requested substeps synchronously through kickstartTick and
+      // leaves the sim paused. Both render paths, both backends.
+      function freezeTick() {
+        if (!freezeRun || freezeRun.state !== "wait") return;
+        params.paused = true;
+        params.cameraDrift = false;
+        params.autoOrbit = false;
+        if (director.enabled) director.enabled = false;
+        freezeRun.waited++;
+        const settling =
+          wgpuSim.reason === "probing" ||
+          (computeBackendPref === "webgpu" &&
+            wgpuSim.available &&
+            !wgpuSim.active) ||
+          (wgpuSim.active &&
+            wgpuRender.wanted &&
+            !wgpuRender.active &&
+            !wgpuRender.failed) ||
+          rebuildingPipeline;
+        if (settling && freezeRun.waited < 600) return;
+        if (settling) {
+          console.warn(
+            "[freeze] backend did not settle in 600 frames; running anyway",
+          );
+        }
+        freezeRun.state = "run";
+        kickstart.remaining = freezeRun.steps;
+        kickstart.dt = 0.015;
+        const t0 = performance.now();
+        let guard = 0;
+        while (kickstart.remaining > 0 && guard++ < 1e6) kickstartTick();
+        params.paused = true;
+        // "done" only once the frozen state is where every consumer can
+        // see it: on the WebGPU backend that means the CPU mirror has
+        // landed (its copy is queued behind the substeps, so by then the
+        // GPU has finished them and the render textures show the final
+        // state too).
+        const finish = () => {
+          freezeRun.state = "done";
+          writePerfJson();
+          console.info(
+            `[freeze] ${freezeRun.steps} substeps in ${(performance.now() - t0).toFixed(0)} ms — compute=${wgpuSim.active ? "webgpu" : "webgl"} render=${wgpuRender.active ? "wgpu" : "webgl"}; paused`,
+          );
+        };
+        if (wgpuSim.active) {
+          freezeRun.state = "mirror";
+          wgpuForceMirror().then(finish, finish);
+        } else {
+          finish();
+        }
       }
 
       // ---- Photon ring  (scene-scoped; off by default) ----
@@ -12763,8 +13892,15 @@
       const TOKEN_PLAN_OVERRIDES = {}; // { id: sceneKey }
       function buildTokenPlan(n) {
         const total = TOKEN_FAMILIES.reduce((s, p) => s + p[1], 0);
-        const quota = TOKEN_FAMILIES.map(([k, w]) => ({ k, exact: (w / total) * n }));
-        let counts = quota.map((q) => ({ k: q.k, c: Math.floor(q.exact), rem: q.exact - Math.floor(q.exact) }));
+        const quota = TOKEN_FAMILIES.map(([k, w]) => ({
+          k,
+          exact: (w / total) * n,
+        }));
+        let counts = quota.map((q) => ({
+          k: q.k,
+          c: Math.floor(q.exact),
+          rem: q.exact - Math.floor(q.exact),
+        }));
         let used = counts.reduce((s, c) => s + c.c, 0);
         counts
           .slice()
@@ -12811,7 +13947,11 @@
         "long-shadow": "patient",
         pulse: "restless",
       };
-      const TOKEN_SIGNATURE_LABEL = { calm: "drift", dynamic: "chase", well: "vertigo" };
+      const TOKEN_SIGNATURE_LABEL = {
+        calm: "drift",
+        dynamic: "chase",
+        well: "vertigo",
+      };
       const TOKEN_OWN_WEIGHT = 6; // the scene's authored palette / channel
       // `age` is excluded: every body is the same age at the token's first
       // moments, so the channel paints a flat colour.
@@ -12830,7 +13970,14 @@
       const TOKEN_LONG_EXPOSURE_TRAIL = 0.9;
       // Palettes a token may draw when it doesn't keep its authored one.
       // mono / bone read as grey-outs on most families (contact sheet).
-      const TOKEN_PALETTE_POOL = ["ice", "ember", "aurora", "nebula", "sunset", "vaporwv"];
+      const TOKEN_PALETTE_POOL = [
+        "ice",
+        "ember",
+        "aurora",
+        "nebula",
+        "sunset",
+        "vaporwv",
+      ];
       // Pre-roll substeps before a token's first frame, so structure the
       // scene grows into over its first seconds is already there (rings,
       // tails, arms). Amortized live (kickstartTick), synchronous in
@@ -12997,13 +14144,15 @@
         return {
           ...(rec.id ? { Token: `#${rec.id} of ${TOKEN_EDITION}` } : {}),
           Family: sc ? sc.name : rec.scene,
-          Temperament: TOKEN_TEMPERAMENT_LABEL[rec.temperament] || rec.temperament,
+          Temperament:
+            TOKEN_TEMPERAMENT_LABEL[rec.temperament] || rec.temperament,
           Signature: rec.signature,
           Variant: rec.collisionScenario || "—",
           Palette: rec.palette,
           Channel: rec.channel,
           Exposure: rec.longExposure ? "long" : "short",
-          Spin: rec.spin > 0 ? "prograde" : rec.spin < 0 ? "retrograde" : "none",
+          Spin:
+            rec.spin > 0 ? "prograde" : rec.spin < 0 ? "retrograde" : "none",
           Doppler: rec.doppler > 0 ? "on" : "off",
         };
       }
@@ -13028,7 +14177,10 @@
         tokenMomentsInit();
         const traits = tokenTraits(tokenRecipe);
         try {
-          if (TOKEN.platform === "fxhash" && typeof $fx.features === "function") {
+          if (
+            TOKEN.platform === "fxhash" &&
+            typeof $fx.features === "function"
+          ) {
             $fx.features(traits);
           } else if (
             TOKEN.platform === "highlight" &&
@@ -13329,7 +14481,11 @@
           if (m.kind === "lens") {
             const ramp = 3;
             const k =
-              m.t < ramp ? m.t / ramp : m.t > m.dur - ramp ? Math.max(0, (m.dur - m.t) / ramp) : 1;
+              m.t < ramp
+                ? m.t / ramp
+                : m.t > m.dur - ramp
+                  ? Math.max(0, (m.dur - m.t) / ramp)
+                  : 1;
             lensPass.uniforms.uStrength.value = 0.9 * k;
           }
           if (m.t >= m.dur) {
@@ -13369,11 +14525,13 @@
         if (hint) {
           let text;
           if (touring) text = "click anywhere to skip the tour";
-          else if (tokenMoments.active) text = "a moment · " + tokenMoments.active.label;
+          else if (tokenMoments.active)
+            text = "a moment · " + tokenMoments.active.label;
           else if (followCamActive())
             text = "following · scroll to change distance · Esc releases";
           else if (director.enabled)
-            text = "watching · drag or scroll to take the camera · R returns home";
+            text =
+              "watching · drag or scroll to take the camera · R returns home";
           else text = "drag to orbit · scroll to zoom · click a star to follow";
           if (hint.textContent !== text) hint.textContent = text;
         }
@@ -13402,7 +14560,10 @@
       function tokenSignalReady() {
         TOKEN.ready = true;
         try {
-          if (TOKEN.platform === "fxhash" && typeof $fx.preview === "function") {
+          if (
+            TOKEN.platform === "fxhash" &&
+            typeof $fx.preview === "function"
+          ) {
             $fx.preview();
           } else if (
             TOKEN.platform === "highlight" &&
@@ -13469,7 +14630,8 @@
           "pointerdown",
           (e) => {
             markUserActivity();
-            if (e.target && e.target.closest && e.target.closest("#token-bar")) return;
+            if (e.target && e.target.closest && e.target.closest("#token-bar"))
+              return;
             tokenSkipTour();
           },
           { capture: true },
@@ -13562,7 +14724,12 @@
           },
           "moment",
         );
-        mk("Return", "Rebuild this token's universe from its seed (R)", tokenReturn, "return");
+        mk(
+          "Return",
+          "Rebuild this token's universe from its seed (R)",
+          tokenReturn,
+          "return",
+        );
         sep();
         mk("Traits", "This token's attributes", () => {
           const open = document.querySelector("#token-features");
@@ -13589,7 +14756,12 @@
           d.appendChild(seed);
           document.body.appendChild(d);
         });
-        mk("Capture", "Save a 2× PNG of this moment (P)", () => takeScreenshot(2), "capture");
+        mk(
+          "Capture",
+          "Save a 2× PNG of this moment (P)",
+          () => takeScreenshot(2),
+          "capture",
+        );
         mk("⛶", "Fullscreen", () => {
           const root = document.documentElement;
           if (document.fullscreenElement) {
@@ -16398,8 +17570,14 @@
           const rect = canvasEl.getBoundingClientRect();
           const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
           const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
-          const pick = pickBodyAtNDC(ndcX, ndcY, 28);
-          if (pick) followCamAttach(pick);
+          const doPick = () => {
+            const pick = pickBodyAtNDC(ndcX, ndcY, 28);
+            if (pick) followCamAttach(pick);
+          };
+          // M9: on the WebGPU render path the mirror the pick reads can
+          // be mirrorEvery frames old — refresh it first.
+          if (wgpuRender.active) wgpuForceMirror().then(doPick);
+          else doPick();
         });
       })();
 
@@ -17064,6 +18242,7 @@
       // (attach) that need the truth right now and can afford the drain.
       const _followPosReader = new TexelReader("pos", 1, 1);
       const _followVelReader = new TexelReader("vel", 1, 1);
+      const _followBodyReader = new WgpuBodyReader(); // WebGPU render path
       function followCamReadBody(blocking) {
         if (!followCam.texel) return null;
         const tx = followCam.texel.x;
@@ -17074,6 +18253,19 @@
           // Drop any in-flight sample from a previous target.
           _followPosReader.cancel();
           _followVelReader.cancel();
+          _followBodyReader.cancel();
+        } else if (wgpuRender.active) {
+          // M9: the mirror is only refreshed every mirrorEvery frames on
+          // the WebGPU render path — sample this one body straight from
+          // the compute buffers instead (one frame old, same contract).
+          // Until the first sample lands, _pbuf/_vbuf keep the values the
+          // blocking read at attach time took from the mirror.
+          const idx = ty * TEX_SIZE + tx;
+          if (_followBodyReader.take(idx)) {
+            followCam._pbuf.set(_followBodyReader.out.subarray(0, 4));
+            followCam._vbuf.set(_followBodyReader.out.subarray(4, 8));
+          }
+          _followBodyReader.request(idx);
         } else {
           _followPosReader.poll();
           if (_followPosReader.take())
@@ -18895,6 +20087,11 @@
           `pace      ${d.pace}\n` +
           `engine    int=${params.integrator}  scale=${renderer.getPixelRatio().toFixed(2)}×  post=${postMode.mode}  kick=${kickstart.remaining}\n` +
           `readback  ${wgpuSim.active ? "mirror" : _followPosReader.failed ? "blocking (pbo fallback)" : "pbo"}  fps=${fpsEl.textContent}\n` +
+          `render    ${
+            wgpuRender.active
+              ? `wgpu  enc=${wgpuRender.encoding}  canvas=${wgpuRender.canvas.width}×${wgpuRender.canvas.height}  submit=${_fmtMs(wgpuRender.timing.submitMs)}  import=${_fmtMs(wgpuRender.timing.importMs)}  compose=${_fmtMs(wgpuRender.timing.composeMs)}  mirror=1/${wgpuRender.mirrorEvery}`
+              : `webgl${wgpuRender.failed ? "  (wgpu FAILED: " + wgpuRender.failed + ")" : wgpuRender.wanted ? "  (wgpu pending)" : ""}`
+          }\n` +
           `state     ${d.state}  t=${_fmtSecs(d.stateTimer)}${d.wakeT > 0 ? `  wake=${_fmtSecs(d.wakeT)}` : ""}\n` +
           `dwell     ${_fmtSecs(dwellLeft)} left / ${_fmtSecs(d.dwellDuration)}\n` +
           (txLeft != null ? `tx-deadln ${_fmtSecs(txLeft)} left\n` : "") +
@@ -18927,6 +20124,7 @@
       function showToast(accent, body) {
         const t = $("#toast");
         if (!t) return;
+        if (freezeRun) return; // harness captures: no toasts over the frame
         t.innerHTML = `<span class="accent">${accent}</span>${body}`;
         t.classList.add("show");
         clearTimeout(_toastTimer);
@@ -21446,6 +22644,7 @@
       // synchronously so the shot starts on the body, not on zeros.
       const _sfPosReader = new TexelReader("pos", 1, 1);
       const _sfVelReader = new TexelReader("vel", 1, 1);
+      const _sfBodyReader = new WgpuBodyReader(); // WebGPU render path (M9)
       let _sfReaderIdx = -1;
       function readBodyState(idx) {
         const xi = idx % TEX_SIZE;
@@ -21454,16 +22653,27 @@
           _sfReaderIdx = idx;
           _sfPosReader.cancel();
           _sfVelReader.cancel();
+          _sfBodyReader.cancel();
           readPosTexels(xi, yi, 1, 1, _sfBufPos);
           readVelTexels(xi, yi, 1, 1, _sfBufVel);
+        } else if (wgpuRender.active) {
+          // Straight from the compute buffers (see followCamReadBody).
+          if (_sfBodyReader.take(idx)) {
+            _sfBufPos.set(_sfBodyReader.out.subarray(0, 4));
+            _sfBufVel.set(_sfBodyReader.out.subarray(4, 8));
+          }
         } else {
           _sfPosReader.poll();
           if (_sfPosReader.take()) _sfBufPos.set(_sfPosReader.out);
           _sfVelReader.poll();
           if (_sfVelReader.take()) _sfBufVel.set(_sfVelReader.out);
         }
-        _sfPosReader.request(xi, yi);
-        _sfVelReader.request(xi, yi);
+        if (wgpuRender.active) {
+          _sfBodyReader.request(idx);
+        } else {
+          _sfPosReader.request(xi, yi);
+          _sfVelReader.request(xi, yi);
+        }
         return {
           pos: new THREE.Vector3(_sfBufPos[0], _sfBufPos[1], _sfBufPos[2]),
           vel: new THREE.Vector3(_sfBufVel[0], _sfBufVel[1], _sfBufVel[2]),
@@ -22206,6 +23416,10 @@
         camera.updateProjectionMatrix();
         if (lensPass?.uniforms?.uAspect)
           lensPass.uniforms.uAspect.value = W / H;
+        // M9: re-render the WebGPU point pass at the new drawing-buffer
+        // size so the composer.render() that follows imports a matching
+        // canvas (same task → the import sees this submit).
+        if (wgpuRender.active) wgpuRenderFrame();
       }
       function trailsActive() {
         return (
@@ -23919,9 +25133,14 @@
             } else {
               // F: pick nearest body to current look-at. If already following,
               // pressing F again picks the next-nearest.
-              const pick = pickBodyNearTarget();
-              if (pick) followCamAttach(pick);
-              else showToast("Follow", "nothing in view");
+              const doPick = () => {
+                const pick = pickBodyNearTarget();
+                if (pick) followCamAttach(pick);
+                else showToast("Follow", "nothing in view");
+              };
+              // M9: fresh mirror first on the WebGPU render path.
+              if (wgpuRender.active) wgpuForceMirror().then(doPick);
+              else doPick();
             }
             break;
           case "o":
@@ -24003,6 +25222,8 @@
       let framesAccum = 0,
         fpsAccum = 0;
       let _lastFps = 0;
+      let _perfJsonTick = 0;
+      let _loopFrames = 0;
       // Machine-readable perf snapshot for the headless harness
       // (BARNES_HUT_PLAN.md §7b gates).
       if (typeof window !== "undefined") {
@@ -24013,22 +25234,46 @@
           backend: wgpuSim.active ? "webgpu" : "webgl",
           bh: !!bhSim.wanted,
           integrator: params.integrator,
-          readbackStride: currentReadbackStride(),
+          readbackStride: wgpuRender.active
+            ? wgpuRender.mirrorEvery
+            : currentReadbackStride(),
           timing: Object.assign({}, wgpuSim.timing),
           renderScale: renderer.getPixelRatio(),
-          drawingBuffer: renderer.getDrawingBufferSize(new THREE.Vector2()).toArray(),
+          drawingBuffer: renderer
+            .getDrawingBufferSize(new THREE.Vector2())
+            .toArray(),
+          // M9 render path (section 6b)
+          renderPath: wgpuRender.active ? "wgpu" : "webgl",
+          encoding: wgpuRender.active ? wgpuRender.encoding : null,
+          importMs: +wgpuRender.timing.importMs.toFixed(3),
+          submitMs: +wgpuRender.timing.submitMs.toFixed(3),
+          composeMs: +wgpuRender.timing.composeMs.toFixed(3),
+          renderFailed: wgpuRender.failed,
+          renderFrames: wgpuRender.frames,
+          freeze: freezeRun ? freezeRun.state : null,
+          loopFrames: _loopFrames,
+          simTime: +simTime.toFixed(4),
+          kickRemaining: kickstart.remaining,
+          paused: !!params.paused,
+          // Film clock (s) while a movie plays — tools/film-strip.mjs
+          // screenshots a real-time run at chosen film timestamps.
+          film: movie.active ? Math.round(movie.elapsed * 100) / 100 : null,
         });
       }
 
       function loop() {
         requestAnimationFrame(loop);
+        _loopFrames++;
         const now = performance.now();
         const realDt = (now - lastTime) / 1000;
         lastTime = now;
 
+        // ?freeze harness: holds the pre-roll until the backend settles,
+        // then runs its substeps in one go and leaves the sim paused.
+        if (freezeRun) freezeTick();
         // Amortized scene pre-roll (see kickstartSim). Runs during the
         // intro too, so the porthole shows a formed scene.
-        kickstartTick();
+        if (!freezeRun || freezeRun.state === "done") kickstartTick();
 
         // Intro short-circuit: skip the sim's physics + post pipeline.
         // From LEAN_IN onward we render the sim's scene (no post) into
@@ -24036,6 +25281,8 @@
         // cosmos. During THROUGH the porthole texture also fades in over
         // the whole canvas so the handoff to the sim composer is clean.
         if (intro.active) {
+          // The porthole renders `scene` with its own camera: WebGL points.
+          wgpuRenderSyncVisibility(false);
           tickIntro(realDt);
           // Advance the sim starfield + body shader uniforms a touch so
           // the porthole isn't perfectly static when the user reaches it.
@@ -24139,7 +25386,9 @@
         pointMat.uniforms.uTime.value = simTime;
         if (starfieldMat) starfieldMat.uniforms.uTime.value = simTime;
         // Grain is frozen in token previews so the still reproduces.
-        vigGrainPass.uniforms.uTime.value = TOKEN.preview ? 0.0 : now * 0.001;
+        // (?freeze captures reproduce the same way.)
+        vigGrainPass.uniforms.uTime.value =
+          TOKEN.preview || freezeRun ? 0.0 : now * 0.001;
         // Lean tail pass tone-maps itself; transitions poke exposure on
         // the renderer directly, so mirror it every frame.
         leanPass.uniforms.toneMappingExposure.value =
@@ -24179,7 +25428,14 @@
         controls.update();
         applyDensityPerfFrameClamp();
         syncPointViewScale();
+        // M9: draw the bodies on the WebGPU side straight from the compute
+        // buffers and hand the offscreen canvas to the composite quad; the
+        // WebGL points stay hidden while that path is live (section 6b).
+        wgpuRenderSyncVisibility(wgpuRender.active);
+        if (wgpuRender.active) wgpuRenderFrame();
+        wgpuRender._renderT0 = performance.now();
         composer.render();
+        wgpuRender.timing.composeMs = performance.now() - wgpuRender._renderT0;
         if (TOKEN.preview && !TOKEN.ready) tokenSignalReady();
         if (TOKEN.active) tokenTick(realDt);
 
@@ -24193,6 +25449,33 @@
             computeStats();
             updateHudStats();
           } catch (e) {}
+        }
+        // Machine-readable snapshot for the headless harness. On a frame
+        // counter, not the clock: under --virtual-time-budget
+        // performance.now() stops advancing inside page tasks.
+        if (++_perfJsonTick >= 10) {
+          _perfJsonTick = 0;
+          writePerfJson();
+        }
+      }
+      // A hidden <pre id="perf-json"> holding __perfSnapshot() as JSON so
+      // a headless --dump-dom run can read it (also written when ?freeze
+      // completes).
+      function writePerfJson() {
+        try {
+          let pre = document.getElementById("perf-json");
+          if (!pre) {
+            pre = document.createElement("pre");
+            pre.id = "perf-json";
+            pre.hidden = true;
+            document.body.appendChild(pre);
+          }
+          pre.textContent = JSON.stringify(window.__perfSnapshot());
+        } catch (e) {
+          if (!writePerfJson._warned) {
+            writePerfJson._warned = true;
+            console.warn("[perf-json] write failed:", e);
+          }
         }
       }
 
@@ -24228,7 +25511,15 @@
         updateHudFromScene();
         // Cinematic mode on by default — the app is meant to be watched.
         // (Token previews stay static: no director.)
-        if (!director.enabled && !TOKEN.preview) toggleCinematic();
+        // (?freeze holds the camera still: no director, no drift/orbit.)
+        if (!director.enabled && !TOKEN.preview && !freezeRun) {
+          toggleCinematic();
+        }
+        if (freezeRun) {
+          params.paused = true;
+          params.cameraDrift = false;
+          params.autoOrbit = false;
+        }
         // Fire-and-forget; gated on ?hands=1, silent on failure.
         initHandTracker();
         // Stargazer intro — only on first visit unless ?intro= overrides.

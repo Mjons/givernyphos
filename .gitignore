@@ -2,3 +2,6 @@
 nul
 **/nul
 dist/
+
+# tools/*.py compile cache
+tools/__pycache__/
