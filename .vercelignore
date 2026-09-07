@@ -1,0 +1,9 @@
+docs/
+press/
+screenshots/
+tools/
+vendor/
+dist/
+.claude/
+CHANGELOG.md
+CONTRIBUTING.md

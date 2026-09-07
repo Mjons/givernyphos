@@ -5,3 +5,5 @@ dist/
 
 # tools/*.py compile cache
 tools/__pycache__/
+
+.vercel

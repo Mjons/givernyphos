@@ -1,0 +1,20 @@
+{
+  "cleanUrls": true,
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "www.givernyphos.space" }],
+      "destination": "https://givernyphos.space/:path*",
+      "permanent": true
+    }
+  ],
+  "rewrites": [
+    { "source": "/", "destination": "/site/index.html" },
+    { "source": "/site.css", "destination": "/site/site.css" },
+    { "source": "/site.js", "destination": "/site/site.js" },
+    { "source": "/audio.css", "destination": "/site/audio.css" },
+    { "source": "/audio.js", "destination": "/site/audio.js" },
+    { "source": "/content.js", "destination": "/site/content.js" },
+    { "source": "/assets/:path*", "destination": "/site/assets/:path*" }
+  ]
+}
