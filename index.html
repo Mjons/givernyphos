@@ -14284,6 +14284,7 @@
         installTokenUi();
         await applyTokenRecipe();
         tokenWatchdogInit();
+        if (!TOKEN.preview) tokenTimeFromUrl(); // ?time=3, ?time=-1 (harness, links)
         // Temperament: the director flavour this token lives in. No
         // rotation — the flavour is part of the identity.
         if (FLAVOURS[tokenRecipe.temperament]) {
@@ -14350,8 +14351,10 @@
           stopMovie(true);
         }
         tokenSettle = null;
+        tokenFrameReset();
         applyTokenRecipe().then(() => {
           if (!director.enabled) toggleCinematic();
+          tokenTimeReset(); // Return is "from the seed": 1×, forward
           showToast("Token", "returned");
         });
       }
@@ -14499,7 +14502,17 @@
       // camera mid-settle aborts it and leaves them in control.
       function tokenAfterTour() {
         if (movie.lockedSubject >= 0) tokenStar = movie.lockedSubject;
-        const c = tokenRecipe.share.cam;
+        tokenTimeApply(); // stopMovie restored its pre-tour baseline
+        const c = tokenRecipe.share.cam.slice();
+        // Home is where the system is now, not where it was born.
+        const off = tokenFrameOffset();
+        c[0] += off.x;
+        c[1] += off.y;
+        c[2] += off.z;
+        c[3] += off.x;
+        c[4] += off.y;
+        c[5] += off.z;
+        if (tokenFrame.last) tokenFrame.last.copy(velVar.material.uniforms.uCom.value);
         const dist = camera.position.distanceTo(controls.target);
         const fwd = new THREE.Vector3();
         camera.getWorldDirection(fwd);
@@ -14766,8 +14779,10 @@
         }
         tokenSettle = null;
         setDensity(key, { skipConfirm: true, quiet: true });
+        tokenFrameReset();
         applyTokenRecipe().then(() => {
           if (!director.enabled) toggleCinematic();
+          tokenTimeApply(); // the rebuild took the scene's speed
         });
       }
       if (typeof window !== "undefined") {
@@ -14779,6 +14794,138 @@
           scale: renderer.getPixelRatio(),
           post: postMode.mode,
         });
+      }
+
+      // ---- Time: the holder's speed and direction ----------------------
+      // ½× · 1× · 2× · 3× forward, or rewind at 1×. Speed is a timestep
+      // multiplier, so it is capped where gravity stops being gravity
+      // (the Rewind film's 6× ejected a merger's nuclei); reversal is
+      // honest but not exact, and drifts faster the faster it runs, so it
+      // only runs at 1×. Survives the tour (the movie restores its
+      // baseline, then tokenAfterTour re-applies this); Return resets it.
+      const TOKEN_TIME_STEPS = [0.5, 1, 2, 3];
+      const tokenTime = { speed: 1, reverse: false };
+      function tokenTimeLabel(long) {
+        if (tokenTime.reverse)
+          return long ? "rewinding · it never quite comes back" : "◀ Rewind";
+        const s = tokenTime.speed === 0.5 ? "½" : String(tokenTime.speed);
+        return (long ? "time ×" : "Time ×") + s;
+      }
+      function tokenTimeReflect() {
+        const b = document.querySelector('#token-bar [data-id="time"]');
+        if (!b) return;
+        const label = tokenTimeLabel(false);
+        if (b.textContent !== label) b.textContent = label;
+        b.classList.toggle("on", tokenTime.reverse || tokenTime.speed !== 1);
+      }
+      function tokenTimeApply() {
+        params.speed = tokenTime.speed;
+        params.reverse = tokenTime.reverse;
+        if (typeof updateHudFromScene === "function") updateHudFromScene();
+        tokenTimeReflect();
+      }
+      function tokenTimeSet(speed, reverse, quiet) {
+        tokenTime.reverse = !!reverse;
+        tokenTime.speed = tokenTime.reverse
+          ? 1
+          : TOKEN_TIME_STEPS.reduce((best, s) =>
+              Math.abs(s - speed) < Math.abs(best - speed) ? s : best,
+            );
+        tokenTimeApply();
+        if (!quiet)
+          tokenNote = {
+            text: tokenTimeLabel(true),
+            until: performance.now() + 2200,
+          };
+      }
+      // The bar button cycles ½ → 1 → 2 → 3 → rewind → ½ …
+      function tokenTimeCycle() {
+        if (tokenTime.reverse) return tokenTimeSet(0.5, false);
+        const i = TOKEN_TIME_STEPS.indexOf(tokenTime.speed);
+        if (i >= TOKEN_TIME_STEPS.length - 1) return tokenTimeSet(1, true);
+        tokenTimeSet(TOKEN_TIME_STEPS[i + 1], false);
+      }
+      // [ and ] step the speed; \ (or t) flips the direction.
+      function tokenTimeStep(dir) {
+        if (tokenTime.reverse) return tokenTimeSet(1, dir > 0 ? false : true);
+        const i = TOKEN_TIME_STEPS.indexOf(tokenTime.speed);
+        const j = Math.max(0, Math.min(TOKEN_TIME_STEPS.length - 1, i + dir));
+        tokenTimeSet(TOKEN_TIME_STEPS[j], false);
+      }
+      function tokenTimeReset() {
+        tokenTimeSet(1, false, true);
+      }
+      // ?time=3 / ?time=-1 — remembered now, applied when the tour hands
+      // over (the tour is the authored film and plays at its own tempo).
+      function tokenTimeFromUrl() {
+        try {
+          const v = parseFloat(new URL(location.href).searchParams.get("time"));
+          if (!isFinite(v) || v === 0) return;
+          tokenTime.reverse = v < 0;
+          tokenTime.speed = tokenTime.reverse
+            ? 1
+            : TOKEN_TIME_STEPS.reduce((b, s) =>
+                Math.abs(s - Math.abs(v)) < Math.abs(b - Math.abs(v)) ? s : b,
+              );
+        } catch (_) {}
+      }
+
+      // ---- Keep the system in frame ---------------------------------
+      // Galaxies drift: a whirlpool's companion carries momentum, a
+      // merger's remnant wanders, and at 3× time it all happens sooner.
+      // The director orbits a fixed pivot, so after a minute or two a
+      // token could be staring at empty sky (seen at 1× on #63). The
+      // barycentre is sampled on the spin term's slow cadence; while the
+      // director owns the camera the whole rig is translated with it, and
+      // the post-tour settle aims at the system's displaced home.
+      const tokenFrame = {
+        com0: null, // barycentre when the piece first settled (reference)
+        last: null, // last barycentre the rig was moved to
+        v: new THREE.Vector3(),
+      };
+      function tokenFrameReset() {
+        tokenFrame.com0 = null;
+        tokenFrame.last = null;
+      }
+      function tokenFrameOffset() {
+        // The system's displacement since the piece settled.
+        const com = velVar.material.uniforms.uCom.value;
+        if (!tokenFrame.com0) return tokenFrame.v.set(0, 0, 0);
+        return tokenFrame.v.copy(com).sub(tokenFrame.com0);
+      }
+      function tokenFrameTick() {
+        if (TOKEN.preview || rebuildingPipeline) return;
+        if (kickstart.remaining > 0) return; // still growing in
+        maybeUpdateBarycenter(true);
+        const com = velVar.material.uniforms.uCom.value;
+        if (!tokenFrame.com0) {
+          tokenFrame.com0 = com.clone();
+          tokenFrame.last = com.clone();
+          return;
+        }
+        // Only translate the rig when the director (or an idle holder)
+        // owns the camera; the tour, a follow and the settle aim
+        // themselves. A holder who is dragging keeps their pivot.
+        const owns =
+          !movie.active &&
+          !followCamActive() &&
+          !tokenSettle &&
+          (director.enabled || performance.now() - lastUserInputTime > 4000);
+        if (!owns) {
+          tokenFrame.last.copy(com);
+          return;
+        }
+        const dx = com.x - tokenFrame.last.x;
+        const dy = com.y - tokenFrame.last.y;
+        const dz = com.z - tokenFrame.last.z;
+        if (dx * dx + dy * dy + dz * dz < 1e-6) return;
+        camera.position.x += dx;
+        camera.position.y += dy;
+        camera.position.z += dz;
+        controls.target.x += dx;
+        controls.target.y += dy;
+        controls.target.z += dz;
+        tokenFrame.last.copy(com);
       }
 
       // Hint copy differs for touch (pinch / tap) — decided once.
@@ -14808,6 +14955,7 @@
         if (TOKEN.preview) return;
         tokenWatchdogTick(realDt);
         tokenGalleryTick();
+        tokenFrameTick();
         tokenTickSettle(realDt);
         tokenMomentsTick(realDt);
         _tokenUiAccum += realDt;
@@ -14830,6 +14978,14 @@
               : "click anywhere to skip the tour";
           else if (tokenMoments.active)
             text = "a moment · " + tokenMoments.active.label;
+          else if (tokenTime.reverse)
+            text = touch
+              ? "rewinding · it never quite comes back · Time button to go forward"
+              : "rewinding · it never quite comes back · \\ goes forward again";
+          else if (tokenTime.speed !== 1)
+            text = touch
+              ? tokenTimeLabel(true) + " · Time button cycles the speed"
+              : tokenTimeLabel(true) + " · [ ] change · \\ rewinds";
           else if (followCamActive())
             text = touch
               ? "following · pinch to change distance · Release lets go"
@@ -14853,6 +15009,7 @@
             const txt = followCamActive() ? "Release" : "Follow";
             if (fol.textContent !== txt) fol.textContent = txt;
           }
+          tokenTimeReflect();
         }
       }
       // Deterministic still (INTERACTIVE_NFT.md §5.4): director off, no
@@ -14972,6 +15129,17 @@
             markUserActivity();
             if (e.key === "Escape") return; // the main handler stops films on Esc
             tokenSkipTour();
+            // Time keys are the holder's, capped and labelled; keep them
+            // from the main handler's uncapped speed / reverse toggles.
+            if (e.key === "]" || e.key === "[") {
+              tokenTimeStep(e.key === "]" ? 1 : -1);
+              e.stopPropagation();
+              e.preventDefault();
+            } else if (e.key === "\\" || e.key === "t" || e.key === "T") {
+              tokenTimeSet(tokenTime.speed, !tokenTime.reverse);
+              e.stopPropagation();
+              e.preventDefault();
+            }
           },
           { capture: true },
         );
@@ -15058,6 +15226,12 @@
             showToast("Moment", "a nudge to every body");
           },
           "moment",
+        );
+        mk(
+          "Time ×1",
+          "Speed up, slow down or rewind — [ ] step the speed, \\ flips direction",
+          tokenTimeCycle,
+          "time",
         );
         mk(
           "Return",
@@ -15360,8 +15534,10 @@
       // entirely when the force term is zero.
       let _comFrameCounter = 0;
       let _comReader = null;
-      function maybeUpdateBarycenter() {
-        if (Math.abs(params.spin) < 1e-5) return;
+      function maybeUpdateBarycenter(force) {
+        // `force`: token mode keeps the system in frame from this value
+        // even when the spin term (its original consumer) is zero.
+        if (!force && Math.abs(params.spin) < 1e-5) return;
         let data;
         if (
           wgpuSim.active &&

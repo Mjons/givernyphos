@@ -287,6 +287,26 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   profile boots at the stored verdict, and one step followed by 50 s of
   the director frames the token normally. `tools/film-strip.mjs --hold`
   keeps a run alive after the film ends and writes an end frame.
+- **Time, in the holder's hands** (token bar "Time"): ½× · 1× · 2× · 3×
+  forward or rewind at 1×, cycled by the button, stepped with `[` `]`,
+  flipped with `\` (or `t`); the hint line names the state ("time ×2",
+  "rewinding · it never quite comes back"). Capped at 3× because speed
+  is a timestep multiplier and the Rewind film's 6× ejected a merger's
+  nuclei; reversal runs at 1× only because it drifts faster the faster
+  it runs. The tour keeps its own tempo (the movie restores its baseline
+  and the handover re-applies the holder's choice), a tier step-down
+  re-applies it, Return resets it. `?time=3` / `?time=-1` for links and
+  the harness. The token-mode keys are captured before the main
+  handler's uncapped speed and reverse toggles.
+- **Keep the system in frame** (`tokenFrameTick`): galaxies drift — a
+  whirlpool's companion carries momentum, a remnant wanders — and the
+  director orbited a fixed pivot, so after about a minute at 1× (sooner
+  at 3×) token #63 was staring at empty sky. The barycentre is now
+  sampled on the spin term's cadence in token mode (`maybeUpdateBarycenter(
+  force)`); while the director or an idle holder owns the camera the
+  whole rig translates with it, and the post-tour settle aims at the
+  system's displaced home. Verified on #63 for 110 s at 1× and 3×: the
+  disc stays framed.
 - **Collection viewer** — `collection.html`, one self-contained page
   (3.4 MB, JPEG thumbnails inlined) built by `tools/build-collection.py`
   from the identity table, the generated metadata and the previews:
