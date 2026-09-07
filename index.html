@@ -1557,6 +1557,9 @@
             }
           }
           if (q.get("preview") === "1") t.preview = true;
+          // ?gallery=1 — a wall / TV: no bar, no HUD, no hint; the tour
+          // replays every few minutes (launch board p1-gallery).
+          t.gallery = q.get("gallery") === "1";
           t.active = !!t.hash;
         } catch (_) {}
         return t;
@@ -14479,6 +14482,7 @@
       function tokenStartTour() {
         if (!tokenRecipe) return;
         FILMS["token-tour"] = buildTokenTour(tokenRecipe);
+        tokenGallery.lastTourAt = performance.now();
         startMovie("token-tour");
         tokenSettle = null;
         movie.onEnd = tokenAfterTour;
@@ -14777,11 +14781,33 @@
         });
       }
 
+      // Hint copy differs for touch (pinch / tap) — decided once.
+      const TOKEN_COARSE_POINTER = (() => {
+        try {
+          return !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        } catch (_) {
+          return false;
+        }
+      })();
+      // Gallery: replay the tour every TOKEN_GALLERY_EVERY seconds once
+      // the piece has been left alone for a while.
+      const TOKEN_GALLERY_EVERY = 240;
+      const tokenGallery = { lastTourAt: 0 };
+      function tokenGalleryTick() {
+        if (!TOKEN.gallery || tokenTourActive() || movie.active) return;
+        const now = performance.now();
+        const idle = (now - lastUserInputTime) / 1000;
+        if (now - tokenGallery.lastTourAt < TOKEN_GALLERY_EVERY * 1000) return;
+        if (idle < 30) return;
+        tokenStartTour();
+      }
+
       // Per-frame token chrome: settle, moments, idle fade, hint, labels.
       let _tokenUiAccum = 0;
       function tokenTick(realDt) {
         if (TOKEN.preview) return;
         tokenWatchdogTick(realDt);
+        tokenGalleryTick();
         tokenTickSettle(realDt);
         tokenMomentsTick(realDt);
         _tokenUiAccum += realDt;
@@ -14795,17 +14821,27 @@
         const hint = document.querySelector("#token-hint");
         if (hint) {
           let text;
+          const touch = TOKEN_COARSE_POINTER;
           if (tokenNote && performance.now() < tokenNote.until)
             text = tokenNote.text;
-          else if (touring) text = "click anywhere to skip the tour";
+          else if (touring)
+            text = touch
+              ? "tap anywhere to skip the tour"
+              : "click anywhere to skip the tour";
           else if (tokenMoments.active)
             text = "a moment · " + tokenMoments.active.label;
           else if (followCamActive())
-            text = "following · scroll to change distance · Esc releases";
+            text = touch
+              ? "following · pinch to change distance · Release lets go"
+              : "following · scroll to change distance · Esc releases";
           else if (director.enabled)
-            text =
-              "watching · drag or scroll to take the camera · R returns home";
-          else text = "drag to orbit · scroll to zoom · click a star to follow";
+            text = touch
+              ? "watching · drag or pinch to take the camera · Return brings it home"
+              : "watching · drag or scroll to take the camera · R returns home";
+          else
+            text = touch
+              ? "drag to orbit · pinch to zoom · tap a star to follow"
+              : "drag to orbit · scroll to zoom · click a star to follow";
           if (hint.textContent !== text) hint.textContent = text;
         }
         const bar = document.querySelector("#token-bar");
@@ -14891,12 +14927,33 @@
           body.token-mode.preview #hud, body.token-mode.preview #token-bar,
           body.token-mode.preview #token-hint, body.token-mode.preview #toast,
           body.token-mode.preview #fps-display { display: none !important; }
+          /* Gallery: nothing but the piece. */
+          body.token-mode.gallery #hud, body.token-mode.gallery #token-bar,
+          body.token-mode.gallery #token-hint, body.token-mode.gallery #toast,
+          body.token-mode.gallery #token-features,
+          body.token-mode.gallery #fps-display { display: none !important; }
+          /* Phones and tablets (launch board p1-mobile): a wrapping,
+             touch-sized bar across the bottom, the hint above it, a title
+             card that wraps in portrait, a smaller HUD. */
+          @media (max-width: 640px), (pointer: coarse) {
+            #token-bar { left: 10px; right: 10px; bottom: 10px; flex-wrap: wrap;
+              justify-content: center; gap: 6px; }
+            #token-bar button { padding: 11px 13px; font-size: 12px; min-height: 40px; }
+            #token-bar .sep { display: none; }
+            #token-hint { bottom: 104px; font-size: 10px; letter-spacing: .08em;
+              white-space: normal; text-align: center; max-width: 88vw; line-height: 1.5; }
+            #token-features { left: 10px; right: 10px; bottom: 108px; min-width: 0; }
+            body.token-mode #film-title { font-size: 22px; letter-spacing: .2em;
+              white-space: normal; max-width: 86vw; line-height: 1.3; }
+            body.token-mode #hud { font-size: 10px; }
+          }
         `;
         document.head.appendChild(style);
         if (TOKEN.preview) {
           document.body.classList.add("preview");
           return;
         }
+        if (TOKEN.gallery) document.body.classList.add("gallery");
         // Any input skips the tour; every input also counts as activity for
         // the idle fade (mousemove/wheel/drag already do via markUserActivity).
         document.addEventListener(

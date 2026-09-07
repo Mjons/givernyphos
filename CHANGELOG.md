@@ -265,6 +265,18 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   profile boots at the stored verdict, and one step followed by 50 s of
   the director frames the token normally. `tools/film-strip.mjs --hold`
   keeps a run alive after the film ends and writes an end frame.
+- **Token mode on phones, and a gallery mode** (launch board p1-mobile,
+  p1-gallery). Under `(max-width: 640px)` or a coarse pointer the token
+  bar spans the bottom and wraps into touch-sized rows (min 40 px), the
+  hint sits above it and wraps, the title card wraps at 22 px in
+  portrait, the HUD shrinks; the hint copy says pinch / tap on touch
+  devices. Pinch and one-finger orbit are OrbitControls' own touch
+  handling (unchanged). `?gallery=1` hides the bar, HUD, hint and
+  toasts and replays the tour every 4 minutes once the piece has been
+  left alone for 30 s (a wall or a TV). Verified headless at 390×844:
+  bar 86 px in two rows after the tour, title wrapped, no errors;
+  gallery at 1600×900 with nothing but the piece. Real iOS Safari and
+  Android Chrome remain the board's device pass.
 - **Look fixes from the 1600×900 preview pass** (the 100 previews at
   full size showed what the 960×600 gate sheet hid):
   - _Bloom box._ Every strong-source scene (Event Horizon tokens, the
