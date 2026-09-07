@@ -35,6 +35,9 @@ const OUT = arg("out", "C:\\Users\\Public\\film\\strip");
 const MAX_S = +arg("max", 320); // give up after this many real seconds
 const VIEWPORT = arg("viewport", "");
 const POLL_MS = +arg("poll", 150);
+// --hold: keep running until --max even after the film ends (token pages,
+// watchdog runs); writes <out>-end.png on exit.
+const HOLD = process.argv.includes("--hold");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.error("[film-strip]", ...a);
@@ -150,11 +153,15 @@ function fmtConsole(p) {
         k++;
         continue;
       }
-    } else if (started) {
+    } else if (started && !HOLD) {
       // Film ended before the remaining stamps.
       break;
     }
     await sleep(POLL_MS);
+  }
+  if (HOLD) {
+    const r = await cdp.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(`${OUT}-end.png`, Buffer.from(r.data, "base64"));
   }
   writeFileSync(`${OUT}.console.txt`, consoleLines.join("\n") + "\n");
   const errors = consoleLines.filter((l) => /^exception:|^error:|Uncaught|TypeError|ReferenceError/.test(l));

@@ -197,6 +197,25 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   witnessed, frozen and circled with a roll at closest approach, rewound
   in mono until the discs part, replayed from inside on the follow-cam,
   then a jump to the remnant in 6× time-lapse. `?film=rewind`.
+- **Token-mode device watchdog** (launch board p2-watchdog;
+  `tokenWatchdog` in §13c). Token mode ships at the tier
+  `tokenDeviceTier()` guesses; the density watchdog only guarded the
+  experimental tiers. The new one samples a rolling 5 s window after a
+  3 s warm-up (not while hidden, mid-transition, rebuilding or
+  pre-rolling) and, under 30 fps, pulls levers in order of visual cost,
+  re-measuring after each: render scale to 1×, the lean post chain,
+  render scale 0.75×, then one tier down (lush → dense → standard →
+  lite — the tour is cut, the universe regrown from the same seed, the
+  director takes over; the hint line says "lighter for this device").
+  The verdict is stored per device (`phos.token.perf`: tier, scale,
+  lean) and applied on the next open; `?objects=` disables it,
+  `?tokenwd=test` forces one step, `?tokenwd=testall` the whole ladder,
+  `__tokenPerf()` reports. `setDensity(key, { quiet: true })` skips the
+  toasts. Verified headless: the forced ladder runs lean → 0.75× → dense
+  → standard → lite → floor with no errors, a second open on the same
+  profile boots at the stored verdict, and one step followed by 50 s of
+  the director frames the token normally. `tools/film-strip.mjs --hold`
+  keeps a run alive after the film ends and writes an end frame.
 - **Determinism audit** (INTERACTIVE_NFT.md §5.6): two renders of the
   same token preview are bit-identical; no unseeded random draws on
   the scene-build path in token mode. `vendor/three/LICENSE` added.
