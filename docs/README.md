@@ -24,6 +24,7 @@ Plans and audits for things being built or considered next.
 - [OPTIMIZATION_PLAN.md](active/OPTIMIZATION_PLAN.md) — 2026-09 full-path audit (sync stalls, fill rate, kernel, BH close-out, integrator) + phased plan; Petrova v2 scope
 - [PERFORMANCE_NEXT.md](active/PERFORMANCE_NEXT.md) — 2026-09-06: the tricks not yet tried for 262k–1M bodies (group traversal with subgroups, quadrupoles, block time-steps, TreePM, splat rendering, a fidelity governor), ranked by expected gain
 - [RECOVERY_PLAN.md](active/RECOVERY_PLAN.md) — what is immutable after the mint (recipe v1, salt, plan, bundle hash) versus what may still be fixed and re-pinned; the weekly health check
+- [SITE_PLAN.md](active/SITE_PLAN.md) — the collection site (`site/`): contract for the shell, the audio layer and the content, built by three agents in parallel
 - [SHOW_DARK_MATTER_AUDIT.md](active/SHOW_DARK_MATTER_AUDIT.md) — diagnostic on the halo toggle
 
 Build artefacts: `tools/build-token.mjs` produces the network-free token
