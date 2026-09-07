@@ -975,7 +975,11 @@
           $("d-img").hidden = true;
           var fr = document.createElement("iframe");
           fr.src = liveUrl(t, "intro=0");
-          fr.allow = "fullscreen";
+          // "fullscreen *", not "fullscreen": a file:// frame has an opaque
+          // origin that never matches the implicit 'src' allowlist, so the
+          // plain form (even with allowfullscreen) disables the piece's own
+          // fullscreen button. Measured in Chrome 152 on file:// frames.
+          fr.allow = "fullscreen *";
           fr.setAttribute("allowfullscreen", "");
           fr.title = t.name;
           stage.appendChild(fr);

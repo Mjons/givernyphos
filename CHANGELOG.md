@@ -10,6 +10,28 @@ that bit us once and shouldn't bite us again.
 Each entry: the bug, the failure mode, the fix, and the rule. Read
 this before touching the relevant area.
 
+### A file:// iframe needs `allow="fullscreen *"`, not `allow="fullscreen"`
+
+**Bug:** In the collection viewer's live drawer the piece's own ⛶
+button did nothing, while the viewer's own ⛶ worked.
+
+**Failure mode:** The frame carried `allow="fullscreen"` plus the legacy
+`allowfullscreen` attribute. A file:// document has an opaque origin,
+which never matches the permission policy's implicit `'src'` allowlist,
+so inside the frame `document.fullscreenEnabled` was **false** — and
+the legacy attribute does not rescue it once `allow` names the feature.
+Measured on Chrome 152 with six frames: no attribute → true; `allow=
+"fullscreen"` → false; `"fullscreen *"` → true; `allowfullscreen` alone
+→ true; both plain → false; `"fullscreen *"` + legacy → true.
+
+**Fix:** `fr.allow = "fullscreen *"` (keep `allowfullscreen` for other
+engines) in `tools/collection-template.html`.
+
+**Rule:** For frames that may be file:// or otherwise opaque-origin,
+grant delegated features with an explicit `*`, never the bare feature
+name. The rule holds for the future site's token page too if it ever
+frames the piece from a different origin.
+
 ### Bloom turns an unbounded HDR source into a hard-edged box
 
 **Bug:** Every strong-source scene (Event Horizon, dense merger cores)
