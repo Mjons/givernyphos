@@ -372,6 +372,21 @@
         border: 0;
         object-fit: cover;
       }
+      .drawer .stage:fullscreen,
+      .drawer .stage:-webkit-full-screen {
+        aspect-ratio: auto;
+        width: 100vw;
+        height: 100vh;
+      }
+      .drawer .stage:fullscreen .nav,
+      .drawer .stage:fullscreen .live-note {
+        opacity: 0;
+        transition: opacity 400ms ease;
+      }
+      .drawer .stage:fullscreen:hover .nav,
+      .drawer .stage:fullscreen:hover .live-note {
+        opacity: 1;
+      }
       .drawer .stage .live-note {
         position: absolute;
         left: 12px;
@@ -619,6 +634,7 @@
         <div class="nav">
           <button id="d-prev" title="Previous (←)">← prev</button>
           <button id="d-live" title="Load the live piece here">▶ live</button>
+          <button id="d-fs" title="Fullscreen (F)">⛶</button>
           <button id="d-next" title="Next (→)">next →</button>
           <button id="d-close" title="Close (Esc)">✕</button>
         </div>
@@ -960,6 +976,7 @@
           var fr = document.createElement("iframe");
           fr.src = liveUrl(t, "intro=0");
           fr.allow = "fullscreen";
+          fr.setAttribute("allowfullscreen", "");
           fr.title = t.name;
           stage.appendChild(fr);
           var note = document.createElement("div");
@@ -1052,6 +1069,24 @@
           step(1);
         });
         $("d-live").addEventListener("click", toggleLive);
+        function toggleFullscreen() {
+          var stage = $("stage");
+          var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+          if (fsEl) {
+            (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
+            return;
+          }
+          if (!state.live) toggleLive(); // fullscreen means the live piece
+          var req = stage.requestFullscreen || stage.webkitRequestFullscreen;
+          if (!req) return toast("fullscreen not available here");
+          try {
+            var p = req.call(stage);
+            if (p && p.catch) p.catch(function () { toast("fullscreen refused by the browser"); });
+          } catch (e) {
+            toast("fullscreen refused by the browser");
+          }
+        }
+        $("d-fs").addEventListener("click", toggleFullscreen);
         $("a-copy").addEventListener("click", function () {
           var t = byId[state.open];
           if (!t) return;
@@ -1085,6 +1120,7 @@
             if (e.key === "ArrowLeft") step(-1);
             if (e.key === "ArrowRight") step(1);
             if (e.key.toLowerCase() === "l") toggleLive();
+            if (e.key.toLowerCase() === "f") toggleFullscreen();
           }
         });
 

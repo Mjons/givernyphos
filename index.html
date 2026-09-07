@@ -15099,10 +15099,21 @@
         );
         mk("⛶", "Fullscreen", () => {
           const root = document.documentElement;
-          if (document.fullscreenElement) {
-            if (document.exitFullscreen) document.exitFullscreen();
-          } else if (root.requestFullscreen) {
-            root.requestFullscreen();
+          const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+          if (fsEl) {
+            (document.exitFullscreen || document.webkitExitFullscreen || (() => {})).call(document);
+            return;
+          }
+          // Inside an iframe (the collection viewer's live drawer) this
+          // needs the frame's allowfullscreen; a refusal is reported, not
+          // swallowed, so the host page can offer its own button.
+          const req = root.requestFullscreen || root.webkitRequestFullscreen;
+          if (!req) return;
+          try {
+            const p = req.call(root);
+            if (p && p.catch) p.catch((e) => console.warn("[token] fullscreen refused:", e && e.message));
+          } catch (e) {
+            console.warn("[token] fullscreen refused:", e && e.message);
           }
         });
         document.body.appendChild(bar);
