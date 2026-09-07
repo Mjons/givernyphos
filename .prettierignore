@@ -1,0 +1,6 @@
+# Nothing in this repo is prettier-formatted on purpose: index.html and
+# collection.html are hand-laid single-file apps, vendor/ is three.js as
+# shipped, and the docs are hand-wrapped prose. An editor or hook that
+# runs prettier --write turns a two-line change into a 28,000-line diff
+# (it happened, 2026-09-07).
+*

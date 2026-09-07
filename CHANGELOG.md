@@ -198,6 +198,34 @@ invisible until astrophage fell outside the kept K-matrix region.
 
 _(things in flight; not yet shipped)_
 
+- **Phones: the piece starts where the watchdog used to end up, and the
+  site gets out of its way.** A phone (mobile UA, or coarse pointer with
+  touch) now opens the piece at render scale 1× and the lean post chain
+  from the first frame (`isMobileDevice()` in `initialRenderScale` and
+  the post-mode hook; `?scale=` / `?post=full` still override) — the
+  renderer is fill-bound there, and a 2.6× Pixel was pushing 7× the
+  pixels through bloom for the 8–13 s the device watchdog needs to pull
+  its first two levers. The bar's Bodies toggle switches between the
+  device's own pair (`tokenBodiesPair()`: lite 4k / standard 16k on a
+  phone, dense 33k / lush 65k on a desktop) instead of jumping any
+  device to lush; `tokenDeviceTier` ignores a stored tier above standard
+  on a phone, which is what that jump had left behind. The site's frames
+  (content.js) start at `objects=standard&scale=1` with `tokenwd=on`, a
+  new flag that keeps the token watchdog running under a pinned tier;
+  `?objects=` alone still disarms it for the harness. Site, poster mode:
+  the "Open live" row moves into the text column as a 46 px call to
+  action (`.scene-data.in-flow`), the film chapter's link is the plain
+  film page (`index.html?film=rewind` — the embed's `&objects=dense` was
+  coming along, and a pinned tier also switched the watchdog off), the
+  Next cue stacks above the soundtrack pill on phones (they overlapped at
+  412 px) with a non-wrapping label, and both fixed pills drop
+  `backdrop-filter` under `(hover: none)`. `tools/m9-cdp.mjs --mobile`
+  emulates the Pixel (UA, touch, 2.625×, `hover: none` / `pointer:
+  coarse`); verified headless: poster mode, both links, 4k → 16k toggle,
+  and the hero frame at 16k / 1× with the watchdog on. `.prettierignore`
+  (`*`): a `prettier --write` over the repo had turned into a
+  28,850-line diff of vendored three.js twice in one day.
+
 - **M9: WebGPU point rendering + WebGL composite** (BARNES_HUT_PLAN.md
   §7b, work item B; section "6b. WEBGPU RENDER PATH" in index.html).
   With the WebGPU compute backend live, `?render=wgpu` /

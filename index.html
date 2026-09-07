@@ -1603,7 +1603,19 @@
           localStorage.setItem(TOKEN_PERF_KEY, JSON.stringify(p));
         } catch (_) {}
       }
+      let _mobileDevice = null;
+      function isMobileDevice() {
+        if (_mobileDevice !== null) return _mobileDevice;
+        const ua = navigator.userAgent || "";
+        const coarse =
+          !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        _mobileDevice =
+          /Mobi|Android|iPhone|iPad|iPod/i.test(ua) ||
+          (coarse && (navigator.maxTouchPoints || 0) > 1);
+        return _mobileDevice;
+      }
       function tokenDeviceTier() {
+        const mobile = isMobileDevice();
         const stored = loadTokenPerf();
         if (
           stored &&
@@ -1611,14 +1623,16 @@
           DENSITY_LEVELS[stored.tier] &&
           !DENSITY_LEVELS[stored.tier].experimental
         ) {
-          return stored.tier;
+          // A phone never opens above standard, whatever an older verdict
+          // says (the bodies toggle once stored lush on phones).
+          if (
+            !mobile ||
+            DENSITY_ORDER.indexOf(stored.tier) <=
+              DENSITY_ORDER.indexOf("standard")
+          ) {
+            return stored.tier;
+          }
         }
-        const ua = navigator.userAgent || "";
-        const coarse =
-          !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
-        const mobile =
-          /Mobi|Android|iPhone|iPad|iPod/i.test(ua) ||
-          (coarse && (navigator.maxTouchPoints || 0) > 1);
         if (mobile) return "lite";
         return sniffDiscreteGpu() ? "lush" : "standard";
       }
@@ -5855,7 +5869,9 @@
       // Every full-screen pass and every additive sprite scales with its
       // square, so it is the cheapest fps lever on Retina / 4K displays.
       // ?scale=1 (0.5–2) or __setRenderScale(1) at runtime. Default is
-      // unchanged: min(devicePixelRatio, 2).
+      // min(devicePixelRatio, 2); phones start at 1× — they are fill-bound
+      // and a 2.6× Pixel would otherwise push 7× the pixels of 1× through
+      // the post chain before the watchdog's first lever lands.
       function initialRenderScale() {
         try {
           const v = parseFloat(
@@ -5863,6 +5879,7 @@
           );
           if (isFinite(v) && v >= 0.5 && v <= 2) return v;
         } catch (_) {}
+        if (isMobileDevice() && !TOKEN.preview) return 1;
         return Math.min(devicePixelRatio, 2);
       }
       renderer.setPixelRatio(initialRenderScale());
@@ -10187,8 +10204,14 @@
         clearTrails();
         return postMode.mode;
       }
+      // Phones start lean for the same reason they start at 1×; ?post=full
+      // still gets the full chain for comparison.
       try {
-        if (new URL(location.href).searchParams.get("post") === "lean") {
+        const post = new URL(location.href).searchParams.get("post");
+        if (
+          post === "lean" ||
+          (post !== "full" && isMobileDevice() && !TOKEN.preview)
+        ) {
           setPostMode("lean");
         }
       } catch (_) {}
@@ -14675,8 +14698,11 @@
         try {
           u = new URL(location.href);
         } catch (_) {}
-        if (u && u.searchParams.has("objects")) return;
         const wd = u ? u.searchParams.get("tokenwd") : null;
+        // ?objects= pins a tier for testing, so the watchdog stands down —
+        // unless an embed asks for it back (?tokenwd=on: the site's frames
+        // start light and still want the levers on a slow machine).
+        if (u && u.searchParams.has("objects") && wd !== "on") return;
         tokenWatchdog.test = wd === "test" || wd === "testall";
         tokenWatchdog.testAll = wd === "testall";
         if (tokenWatchdog.test) {
@@ -14935,13 +14961,18 @@
         tokenFrame.last.copy(com);
       }
 
-      // ---- Bodies: 33k ↔ 65k, the holder's call ----------------------
+      // ---- Bodies: the device's two tiers, the holder's call ----------
       // The device picks the tier and the watchdog steps it down; this
       // lets the holder choose between the two tiers that read as the
-      // same piece (dense 33k, lush 65k). A tier change regrows the
+      // same piece on their hardware: dense 33k / lush 65k on a desktop,
+      // lite 4k / standard 16k on a phone (fill-bound — 65k on a phone is
+      // a slideshow, INTERACTIVE_NFT.md §8.3). A tier change regrows the
       // universe from its seed (same as Return), so the hint says so.
       // A manual pick is stored and the watchdog stops stepping the tier
       // (its render-scale and lean levers still apply).
+      function tokenBodiesPair() {
+        return isMobileDevice() ? ["lite", "standard"] : ["dense", "lush"];
+      }
       function tokenBodiesLabel() {
         const lvl = DENSITY_LEVELS[currentDensityKey];
         return lvl ? lvl.shortCount : "";
@@ -14951,11 +14982,12 @@
         if (!b) return;
         const l = tokenBodiesLabel();
         if (b.textContent !== l) b.textContent = l;
-        b.classList.toggle("on", currentDensityKey === "lush");
+        b.classList.toggle("on", currentDensityKey === tokenBodiesPair()[1]);
       }
       function tokenBodiesToggle() {
         if (rebuildingPipeline) return;
-        const next = currentDensityKey === "lush" ? "dense" : "lush";
+        const pair = tokenBodiesPair();
+        const next = currentDensityKey === pair[1] ? pair[0] : pair[1];
         const perf = loadTokenPerf() || {};
         perf.tier = next;
         perf.manual = true;
@@ -15283,7 +15315,7 @@
         );
         mk(
           tokenBodiesLabel() || "65k",
-          "Bodies — toggle 33k / 65k (the universe regrows from its seed)",
+          "Bodies — more or fewer for this device (the universe regrows from its seed)",
           tokenBodiesToggle,
           "bodies",
         );

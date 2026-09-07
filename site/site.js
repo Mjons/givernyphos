@@ -132,6 +132,10 @@
       openUrl = "index.html?id=" + id; // the full token page, with its intro
     } else if (q.film) {
       label = "film  " + q.film;
+      // The full film page. The embed's &objects= is the site's tier for
+      // its own frames; on its own the page must pick for the device (and
+      // a forced tier also switches the device watchdog off).
+      openUrl = "index.html?film=" + encodeURIComponent(q.film);
     } else if (q.scene) {
       label = q.scene;
     }
@@ -186,7 +190,10 @@
       sky.appendChild(zone);
       var play = h("div", { class: "play-zone" });
       play.appendChild(
-        h("span", { class: "zone-hint", text: "drag to orbit · wheel to zoom" }),
+        h("span", {
+          class: "zone-hint",
+          text: "drag to orbit · wheel to zoom",
+        }),
       );
       sky.appendChild(play);
     }
@@ -194,7 +201,11 @@
   }
   function renderSceneData(ch) {
     var d = describeScene(ch.scene);
-    var row = h("div", { class: "scene-data" });
+    // In poster mode the row is a call to action and sits in the text
+    // column; over a live frame it is a data line in the corner.
+    var row = h("div", {
+      class: "scene-data" + (posterMode ? " in-flow" : ""),
+    });
     if (posterMode) {
       row.appendChild(h("span", { text: d.label }));
       row.appendChild(
@@ -256,9 +267,11 @@
     );
     if (ch.body && ch.body.length)
       mast.appendChild(paragraphs(ch.body, "body"));
+    var data = renderSceneData(ch);
+    if (posterMode) mast.appendChild(data);
     grid.appendChild(mast);
     sec.appendChild(grid);
-    sec.appendChild(renderSceneData(ch));
+    if (!posterMode) sec.appendChild(data);
     return { el: sec, sky: sky };
   }
 
@@ -273,9 +286,11 @@
     var grid = h("div", { class: "grid" });
     var text = h("div", { class: "text" });
     text.appendChild(titleCard(ch));
+    var data = renderSceneData(ch);
+    if (posterMode) text.appendChild(data);
     grid.appendChild(text);
     sec.appendChild(grid);
-    sec.appendChild(renderSceneData(ch));
+    if (!posterMode) sec.appendChild(data);
     return { el: sec, sky: sky };
   }
 
@@ -645,7 +660,9 @@
     if (cue) return cue;
     cue = h("button", { class: "next-cue", type: "button" });
     cue.appendChild(h("span", { class: "next-label" }));
-    cue.appendChild(h("span", { class: "next-chev", "aria-hidden": "true", text: "↓" }));
+    cue.appendChild(
+      h("span", { class: "next-chev", "aria-hidden": "true", text: "↓" }),
+    );
     cue.addEventListener("click", function () {
       var i = chapters.findIndex(function (c) {
         return c.key === current;

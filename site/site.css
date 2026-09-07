@@ -429,9 +429,18 @@ body.entered .next-cue {
   }
 }
 @media (max-width: 640px) {
+  /* above the soundtrack pill (bottom-left, ~41px tall): side by side
+     the two do not fit in 412px, and the label must not wrap */
   .next-cue {
-    bottom: 14px;
+    bottom: calc(max(18px, env(safe-area-inset-bottom, 0px)) + 56px);
     padding: 12px 16px;
+    max-width: calc(100vw - 32px);
+  }
+  .next-cue .next-label {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 .sky:hover .zone-hint,
@@ -508,6 +517,39 @@ body.entered .next-cue {
 .open-live:hover {
   background: var(--ink);
   color: var(--ground) !important;
+}
+/* poster mode: the row is the way in, so it sits in the text column
+   (under the one line in the hero, under the card in a film chapter),
+   clear of the fixed cue and the pill at the bottom */
+.scene-data.in-flow {
+  position: static;
+  margin-top: 34px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 22px;
+  pointer-events: auto;
+}
+.chapter.seen .card .scene-data.in-flow,
+.masthead .scene-data.in-flow {
+  opacity: 1;
+}
+@media (hover: none) {
+  .scene-data.in-flow .open-live {
+    padding: 15px 24px 14px;
+    font-size: 12.5px;
+    min-height: 46px;
+    line-height: 1;
+  }
+  .scene-data.in-flow > span {
+    font-size: 12px;
+  }
+  /* blur behind a fixed element re-composites the page every scroll
+     frame on phones; a heavier ground reads the same */
+  .next-cue {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgba(7, 9, 15, 0.84);
+  }
 }
 
 /* ---- progress rail ---- */

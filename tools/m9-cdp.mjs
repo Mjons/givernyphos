@@ -57,6 +57,12 @@ const EVAL = arg("eval", ""); // extra js expression, returned as `eval`
 const CONNECT_TIMEOUT = +arg("connect-timeout", 30000);
 const KEEP_OPEN = has("keep-open");
 const VERBOSE = has("verbose");
+// --mobile: a phone as the page sees one — Android UA, touch, a 2.625
+// device scale (Pixel 9) and the (hover: none) / (pointer: coarse) media
+// features the site's poster mode and the piece's device tier key on.
+const MOBILE = has("mobile");
+const MOBILE_UA =
+  "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.error("[m9-cdp]", ...a);
@@ -289,13 +295,29 @@ const frameCounterSource = `(function(){
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
 
-  if (VIEWPORT) {
-    const [w, h] = VIEWPORT.toLowerCase().split("x").map(Number);
+  if (VIEWPORT || MOBILE) {
+    const [w, h] = (VIEWPORT || (MOBILE ? "412x915" : "1280x720"))
+      .toLowerCase()
+      .split("x")
+      .map(Number);
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: w,
       height: h,
-      deviceScaleFactor: 1,
-      mobile: false,
+      deviceScaleFactor: MOBILE ? 2.625 : 1,
+      mobile: MOBILE,
+    });
+  }
+  if (MOBILE) {
+    await cdp.send("Emulation.setUserAgentOverride", { userAgent: MOBILE_UA });
+    await cdp.send("Emulation.setTouchEmulationEnabled", {
+      enabled: true,
+      maxTouchPoints: 5,
+    });
+    await cdp.send("Emulation.setEmulatedMedia", {
+      features: [
+        { name: "hover", value: "none" },
+        { name: "pointer", value: "coarse" },
+      ],
     });
   }
   if (SEED_RANDOM !== "") {
