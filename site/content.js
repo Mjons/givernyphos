@@ -226,7 +226,7 @@
         // The frames start light — standard 16k (the tier every preview
         // still was rendered at) at 1× — with the device watchdog kept
         // on; the piece opens at the device's own tier.
-        url: "index.html?id=63&gallery=1&bare=1&intro=0&objects=standard&scale=1&tokenwd=on",
+        url: "index.html?id=63&gallery=1&bare=1&intro=0&objects=mini&scale=1&tokenwd=on",
         poster: "assets/posters/enter.jpg",
       },
     },
@@ -242,7 +242,7 @@
       music: "Slow Weather",
       scene: {
         kind: "live",
-        url: "index.html?film=rewind&bare=1&intro=0&objects=standard&scale=1",
+        url: "index.html?film=rewind&bare=1&intro=0&objects=mini&scale=1",
         poster: "assets/posters/piece.jpg",
       },
     },

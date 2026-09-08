@@ -340,6 +340,11 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   lean levers still apply. Verified headless: 65k → 33k → 65k in under
   five seconds, no errors. The site's two live frames now run at 33k
   (`objects=dense`), the homepage default.
+- **Site backgrounds at 2k on every device.** Both live frames on the
+  site (the hero and the film) open at the mini tier so a desktop
+  without a strong GPU never lags on the homepage; the watchdog stays on
+  in the frames (`tokenwd=on`). The tier gain keeps the sparser sky
+  bright. Verified: the hero mounts at 2k with no errors.
 - **Phones: bodies cycle 1k → 2k → 4k.** Two new tiers below lite —
   micro (32², 1k) and mini (45², 2k) — and on a phone the bodies button
   cycles 4k → 1k → 2k → 4k instead of toggling into 16k, which a phone
