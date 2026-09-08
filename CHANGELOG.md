@@ -345,7 +345,10 @@ exposure`, seeded `scene` events (`seed`, `scenario`, `collision`
   cycles 4k → 1k → 2k → 4k instead of toggling into 16k, which a phone
   cannot run. Desktops keep 33k ↔ 65k. The watchdog's floor on a phone
   is now 1k. Verified with an iPhone user agent: labels 4k, 1k, 2k, 4k
-  and the HUD's 4.1k, 1.0k, 2.0k, 4.1k bodies, no errors.
+  and the HUD's 4.1k, 1.0k, 2.0k, 4.1k bodies, no errors. Phones now
+  open at 2k (mini) on every path — token mode (`tokenDeviceTier`),
+  films and the plain app (`loadInitialDensity`), so the cycle starts
+  in the middle; 4k still stuttered on a Pixel 9.
 - **Site: a "Next" cue.** The chapter rail on the right is easy to
   miss, so a pill sits at the bottom centre once you have entered —
   "Next · Not a rendering" with a bobbing chevron — naming the chapter

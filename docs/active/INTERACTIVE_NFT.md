@@ -337,8 +337,9 @@ the page folds it.
 ### 5.5 Device tiers
 
 The recipe stores the **authored** density (`lush` for most families).
-The page clamps by device: `lite` when the UA is mobile or there is no
-WebGL2 float-render support, `standard` on integrated GPUs, authored
+The page clamps by device: `mini` (2k) when the UA is mobile, `lite`
+when there is no WebGL2 float-render support, `standard` on integrated
+GPUs, authored
 tier otherwise, with the FPS watchdog and the render-scale lever
 (OPTIMIZATION_PLAN.md F7) as the runtime safety net. WebGPU and
 Barnes-Hut are bonuses when present, never required. The HUD says when

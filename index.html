@@ -1565,8 +1565,9 @@
         return t;
       })();
       // Density is a device concern in token mode (never a trait): phones
-      // get lite, a discrete desktop GPU gets lush (the app's sweet spot),
-      // everything else standard. The GPU sniff is a throwaway WebGL
+      // get mini (2k — fill-bound, and 4k still stuttered on a Pixel 9), a
+      // discrete desktop GPU gets lush (the app's sweet spot), everything
+      // else standard. The GPU sniff is a throwaway WebGL
       // context + WEBGL_debug_renderer_info; any failure → standard.
       // Discrete-GPU sniff: a throwaway WebGL context + the unmasked
       // renderer string. Any failure → false. Used by token mode (tier)
@@ -1633,7 +1634,7 @@
             return stored.tier;
           }
         }
-        if (mobile) return "lite";
+        if (mobile) return "mini";
         return sniffDiscreteGpu() ? "lush" : "standard";
       }
 
@@ -1715,7 +1716,8 @@
           const stored = localStorage.getItem("universeSim.density");
           if (stored && DENSITY_LEVELS[stored]) return stored;
         } catch (_) {}
-        return "standard";
+        // Films and the plain app on a phone: the same 2k as token mode.
+        return isMobileDevice() ? "mini" : "standard";
       }
       let currentDensityKey = loadInitialDensity();
       let TEX_SIZE = DENSITY_LEVELS[currentDensityKey].texSize;
